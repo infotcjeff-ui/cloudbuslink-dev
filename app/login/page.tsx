@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/hooks';
 import { isValidPhone } from '@/lib/utils';
 import { initMockData } from '@/lib/mock-data';
+import { initWithSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,7 +22,18 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    initMockData();
+    // 如果有 Supabase 配置，先嘗試同步，否則使用 mock 數據
+    const init = async () => {
+      if (isSupabaseAvailable()) {
+        const synced = await initWithSupabase();
+        if (!synced) {
+          initMockData();
+        }
+      } else {
+        initMockData();
+      }
+    };
+    init();
   }, []);
 
   useEffect(() => {
@@ -34,7 +46,19 @@ export default function LoginPage() {
     e.preventDefault();
     setError('');
 
-    if (!isValidPhone(phone)) {
+    // 先擋空白 (input 已 disabled, 但 submit 仍可能送出空值)
+    if (!phone.trim()) {
+      setError('請輸入手機號碼或帳號');
+      return;
+    }
+    if (!password) {
+      setError('請輸入密碼');
+      return;
+    }
+
+    // 支援 admin 登入 (超級管理員)
+    const isAdminLogin = phone === 'admin';
+    if (!isAdminLogin && !isValidPhone(phone)) {
       setError('請輸入有效的手機號碼 (8位數字)');
       return;
     }
@@ -64,7 +88,13 @@ export default function LoginPage() {
 
   const quickLogin = (p: string) => {
     setPhone(p);
-    setPassword(p === '90000001' ? 'admin123' : 'client123');
+    if (p === 'admin') {
+      setPassword('admin123');
+    } else if (p === '90000001') {
+      setPassword('admin123');
+    } else {
+      setPassword(p === '90000002' ? 'client123' : 'client123');
+    }
   };
 
   return (
@@ -94,17 +124,29 @@ export default function LoginPage() {
           <CardContent className="p-6">
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium">手機號碼</label>
+                <label className="text-sm font-medium">帳號 / 手機號碼</label>
                 <div className="relative">
                   <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
-                    type="tel"
-                    inputMode="numeric"
-                    placeholder="請輸入 8 位手機號碼"
+                    type="text"
+                    inputMode="text"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    placeholder="請輸入 admin 或 8 位手機號碼"
                     className="pl-10"
                     value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                    autoComplete="tel"
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      // 規則: 開頭是 "admin" → 全字串保留 (含英文字);
+                      //        其他輸入 → 只留數字, 最多 20 位。
+                      if (raw.toLowerCase().startsWith('admin')) {
+                        setPhone(raw);
+                      } else {
+                        setPhone(raw.replace(/\D/g, '').slice(0, 20));
+                      }
+                    }}
+                    autoComplete="username"
                   />
                 </div>
               </div>
@@ -182,12 +224,15 @@ export default function LoginPage() {
 
         {/* 示範帳戶 */}
         <div className="mt-6">
-          <p className="text-xs text-center text-muted-foreground mb-2">管理員/校長示範帳戶 (一鍵登入)</p>
+          <p className="text-xs text-center text-muted-foreground mb-2">超級管理員示範帳戶 (一鍵登入)</p>
           <div className="grid grid-cols-2 gap-2">
             <Button
               variant="outline"
               size="sm"
-              onClick={() => quickLogin('90000001')}
+              onClick={() => {
+                setPhone('admin');
+                setPassword('admin123');
+              }}
               className="text-xs h-9"
             >
               系統管理員

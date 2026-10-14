@@ -574,7 +574,7 @@ export function BusFormModal({
             {/* Footer */}
             <div className="px-5 py-3 bg-slate-50/40 border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/40 dark:border-slate-700/80 shrink-0">
               <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
-                <Pill tone="amber" size="sm">
+                <Pill tone="warning" size="sm">
                   <BusIcon width={9} height={9} />
                   {form.plateNumber.trim() || '—'}
                 </Pill>

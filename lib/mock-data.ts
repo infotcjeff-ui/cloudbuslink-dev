@@ -31,8 +31,8 @@ export function initMockData() {
   // ==== Users (登入帳戶) ====
   const users: User[] = [
     {
-      id: 'user-admin-001',
-      phone: '90000001',
+      id: 'user-admin',
+      phone: 'admin',
       password: 'admin123',
       role: 'super_admin',
       name: '系統管理員',

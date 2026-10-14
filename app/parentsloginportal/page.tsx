@@ -39,6 +39,14 @@ export default function ParentsLoginPage() {
     e.preventDefault();
     setError('');
 
+    if (!phone.trim()) {
+      setError('請輸入手機號碼');
+      return;
+    }
+    if (!password) {
+      setError('請輸入密碼');
+      return;
+    }
     if (!isValidPhone(phone)) {
       setError('請輸入有效的手機號碼 (8位數字)');
       return;

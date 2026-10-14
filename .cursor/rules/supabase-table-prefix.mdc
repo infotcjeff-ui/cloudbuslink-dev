@@ -1,34 +1,48 @@
 ---
-description: Supabase table naming convention — every table name MUST be prefixed with `cbl-`
+description: Supabase table naming convention — every table name MUST be prefixed with `cbl_` (CloudBusLink)
 globs: **/*.{ts,tsx,js,jsx,sql,md,mdc}
 alwaysApply: false
 ---
 
 # Supabase Table Naming
 
-All tables in this project's Supabase database **MUST** be prefixed with `cbl-` (cloudbuslink).
+All tables in this project's Supabase database **MUST** be prefixed with `cbl_` (CloudBusLink).
+
+> **Why underscore, not hyphen?** Postgres identifiers cannot contain `-` (it's parsed as an operator).
+> Underscores are valid in both raw SQL and Supabase client `.from()` calls without quoting.
+> The `cbl_` prefix is enforced consistently across migrations, queries, policies, triggers, and views.
 
 ## Rules
 
-- When creating a new table (via SQL migration, dashboard, or Supabase MCP), the table name MUST start with `cbl-`.
-  - ✅ `cbl-organizations`, `cbl-vehicles`, `cbl-routes`, `cbl-drivers`
-  - ❌ `organizations`, `vehicles`, `routes`, `drivers`
-- When querying, inserting, updating, or deleting data, always use the `cbl-` prefix in the table name.
-  - `.from('cbl-organizations')`, `.from('cbl-vehicles')`, etc.
-- When referencing tables in foreign keys, RLS policies, views, functions, triggers, or storage policies, use the `cbl-` prefixed name.
-- Storage buckets, however, are NOT tables and do NOT need the `cbl-` prefix.
+- When creating a new table (via SQL migration, dashboard, or Supabase MCP), the table name MUST start with `cbl_`.
+  - ✅ `cbl_organizations`, `cbl_vehicles`, `cbl_routes`, `cbl_drivers`
+  - ❌ `cbl-organizations`, `cbl-vehicles`, `cbl-routes`, `cbl-drivers` (hyphen is INVALID in SQL)
+  - ❌ `organizations`, `vehicles`, `routes`, `drivers` (missing prefix)
+- When querying, inserting, updating, or deleting data, always use the `cbl_` prefix in the table name.
+  - `.from('cbl_organizations')`, `.from('cbl_vehicles')`, etc.
+- When referencing tables in foreign keys, RLS policies, views, functions, triggers, or storage policies, use the `cbl_` prefixed name.
+- Storage buckets, however, are NOT tables and do NOT need the `cbl_` prefix.
 - If a legacy table without the prefix is referenced, flag it to the user and rename it via a migration rather than silently using the unprefixed name.
+
+## Column naming
+
+- Columns use `snake_case` (e.g. `client_id`, `created_at`, `pickup_location`).
+- TypeScript field names stay in `camelCase` and are mapped at the boundary by the Supabase client (or by a typed wrapper).
+- Use `text[]` (Postgres array) for small in-row lists, e.g. `parent_ids`, `student_ids`, `assigned_bus_ids`. Add a GIN index when the column is filtered.
+- Use `jsonb` for nested records that may evolve, e.g. `current_location`, `pickup_location`, `waypoints`, `stops`.
 
 ## Examples
 
 ```typescript
 // ✅ GOOD — prefixed
+await supabase.from('cbl_organizations').select('*');
+await supabase.from('cbl_vehicles').insert({ plate_number: 'ABC-1234' });
+
+// ❌ BAD — hyphen is INVALID
 await supabase.from('cbl-organizations').select('*');
-await supabase.from('cbl-vehicles').insert({ plate: 'ABC-1234' });
 
 // ❌ BAD — unprefixed
 await supabase.from('organizations').select('*');
-await supabase.from('vehicles').insert({ plate: 'ABC-1234' });
 ```
 
 ```sql
