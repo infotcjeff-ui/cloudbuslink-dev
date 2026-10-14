@@ -1,0 +1,44 @@
+{
+  "sideMenu": {
+    "aria": {
+      "open": "打开菜单",
+      "close": "关闭菜单",
+      "search": "搜索菜单",
+      "language": "语言"
+    },
+    "title": "菜单",
+    "searchPlaceholder": "搜索页面…",
+    "searchEmpty": "没有符合「{{query}}」的项目",
+    "primary": {
+      "label": "主要",
+      "home": "主页",
+      "trips": "班次",
+      "settings": "设置"
+    },
+    "admin": {
+      "label": "管理",
+      "students": "学生",
+      "announcements": "公告",
+      "drivers": "司机",
+      "buses": "校车",
+      "parents": "家长",
+      "nannies": "保姆",
+      "reports": "报告"
+    },
+    "settings": {
+      "label": "偏好",
+      "profile": "个人档案",
+      "site": "站点设置",
+      "binding": "绑定"
+    },
+    "footer": {
+      "logout": "登出",
+      "signedInAs": "已登入为"
+    },
+    "language": {
+      "zh-HK": "繁體中文（香港）",
+      "zh-CN": "简体中文",
+      "en": "English"
+    }
+  }
+}

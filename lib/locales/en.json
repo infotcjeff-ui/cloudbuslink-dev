@@ -1,0 +1,44 @@
+{
+  "sideMenu": {
+    "aria": {
+      "open": "Open menu",
+      "close": "Close menu",
+      "search": "Search menu",
+      "language": "Language"
+    },
+    "title": "Menu",
+    "searchPlaceholder": "Search pages…",
+    "searchEmpty": "No matches for “{{query}}”",
+    "primary": {
+      "label": "Main",
+      "home": "Home",
+      "trips": "Trips",
+      "settings": "Settings"
+    },
+    "admin": {
+      "label": "Admin",
+      "students": "Students",
+      "announcements": "Announcements",
+      "drivers": "Drivers",
+      "buses": "Buses",
+      "parents": "Parents",
+      "nannies": "Nannies",
+      "reports": "Reports"
+    },
+    "settings": {
+      "label": "Preferences",
+      "profile": "Profile",
+      "site": "Site settings",
+      "binding": "Binding"
+    },
+    "footer": {
+      "logout": "Log out",
+      "signedInAs": "Signed in as"
+    },
+    "language": {
+      "zh-HK": "Traditional Chinese (Hong Kong)",
+      "zh-CN": "Simplified Chinese",
+      "en": "English"
+    }
+  }
+}

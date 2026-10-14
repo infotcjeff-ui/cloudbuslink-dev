@@ -1,0 +1,44 @@
+{
+  "sideMenu": {
+    "aria": {
+      "open": "開啟選單",
+      "close": "關閉選單",
+      "search": "搜尋選單",
+      "language": "語言"
+    },
+    "title": "選單",
+    "searchPlaceholder": "搜尋頁面…",
+    "searchEmpty": "沒有符合「{{query}}」的項目",
+    "primary": {
+      "label": "主要",
+      "home": "主頁",
+      "trips": "班次",
+      "settings": "設定"
+    },
+    "admin": {
+      "label": "管理",
+      "students": "學生",
+      "announcements": "公告",
+      "drivers": "司機",
+      "buses": "校車",
+      "parents": "家長",
+      "nannies": "保姆",
+      "reports": "報告"
+    },
+    "settings": {
+      "label": "偏好",
+      "profile": "個人檔案",
+      "site": "站台設定",
+      "binding": "綁定"
+    },
+    "footer": {
+      "logout": "登出",
+      "signedInAs": "已登入為"
+    },
+    "language": {
+      "zh-HK": "繁體中文（香港）",
+      "zh-CN": "简体中文",
+      "en": "English"
+    }
+  }
+}

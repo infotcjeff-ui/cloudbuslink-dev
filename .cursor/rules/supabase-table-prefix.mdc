@@ -1,0 +1,39 @@
+---
+description: Supabase table naming convention — every table name MUST be prefixed with `cbl-`
+globs: **/*.{ts,tsx,js,jsx,sql,md,mdc}
+alwaysApply: false
+---
+
+# Supabase Table Naming
+
+All tables in this project's Supabase database **MUST** be prefixed with `cbl-` (cloudbuslink).
+
+## Rules
+
+- When creating a new table (via SQL migration, dashboard, or Supabase MCP), the table name MUST start with `cbl-`.
+  - ✅ `cbl-organizations`, `cbl-vehicles`, `cbl-routes`, `cbl-drivers`
+  - ❌ `organizations`, `vehicles`, `routes`, `drivers`
+- When querying, inserting, updating, or deleting data, always use the `cbl-` prefix in the table name.
+  - `.from('cbl-organizations')`, `.from('cbl-vehicles')`, etc.
+- When referencing tables in foreign keys, RLS policies, views, functions, triggers, or storage policies, use the `cbl-` prefixed name.
+- Storage buckets, however, are NOT tables and do NOT need the `cbl-` prefix.
+- If a legacy table without the prefix is referenced, flag it to the user and rename it via a migration rather than silently using the unprefixed name.
+
+## Examples
+
+```typescript
+// ✅ GOOD — prefixed
+await supabase.from('cbl-organizations').select('*');
+await supabase.from('cbl-vehicles').insert({ plate: 'ABC-1234' });
+
+// ❌ BAD — unprefixed
+await supabase.from('organizations').select('*');
+await supabase.from('vehicles').insert({ plate: 'ABC-1234' });
+```
+
+```sql
+-- ✅ GOOD
+create table cbl_organizations (...);
+alter table cbl_vehicles enable row level security;
+create policy "read cbl_vehicles" on cbl_vehicles for select using (true);
+```

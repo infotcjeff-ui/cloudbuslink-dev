@@ -1,0 +1,11 @@
+---
+description: Git remote configuration for the cloudbuslink-dev project
+alwaysApply: true
+---
+
+# Git Remote
+
+- **Repository**: `https://github.com/infotcjeff-ui/cloudbuslink-dev.git`
+- This is the canonical remote for this project. All `git push` / `git pull` operations should target this remote unless the user explicitly specifies otherwise.
+- Default branch on the remote is `main` unless the user states otherwise.
+- When the user says "push" without specifying a branch, push the current branch to its upstream on this remote.

@@ -1,0 +1,28 @@
+---
+description: Supabase project connection (URL + key handling). Keys MUST live in .env.local only.
+alwaysApply: true
+---
+
+# Supabase Connection
+
+## Project
+
+- **Project URL**: `https://ytpbbqlgbgfjloqislbh.supabase.co`
+- **Project ref**: `ytpbbqlgbgfjloqislbh`
+- **Dashboard**: `https://supabase.com/dashboard/project/ytpbbqlgbgfjloqislbh`
+
+## API Keys — STRICT HANDLING
+
+- **NEVER** hard-code the Supabase `anon` key or `service_role` key in source code, rules, documentation, or commit messages.
+- **NEVER** paste keys into chat / commit / markdown files.
+- The keys MUST be loaded from environment variables only:
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_ANON_KEY` (client-safe)
+  - `SUPABASE_SERVICE_ROLE_KEY` (server-only, never expose to the browser)
+- Store them in `c:\Users\User\Desktop\Bus 9.0\.env.local` (already covered by `.gitignore` via `.env*.local`).
+- When deploying to Vercel, add the same three variables to the project's Environment Variables. Do not paste them back into the repo.
+
+## Client setup reminder
+
+- `createClient` from `@supabase/supabase-js` or `@supabase/ssr` should read `process.env.NEXT_PUBLIC_SUPABASE_URL` and `process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+- The service role key is for server-side admin tasks only (migrations, webhooks, scripts). Never import it into a `use client` component.
