@@ -26,6 +26,10 @@ dev.log
 dev-err.log
 dev-out.log
 dev-restart.log
+dev-server*.log
+dev-verify*.log
+stdout.log
+stderr.log
 cdp-screenshot.png
 
 # local env files

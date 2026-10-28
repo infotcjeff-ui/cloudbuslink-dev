@@ -12,8 +12,9 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import { isValidPhone } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import {
   ParentFormModal,
   EMPTY_PARENT_FORM,
@@ -29,6 +30,7 @@ const MASK = '••••••••';
 export default function ParentsPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [parents, setParents] = useState<Parent[]>([]);
   const [search, setSearch] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -85,7 +87,7 @@ export default function ParentsPage() {
     setDialogOpen(true);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setError('');
     if (!form.name.trim()) { setError('請輸入姓名'); return; }
     if (!isValidPhone(form.phone)) { setError('電話格式錯誤 (8位數字)'); return; }
@@ -94,76 +96,126 @@ export default function ParentsPage() {
     const isKeepPassword = form.password === KEEP_PASSWORD;
     const newPassword = isKeepPassword ? '' : form.password;
 
-    if (editId) {
-      // 編輯模式: 密碼留空 = 不改; 有填 = 至少 6 字元才更新
-      if (newPassword && newPassword.length < 6) {
-        setError('密碼至少需要 6 個字元');
-        return;
-      }
-      STORAGE.parents.update(editId, {
-        name: form.name.trim(),
-        phone: form.phone,
-        alternatePhone: form.alternatePhone || null,
-        relationship: form.relationship,
-        isPickupAuth: form.isPickupAuth,
-        notificationEnabled: form.notificationEnabled,
-        status: form.status,
-      });
-      // 若有填新密碼, 同步更新對應 user 帳號
-      if (newPassword) {
-        const u = STORAGE.users.findByPhone(form.phone);
-        if (u) STORAGE.users.update(u.id, { password: newPassword });
-      }
-    } else {
-      // 新增: 密碼必填, 至少 6 字元
-      if (!newPassword) { setError('請設定登入密碼'); return; }
-      if (newPassword.length < 6) { setError('密碼至少需要 6 個字元'); return; }
-      // 檢查電話是否已被註冊
-      if (STORAGE.users.findByPhone(form.phone)) {
-        setError('此電話已被註冊, 請用其他號碼');
-        return;
-      }
-      // 創建 user 帳戶 + parent
-      const userId = STORAGE.genId('user');
-      STORAGE.users.add({
-        id: userId,
-        phone: form.phone,
-        password: newPassword,  // 使用管理員自訂密碼
-        role: 'parent',
-        name: form.name.trim(),
-        clientId: user.clientId,
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      });
+    try {
+      if (editId) {
+        // 編輯模式: 密碼留空 = 不改; 有填 = 至少 6 字元才更新
+        if (newPassword && newPassword.length < 6) {
+          setError('密碼至少需要 6 個字元');
+          return;
+        }
+        const parentUpdates = {
+          name: form.name.trim(),
+          phone: form.phone,
+          alternatePhone: form.alternatePhone || null,
+          relationship: form.relationship,
+          isPickupAuth: form.isPickupAuth,
+          notificationEnabled: form.notificationEnabled,
+          status: form.status,
+        };
+        STORAGE.parents.update(editId, parentUpdates);
+        // 推回雲端 (背景)
+        {
+          const { supabaseParents } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseParents.update(editId, parentUpdates);
+          if (!sbRes.success) {
+            console.warn('[Parents] Supabase update failed:', sbRes.error);
+            toast.warning(`家長已更新，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
+        // 若有填新密碼, 同步更新對應 user 帳號
+        if (newPassword) {
+          const u = STORAGE.users.findByPhone(form.phone);
+          if (u) STORAGE.users.update(u.id, { password: newPassword });
+        }
+        toast.success(newPassword ? `家長「${form.name.trim()}」已更新 (含新密碼)` : `家長「${form.name.trim()}」已更新`);
+      } else {
+        // 新增: 密碼必填, 至少 6 字元
+        if (!newPassword) { setError('請設定登入密碼'); return; }
+        if (newPassword.length < 6) { setError('密碼至少需要 6 個字元'); return; }
+        // 檢查電話是否已被註冊
+        if (STORAGE.users.findByPhone(form.phone)) {
+          setError('此電話已被註冊, 請用其他號碼');
+          return;
+        }
+        // 創建 user 帳戶 + parent
+        const userId = STORAGE.genId('user');
+        STORAGE.users.add({
+          id: userId,
+          phone: form.phone,
+          password: newPassword,  // 使用管理員自訂密碼
+          role: 'parent',
+          name: form.name.trim(),
+          clientId: user.clientId,
+          status: 'active',
+          createdAt: new Date().toISOString(),
+        });
 
-      STORAGE.parents.add({
-        id: STORAGE.genId('parent'),
-        clientId: user.clientId || '',
-        name: form.name.trim(),
-        phone: form.phone,
-        alternatePhone: form.alternatePhone || null,
-        homePhone: null,
-        officePhone: null,
-        address: null,
-        relationship: form.relationship,
-        isPickupAuth: form.isPickupAuth,
-        isPrimaryContact: false,
-        password: form.phone, // 預設密碼 = 電話 (使用者可在「家長管理」再改)
-        notificationEnabled: form.notificationEnabled,
-        status: form.status,
-        createdAt: new Date().toISOString(),
-      });
+        const newParent = {
+          id: STORAGE.genId('parent'),
+          clientId: resolveClientId(user.clientId || null),
+          name: form.name.trim(),
+          phone: form.phone,
+          alternatePhone: form.alternatePhone || null,
+          homePhone: null,
+          officePhone: null,
+          address: null,
+          relationship: form.relationship,
+          isPickupAuth: form.isPickupAuth,
+          isPrimaryContact: false,
+          password: form.phone, // 預設密碼 = 電話 (使用者可在「家長管理」再改)
+          notificationEnabled: form.notificationEnabled,
+          status: form.status,
+          createdAt: new Date().toISOString(),
+        };
+        STORAGE.parents.add(newParent);
+
+        // 推回雲端 (背景)
+        {
+          const { supabaseParents } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseParents.add(newParent);
+          if (!sbRes.success) {
+            console.warn('[Parents] Supabase add failed:', sbRes.error);
+            toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
+        toast.success(`家長「${form.name.trim()}」已新增, 登入帳號已建立`);
+      }
+    } catch (e) {
+      console.error('[Parents] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      return;
     }
     setParents(STORAGE.parents.getByClient(user.clientId || ''));
     setDialogOpen(false);
     setEditId(null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteId) return;
-    STORAGE.parents.remove(deleteId);
-    setParents(STORAGE.parents.getByClient(user.clientId || ''));
-    setDeleteId(null);
+    try {
+      const targetName = parents.find((p) => p.id === deleteId)?.name ?? '';
+      const id = deleteId;
+      STORAGE.parents.remove(id);
+      // 推回雲端 (刪除)
+      try {
+        const { supabaseParents } = await import('@/lib/supabase-entities');
+        const sbRes = await supabaseParents.remove(id);
+        if (!sbRes.success) {
+          console.warn('[Parents] Supabase delete failed:', sbRes.error);
+          toast.warning(`家長已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+        }
+      } catch (e) {
+        console.warn('[Parents] Supabase delete error:', e);
+      }
+      toast.success(`家長「${targetName}」已刪除`);
+      setParents(STORAGE.parents.getByClient(user.clientId || ''));
+      setDeleteId(null);
+    } catch (e) {
+      console.error('[Parents] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
+    }
   };
 
   /**
@@ -174,14 +226,16 @@ export default function ParentsPage() {
   const handleNewFormSave = async (state: ParentFormState) => {
     setIsNewFormSaving(true);
     try {
-      const clientId = user?.clientId || '';
+      const clientId = resolveClientId(user?.clientId || null);
+      const name = state.name.trim();
+      const phone = state.phone.trim();
       // 1) 新增家長 (主要聯繫人標記已移至學生層級, 此處不再儲存)
       const newId = STORAGE.genId('parent');
-      STORAGE.parents.add({
+      const newParent = {
         id: newId,
         clientId,
-        name: state.name.trim(),
-        phone: state.phone.trim(),
+        name,
+        phone,
         alternatePhone: null,
         homePhone: state.homePhone.trim() || null,
         officePhone: state.officePhone.trim() || null,
@@ -190,20 +244,31 @@ export default function ParentsPage() {
         isPickupAuth: true,
         password: state.password,
         notificationEnabled: true,
-        status: 'active',
+        status: 'active' as const,
         createdAt: new Date().toISOString(),
-      });
+      };
+      STORAGE.parents.add(newParent);
+
+      // 2) 推回雲端 (背景)
+      {
+        const { supabaseParents } = await import('@/lib/supabase-entities');
+        const sbRes = await supabaseParents.add(newParent);
+        if (!sbRes.success) {
+          console.warn('[Parents] Supabase add failed:', sbRes.error);
+          toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
+        }
+      }
       // 3) 同步建立 user 帳號 (供家長登入)
-      const existingUser = STORAGE.users.findByPhone(state.phone.trim());
+      const existingUser = STORAGE.users.findByPhone(phone);
       if (existingUser) {
-        STORAGE.users.update(existingUser.id, { password: state.password, name: state.name.trim() });
+        STORAGE.users.update(existingUser.id, { password: state.password, name });
       } else {
         STORAGE.users.add({
           id: STORAGE.genId('user'),
-          phone: state.phone.trim(),
+          phone,
           password: state.password,
           role: 'parent',
-          name: state.name.trim(),
+          name,
           email: undefined,
           clientId,
           photo: null,
@@ -214,6 +279,11 @@ export default function ParentsPage() {
       // 4) 重新載入 + 關閉
       setParents(STORAGE.parents.getByClient(clientId));
       setNewFormOpen(false);
+      toast.success(`家長「${name}」已透過新版表單建立, 登入帳號已完成`);
+    } catch (e) {
+      console.error('[Parents] handleNewFormSave error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`新增失敗：${msg}`);
     } finally {
       setIsNewFormSaving(false);
     }

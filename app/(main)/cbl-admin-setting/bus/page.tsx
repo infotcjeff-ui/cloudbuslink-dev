@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
+import { syncFromSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 import { BusesConsoleContent } from './BusesConsoleContent';
 import type { Bus, Driver, Student } from '@/lib/types';
 
@@ -30,31 +31,89 @@ import type { Bus, Driver, Student } from '@/lib/types';
 
 export default function CblAdminBusPage() {
   const { user } = useAuth();
-  const [buses, setBuses] = useState<Bus[]>([]);
-  const [drivers, setDrivers] = useState<Driver[]>([]);
-  const [students, setStudents] = useState<Student[]>([]);
+  const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'system_admin';
+  /** 超管沒有 clientId → 看全部 (跨機構管理), 一般角色只看自己學校 */
+  const resolveAll = (getAll: () => Bus[] | Driver[] | Student[], getByClient: (cid: string) => any[]) => {
+    try {
+      const raw = localStorage.getItem('cbl_auth');
+      const u = raw ? JSON.parse(raw) : null;
+      const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
+      if (superMode) return getAll() as any;
+      const cid = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+      return cid ? getByClient(cid) : [];
+    } catch {
+      return [];
+    }
+  };
+  // 同步初始化: client side 立即從 LocalStorage 讀取, 避免首次 mount 空閃
+  const [buses, setBuses] = useState<Bus[]>(() =>
+    resolveAll(STORAGE.buses.getAll.bind(STORAGE.buses), (cid) => STORAGE.buses.getByClient(cid)) as Bus[],
+  );
+  const [drivers, setDrivers] = useState<Driver[]>(() =>
+    resolveAll(STORAGE.drivers.getAll.bind(STORAGE.drivers), (cid) => STORAGE.drivers.getByClient(cid)) as Driver[],
+  );
+  const [students, setStudents] = useState<Student[]>(() =>
+    resolveAll(STORAGE.students.getAll.bind(STORAGE.students), (cid) => STORAGE.students.getByClient(cid)) as Student[],
+  );
+  const [isSyncing, setIsSyncing] = useState(true);
 
   const clientId = user?.clientId || '';
 
-  useEffect(() => {
-    if (!clientId) return;
+  /** 依目前登入者重讀 STORAGE (超管讀全部, 一般讀自己學校) */
+  const reloadFromStorage = () => {
+    try {
+      const raw = localStorage.getItem('cbl_auth');
+      const u = raw ? JSON.parse(raw) : null;
+      const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
+      if (superMode) {
+        setBuses(STORAGE.buses.getAll());
+        setDrivers(STORAGE.drivers.getAll());
+        setStudents(STORAGE.students.getAll());
+        return;
+      }
+      const cid = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+      if (!cid) return;
+      setBuses(STORAGE.buses.getByClient(cid));
+      setDrivers(STORAGE.drivers.getByClient(cid));
+      setStudents(STORAGE.students.getByClient(cid));
+    } catch {
+      /* ignore */
+    }
+  };
 
-    // 立即讀取一次 (首次 mount)
-    setBuses(STORAGE.buses.getByClient(clientId));
-    setDrivers(STORAGE.drivers.getByClient(clientId));
-    setStudents(STORAGE.students.getByClient(clientId));
+  useEffect(() => {
+    // 超管沒有 clientId 也要跑 (看全部), 一般角色才需要等 clientId
+    if (!clientId && !isSuperAdmin) return;
+
+    // 初始化時從 Supabase 同步資料 (如果可用)
+    const initData = async () => {
+      setIsSyncing(true);
+      try {
+        if (isSupabaseAvailable()) {
+          await syncFromSupabase();
+        }
+      } catch (err) {
+        console.warn('[BusPage] Supabase sync failed, using local data:', err);
+      } finally {
+        // 無論 Supabase 是否成功, 都從 LocalStorage 讀取 (超管看全部)
+        reloadFromStorage();
+        setIsSyncing(false);
+      }
+    };
+
+    initData();
 
     // 校巴變更 (新增/編輯/刪除)
     const onBusesRefresh = () => {
-      setBuses(STORAGE.buses.getByClient(clientId));
+      reloadFromStorage();
     };
     // 司機變更 (司機指派變動時)
     const onDriversRefresh = () => {
-      setDrivers(STORAGE.drivers.getByClient(clientId));
+      reloadFromStorage();
     };
     // 學生變更 (解除綁定等連帶影響)
     const onStudentsRefresh = () => {
-      setStudents(STORAGE.students.getByClient(clientId));
+      reloadFromStorage();
     };
 
     window.addEventListener('cbl-buses-refresh', onBusesRefresh);
@@ -65,7 +124,7 @@ export default function CblAdminBusPage() {
       window.removeEventListener('cbl-drivers-refresh', onDriversRefresh);
       window.removeEventListener('cbl-students-refresh', onStudentsRefresh);
     };
-  }, [clientId]);
+  }, [clientId, isSuperAdmin]);
 
   if (!user) return null;
 

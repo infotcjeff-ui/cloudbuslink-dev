@@ -24,6 +24,7 @@ import {
   Info,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import { Button } from '../students/primitives';
 import { MODAL_FADE, MODAL_SLIDE, EASE } from '../students/design-tokens';
 import {
@@ -230,6 +231,13 @@ export interface AnnouncementFormModalProps {
   isSaving: boolean;
   onSave: (state: AnnouncementFormState) => void;
   onClose: () => void;
+  /**
+   * 可發佈的機構清單 (super_admin 需要選一個目標機構)。
+   * 為空時不渲染機構選擇器。
+   */
+  clients?: { id: string; name: string }[];
+  /** true = super_admin, 必須指定目標機構才能儲存 */
+  requireTargetClient?: boolean;
 }
 
 export function AnnouncementFormModal({
@@ -240,7 +248,10 @@ export function AnnouncementFormModal({
   isSaving,
   onSave,
   onClose,
+  clients = [],
+  requireTargetClient = false,
 }: AnnouncementFormModalProps) {
+  const toast = useToast();
   const [form, setForm] = React.useState<AnnouncementFormState>(EMPTY_ANNOUNCEMENT_FORM);
 
   // open / mode / initial 變動時重置
@@ -261,15 +272,29 @@ export function AnnouncementFormModal({
         form.startDate && form.endDate && form.startDate > form.endDate
           ? '結束日期不可早於開始日期'
           : null,
+      targetClientId:
+        requireTargetClient && !form.targetClientId
+          ? '請選擇發佈機構'
+          : null,
     };
-  }, [form.title, form.content, form.isTemplate, form.templateName, form.startDate, form.endDate]);
+  }, [
+    form.title,
+    form.content,
+    form.isTemplate,
+    form.templateName,
+    form.startDate,
+    form.endDate,
+    form.targetClientId,
+    requireTargetClient,
+  ]);
 
   const canSubmit =
     !isSaving &&
     !fieldErrors.title &&
     !fieldErrors.content &&
     !fieldErrors.templateName &&
-    !fieldErrors.dates;
+    !fieldErrors.dates &&
+    !fieldErrors.targetClientId;
 
   // 是否曾被觸碰 (blur)
   const [touched, setTouched] = React.useState<Record<string, boolean>>({});
@@ -279,6 +304,23 @@ export function AnnouncementFormModal({
 
   const markTouched = (field: string) =>
     setTouched((p) => ({ ...p, [field]: true }));
+
+  const handleSaveClick = () => {
+    setTouched({ title: true, content: true, templateName: true, startDate: true, endDate: true, targetClientId: true });
+    if (!canSubmit) {
+      const errorMessages: Record<string, string> = {
+        title: '請填寫「標題」',
+        content: '請填寫「內容」',
+        templateName: '請填寫「範本名稱」',
+        dates: '結束日期不可早於開始日期',
+        targetClientId: '請選擇發佈機構',
+      };
+      const firstError = Object.entries(fieldErrors).find(([, v]) => v !== null)?.[0] ?? '';
+      toast.error(errorMessages[firstError] || '請檢查並修正表單欄位');
+      return;
+    }
+    onSave(form);
+  };
 
   const title = mode === 'add' ? '新增公告' : '編輯公告';
   const subtitle =
@@ -343,6 +385,34 @@ export function AnnouncementFormModal({
 
             {/* Body */}
             <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-4 dark:scrollbar-thin">
+
+              {/* 發佈機構 — super_admin 必須選 (client_id 有 FK 約束) */}
+              {requireTargetClient && (
+                <div className="md:col-span-2">
+                  <NativeSelect
+                    id="ann-form-target-client"
+                    label="發佈機構"
+                    value={form.targetClientId}
+                    onChange={(v) => {
+                      setForm((p) => ({ ...p, targetClientId: v }));
+                      markTouched('targetClientId');
+                    }}
+                  >
+                    <option value="">— 請選擇機構 —</option>
+                    {clients.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                  <InlineFieldError
+                    message={touched.targetClientId ? fieldErrors.targetClientId : null}
+                  />
+                  <p className="text-[10.5px] text-slate-500 mt-0.5 dark:text-slate-400">
+                    公告只會顯示給該機構的用戶 (家長 / 保姆 / 機構員工)。
+                  </p>
+                </div>
+              )}
 
               {/* 公告類型 — 3 卡片橫排 */}
               <div className="md:col-span-2">
@@ -413,7 +483,11 @@ export function AnnouncementFormModal({
                 />
               </div>
 
-              {/* 範本勾選 */}
+              {/* 範本勾選
+                  語意: 「另外建立一份範本」— 不是把這則公告本身變成範本。
+                  早期實作把 isTemplate 寫在「同一筆」資料上, 結果該公告被
+                  getActive() 的 `!a.isTemplate` 條件濾掉 → 公告從此不再顯示。
+                  現在改成: 勾選時額外建立一筆獨立的範本資料。 */}
               <div className="md:col-span-2">
                 <label className="inline-flex items-center gap-2 cursor-pointer select-none">
                   <input
@@ -426,7 +500,7 @@ export function AnnouncementFormModal({
                     className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-400 cursor-pointer"
                   />
                   <span className="text-[12px] font-medium text-slate-700 dark:text-slate-200">
-                    同時儲存為範本
+                    同時另存一份為範本
                   </span>
                 </label>
               </div>
@@ -476,11 +550,13 @@ export function AnnouncementFormModal({
                 <InlineFieldError message={fieldErrors.dates} />
               </div>
 
-              {/* 顯示次數 */}
+              {/* 顯示次數 — 純統計用途
+                  註: 從 2026-10-26 起, 生效中的公告在限期內「每次進入主頁」
+                  都會自動彈出, 這兩個數字不再限制彈出行為, 僅作為統計參考。 */}
               <div>
                 <NativeSelect
                   id="ann-form-display-count"
-                  label="總顯示次數"
+                  label="總顯示次數 (統計)"
                   value={String(form.displayCount)}
                   onChange={(v) =>
                     setForm((p) => ({
@@ -500,7 +576,7 @@ export function AnnouncementFormModal({
               <div>
                 <NativeSelect
                   id="ann-form-max-views"
-                  label="每用戶顯示上限"
+                  label="每用戶顯示上限 (統計)"
                   value={String(form.maxViewsPerUser)}
                   onChange={(v) =>
                     setForm((p) => ({
@@ -518,12 +594,17 @@ export function AnnouncementFormModal({
               </div>
             </div>
 
+            <p className="text-[10.5px] text-slate-500 leading-relaxed dark:text-slate-400">
+              生效中的公告會在有效期內「每一次進入主頁」自動彈出, 除非使用者勾選
+              「不再顯示此通告」。上述兩個次數設定僅為統計數字, 不會限制自動彈出。
+            </p>
+
             {/* Footer */}
             <div className="px-5 py-3 bg-slate-50/40 border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/40 dark:border-slate-700/80">
               <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
                 {form.isTemplate && (
                   <span className="inline-flex items-center px-1.5 py-px rounded text-[10px] bg-violet-50 text-violet-700 ring-1 ring-inset ring-violet-200 dark:bg-violet-950/40 dark:text-violet-300 dark:ring-violet-800/50 font-medium">
-                    將同時儲存為範本
+                    將另存一份為範本
                   </span>
                 )}
               </span>
@@ -538,7 +619,7 @@ export function AnnouncementFormModal({
                 <Button
                   variant="primary"
                   size="sm"
-                  onClick={() => onSave(form)}
+                  onClick={handleSaveClick}
                   isLoading={isSaving}
                   disabled={!canSubmit}
                   startIcon={!isSaving ? <Save width={12} height={12} /> : undefined}

@@ -1,6 +1,6 @@
 'use client';
 
-import type { Student, Parent, Bus, StudentGender } from '@/lib/types';
+import type { Student, Parent, Bus, Driver, StudentGender } from '@/lib/types';
 
 /** Students 頁面的全域類型 (only used inside /cbl-admin-setting/[layout]/students) */
 
@@ -40,4 +40,6 @@ export interface StudentsPageContext {
   students: Student[];
   parents: Parent[];
   buses: Bus[];
+  /** 司機清單 — 用於右欄「已選校巴」卡片顯示司機姓名/電話 */
+  drivers: Driver[];
 }

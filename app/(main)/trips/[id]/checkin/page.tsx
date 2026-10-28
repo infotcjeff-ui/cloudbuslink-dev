@@ -140,6 +140,8 @@ export default function CheckinPage() {
 
     STORAGE.attendances.upsert(attendance);
     setAttendances(STORAGE.attendances.getByTrip(trip.id));
+    // 即時通知 Schedule Console 等其他頁面刷新出席資料
+    window.dispatchEvent(new CustomEvent('cbl-attendance-refresh'));
   };
 
   // 全部標記為上車 (快捷)
@@ -419,6 +421,7 @@ export default function CheckinPage() {
                     notes: noteText || null,
                   });
                   setAttendances(STORAGE.attendances.getByTrip(trip.id));
+                  window.dispatchEvent(new CustomEvent('cbl-attendance-refresh'));
                   setNoteDialog(null);
                 }}
                 className="flex-1 h-11"

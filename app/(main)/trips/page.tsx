@@ -104,7 +104,7 @@ function TripsPageInner() {
     return result;
   }, [showAllTab, counts]);
 
-  const canCreate = user?.role === 'super_admin' || user?.role === 'client';
+  const canCreate = user?.role === 'super_admin' || user?.role === 'client' || user?.role === 'system_admin';
 
   return (
     <div className="px-3 pt-3 pb-24">

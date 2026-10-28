@@ -17,6 +17,7 @@ import {
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
 import { cn, cnWeekday, tripStatusLabel, tripTypeLabel } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Trip, TripStatus, Waypoint } from '@/lib/types';
 import { SegmentedControl } from '@/components/trips/segmented-control';
 import { StickyActionBar } from '@/components/trips/sticky-action-bar';
@@ -34,6 +35,7 @@ export default function EditTripPage() {
   const params = useParams();
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [trip, setTrip] = useState<Trip | null>(null);
   const [status, setStatus] = useState<TripStatus>('scheduled');
   const [waypoints, setWaypoints] = useState<Waypoint[]>([]);
@@ -58,21 +60,36 @@ export default function EditTripPage() {
   const handleSave = () => {
     if (!trip) return;
     setSaving(true);
-    STORAGE.trips.update(trip.id, {
-      status,
-      waypoints,
-    });
-    setStatusDirty(false);
-    setWaypointsDirty(false);
-    setSuccess(true);
-    setTimeout(() => router.push(`/trips/${trip.id}`), 650);
+    try {
+      STORAGE.trips.update(trip.id, {
+        status,
+        waypoints,
+      });
+      setStatusDirty(false);
+      setWaypointsDirty(false);
+      toast.success(`班次 ${trip.id.slice(-6)} 變更已儲存`);
+      setSuccess(true);
+      setTimeout(() => router.push(`/trips/${trip.id}`), 650);
+    } catch (e) {
+      console.error('[Trips/Edit] handleSave error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      setSaving(false);
+    }
   };
 
   const handleDelete = () => {
     if (!trip) return;
-    STORAGE.trips.remove(trip.id);
-    setConfirmDelete(false);
-    router.push('/trips');
+    try {
+      STORAGE.trips.remove(trip.id);
+      toast.success(`班次 ${trip.id.slice(-6)} 已刪除`);
+      setConfirmDelete(false);
+      router.push('/trips');
+    } catch (e) {
+      console.error('[Trips/Edit] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
+    }
   };
 
   const setStatusAndDirty = (s: TripStatus) => {

@@ -39,8 +39,10 @@ import {
   Wrench,
   PowerOff,
   Info,
+  Users as UsersAllIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import { Button, Pill } from './primitives';
 import { MODAL_FADE, MODAL_SLIDE, EASE } from './design-tokens';
 import {
@@ -48,7 +50,8 @@ import {
   type BusFormState,
   type BusesPageContext,
 } from './types';
-import type { Bus, Driver } from '@/lib/types';
+import type { Bus, Driver, Nanny, Student } from '@/lib/types';
+import { StudentMultiSelect } from './StudentMultiSelect';
 
 /* -------------------------------------------------------------------------- */
 /*  LabeledInput — 2-欄 grid 表單欄位                                            */
@@ -324,6 +327,8 @@ export interface BusFormModalProps {
   initial?: BusFormState;
   /** 編輯模式時, 顯示車牌作為標識 */
   editingPlate?: string;
+  /** 編輯模式時, 提供真實 bus id 以便於 "車上學生" 顯示「現有」標記 */
+  editingId?: string;
   context: BusesPageContext;
   isSaving: boolean;
   onSave: (state: BusFormState) => void;
@@ -335,11 +340,13 @@ export function BusFormModal({
   mode,
   initial,
   editingPlate,
+  editingId,
   context,
   isSaving,
   onSave,
   onClose,
 }: BusFormModalProps) {
+  const toast = useToast();
   const [form, setForm] = React.useState<BusFormState>(EMPTY_BUS_FORM);
   const [touched, setTouched] = React.useState<Record<string, boolean>>({});
 
@@ -360,7 +367,7 @@ export function BusFormModal({
         : context.buses.some(
             (b) =>
               b.plateNumber.toUpperCase() === plateNorm &&
-              (mode === 'add' || b.id !== initial?.plateNumber),
+              (mode === 'add' || b.plateNumber.toUpperCase() !== editingPlate?.toUpperCase()),
           )
         ? '車牌已存在'
         : null,
@@ -374,7 +381,7 @@ export function BusFormModal({
         : null,
     };
     return errors;
-  }, [form.plateNumber, form.model, form.capacity, context.buses, mode, initial]);
+  }, [form.plateNumber, form.model, form.capacity, context.buses, mode, editingPlate]);
 
   const canSubmit =
     !isSaving && Object.values(fieldErrors).every((e) => e === null);
@@ -385,7 +392,17 @@ export function BusFormModal({
   const handleSubmit = () => {
     // 觸碰所有欄位以觸發錯誤顯示
     setTouched({ plateNumber: true, model: true, capacity: true });
-    if (!canSubmit) return;
+    if (!canSubmit) {
+      // 找出第一個錯誤欄位, 給 toast 一個明確訊息
+      const firstErrorField = Object.entries(fieldErrors).find(([, v]) => v !== null)?.[0] ?? '';
+      const errorMessages: Record<string, string> = {
+        plateNumber: '請輸入車牌',
+        model: '請輸入車輛型號',
+        capacity: '座位數必須大於 0',
+      };
+      toast.error(errorMessages[firstErrorField] || '請檢查並修正表單欄位');
+      return;
+    }
     onSave({
       ...form,
       plateNumber: form.plateNumber.trim().toUpperCase(),
@@ -405,6 +422,18 @@ export function BusFormModal({
     (d) => d.status === 'available' || d.status === 'on_trip',
   );
 
+  // 跟車保姆選項 — 只列啟用中, 並按員工編號排序方便查找
+  const availableNannies = React.useMemo(
+    () =>
+      (context.nannies ?? [])
+        .filter((n) => n.status === 'active')
+        .slice()
+        .sort((a, b) =>
+          (a.employeeId || a.name).localeCompare(b.employeeId || b.name, 'zh-Hant'),
+        ),
+    [context.nannies],
+  );
+
   return (
     <AnimatePresence>
       {open && (
@@ -419,7 +448,7 @@ export function BusFormModal({
           onClick={onClose}
         >
           <motion.div
-            className="relative w-full max-w-[680px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700 max-h-[92vh]"
+            className="relative w-full max-w-[920px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700 max-h-[92vh]"
             initial={{ opacity: 0, y: MODAL_SLIDE }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: MODAL_SLIDE }}
@@ -544,6 +573,30 @@ export function BusFormModal({
                   )}
                 </div>
 
+                {/* 跟車保姆 (可選) */}
+                <div>
+                  <NativeSelect
+                    id="bus-form-nanny"
+                    label="跟車保姆 (選填)"
+                    value={form.nannyId}
+                    onChange={(v) => setForm((p) => ({ ...p, nannyId: v }))}
+                    icon={<UsersAllIcon width={12} height={12} />}
+                  >
+                    <option value="">— 暫不指派 —</option>
+                    {availableNannies.map((n) => (
+                      <option key={n.id} value={n.id}>
+                        {n.name} · {n.employeeId || n.phone}
+                      </option>
+                    ))}
+                  </NativeSelect>
+                  {(context.nannies ?? []).length === 0 && (
+                    <p className="mt-1 text-[10.5px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                      <Info width={10} height={10} />
+                      尚未建立任何保姆
+                    </p>
+                  )}
+                </div>
+
                 {/* GPS 裝置 ID (全寬) */}
                 <div className="md:col-span-2">
                   <LabeledInput
@@ -560,6 +613,18 @@ export function BusFormModal({
                     配對後可即時追蹤校巴位置
                   </p>
                 </div>
+
+                {/* 車上學生 (全寬, inline multi-select) */}
+                <StudentMultiSelect
+                  label="車上學生 (選填)"
+                  students={context.students}
+                  {...(editingId ? { currentBusId: editingId } : {})}
+                  buses={context.buses}
+                  value={form.studentIds}
+                  onChange={(ids) =>
+                    setForm((p) => ({ ...p, studentIds: ids }))
+                  }
+                />
 
                 {/* 狀態 (全寬, toggle cards) */}
                 <div className="md:col-span-2">
@@ -589,6 +654,21 @@ export function BusFormModal({
                     {
                       context.drivers.find((d) => d.id === form.driverId)
                         ?.name ?? '司機'
+                    }
+                  </Pill>
+                )}
+                {form.studentIds.length > 0 && (
+                  <Pill tone="info" size="sm">
+                    <UsersAllIcon width={9} height={9} />
+                    {form.studentIds.length} 生
+                  </Pill>
+                )}
+                {form.nannyId && (
+                  <Pill tone="success" size="sm">
+                    <UsersAllIcon width={9} height={9} />
+                    {
+                      availableNannies.find((n) => n.id === form.nannyId)
+                        ?.name ?? '保姆'
                     }
                   </Pill>
                 )}

@@ -14,12 +14,14 @@ import {
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
+import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import type { Student } from '@/lib/types';
 
 export default function StudentsPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [students, setStudents] = useState<Student[]>([]);
   const [search, setSearch] = useState('');
   const [filterClass, setFilterClass] = useState('');
@@ -43,9 +45,21 @@ export default function StudentsPage() {
     return true;
   });
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteId) return;
-    STORAGE.students.remove(deleteId);
+    const id = deleteId;
+    STORAGE.students.remove(id);
+    // 推回雲端 (刪除)
+    try {
+      const { supabaseStudents } = await import('@/lib/supabase-entities');
+      const sbRes = await supabaseStudents.remove(id);
+      if (!sbRes.success) {
+        console.warn('[Students] Supabase delete failed:', sbRes.error);
+        toast.warning(`學生已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+      }
+    } catch (e) {
+      console.warn('[Students] Supabase delete error:', e);
+    }
     setStudents(STORAGE.students.getByClient(user.clientId || ''));
     setDeleteId(null);
   };

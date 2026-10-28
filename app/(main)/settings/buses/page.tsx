@@ -12,13 +12,15 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Bus as BusType } from '@/lib/types';
 
 export default function BusesPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [buses, setBuses] = useState<BusType[]>([]);
   const [search, setSearch] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -63,32 +65,42 @@ export default function BusesPage() {
     if (!form.model.trim()) { setError('請輸入型號'); return; }
     if (form.capacity < 1) { setError('座位數必須大於 0'); return; }
 
-    if (editId) {
-      STORAGE.buses.update(editId, {
-        plateNumber: form.plateNumber.trim().toUpperCase(),
-        model: form.model.trim(),
-        capacity: form.capacity,
-        driverId: form.driverId || null,
-        status: form.status,
-      });
-    } else {
-      STORAGE.buses.add({
-        id: STORAGE.genId('bus'),
-        clientId: user.clientId || '',
-        plateNumber: form.plateNumber.trim().toUpperCase(),
-        model: form.model.trim(),
-        capacity: form.capacity,
-        driverId: form.driverId || null,
-        gpsDeviceId: null,
-        status: form.status,
-        currentLocation: {
-          latitude: 22.3193,
-          longitude: 114.1694,
-          speed: 0,
-          lastUpdated: new Date().toISOString(),
-        },
-        createdAt: new Date().toISOString(),
-      });
+    try {
+      const plate = form.plateNumber.trim().toUpperCase();
+      if (editId) {
+        STORAGE.buses.update(editId, {
+          plateNumber: plate,
+          model: form.model.trim(),
+          capacity: form.capacity,
+          driverId: form.driverId || null,
+          status: form.status,
+        });
+        toast.success(`校巴「${plate}」已更新`);
+      } else {
+        STORAGE.buses.add({
+          id: STORAGE.genId('bus'),
+          clientId: resolveClientId(user.clientId || null),
+          plateNumber: plate,
+          model: form.model.trim(),
+          capacity: form.capacity,
+          driverId: form.driverId || null,
+          gpsDeviceId: null,
+          status: form.status,
+          currentLocation: {
+            latitude: 22.3193,
+            longitude: 114.1694,
+            speed: 0,
+            lastUpdated: new Date().toISOString(),
+          },
+          createdAt: new Date().toISOString(),
+        });
+        toast.success(`校巴「${plate}」已新增`);
+      }
+    } catch (e) {
+      console.error('[Buses] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      return;
     }
     setBuses(STORAGE.buses.getByClient(user.clientId || ''));
     setDialogOpen(false);
@@ -97,9 +109,17 @@ export default function BusesPage() {
 
   const handleDelete = () => {
     if (!deleteId) return;
-    STORAGE.buses.remove(deleteId);
-    setBuses(STORAGE.buses.getByClient(user.clientId || ''));
-    setDeleteId(null);
+    try {
+      const targetPlate = buses.find((b) => b.id === deleteId)?.plateNumber ?? '';
+      STORAGE.buses.remove(deleteId);
+      toast.success(`校巴「${targetPlate}」已刪除`);
+      setBuses(STORAGE.buses.getByClient(user.clientId || ''));
+      setDeleteId(null);
+    } catch (e) {
+      console.error('[Buses] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
+    }
   };
 
   return (

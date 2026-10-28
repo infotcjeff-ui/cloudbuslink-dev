@@ -1,6 +1,6 @@
 // CloudBusLink 系統類型定義
 
-export type UserRole = 'super_admin' | 'client' | 'parent' | 'nanny';
+export type UserRole = 'system_admin' | 'super_admin' | 'client' | 'parent' | 'nanny';
 
 export interface User {
   id: string;
@@ -9,13 +9,19 @@ export interface User {
   role: UserRole;
   name: string;
   email?: string;
+  // 所屬學校 (cbl_clients = 學校表) — 學生/家長/保姆/client 帳號必填，super_admin / system_admin 可空
   clientId?: string;
+  // 所屬機構/公司 (cbl_companies) — 非必填，僅保姆 / 司機 / 校巴相關帳號 / super_admin 使用
+  companyId?: string | null;
   photo?: string | null;
   status: 'active' | 'inactive';
   createdAt: string;
 }
 
 export interface Client {
+  // = 學校 (cbl_clients) — 選項 B: cbl_clients 即學校表 (原「機構」更名)。
+  // 學生/家長/校巴/司機/保姆/班次/路線/公告全部必填 school (clientId)。
+  // 公司層另見 Company (cbl_companies)，僅保姆/司機/校巴/User 可選配 companyId。
   id: string;
   name: string;
   email: string;
@@ -31,7 +37,10 @@ export interface Client {
 
 export interface Driver {
   id: string;
+  // 所屬學校 (cbl_clients = 學校) — 必填，所有 9 類皆必填 school
   clientId: string;
+  // 所屬機構/公司 (cbl_companies) — 非必填
+  companyId?: string | null;
   name: string;
   phone: string;
   licenseNumber: string;
@@ -42,7 +51,10 @@ export interface Driver {
 
 export interface Bus {
   id: string;
+  // 所屬學校 (cbl_clients = 學校) — 必填
   clientId: string;
+  // 所屬機構/公司 (cbl_companies) — 非必填
+  companyId?: string | null;
   plateNumber: string;
   model: string;
   capacity: number;
@@ -138,7 +150,10 @@ export interface Parent {
 
 export interface Nanny {
   id: string;
+  // 所屬學校 (cbl_clients = 學校) — 必填
   clientId: string;
+  // 所屬機構/公司 (cbl_companies) — 非必填
+  companyId?: string | null;
   name: string;
   phone: string;
   employeeId: string;
@@ -146,6 +161,24 @@ export interface Nanny {
   assignedBusIds: string[];
   status: 'active' | 'inactive';
   createdAt: string;
+}
+
+/* ==========================================================================
+ * Company 機構/公司 (cbl_companies) — 選項 B 的公司層
+ *
+ * - 僅保姆 / 司機 / 校巴 / super_admin 相關 User 可選配 companyId (非必填)
+ * - 學生/家長/班次/路線/公告/接送記錄只掛學校 (clientId)，不掛公司
+ * ========================================================================== */
+export interface Company {
+  id: string;
+  name: string;
+  email: string;
+  phone: string;
+  address: string;
+  logo: string | null;
+  status: 'active' | 'inactive';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export type TripType = 'morning' | 'afternoon' | 'custom';
@@ -178,6 +211,18 @@ export interface Trip {
   studentIds: string[];
   currentRouteIndex: number;
   completedStops: string[];
+  /**
+   * 本班次套用的「路線模板」id (cbl_routes.id)。
+   *
+   * 為什麼需要:
+   *   Route (路線) 是模板 — 有站點順序、ETA、起終點、對應學生;
+   *   Trip (班次) 是「某一天的實例」— 站點會被複製一份進 waypoints 供當日微調。
+   *   兩者若沒有這條引用, /cbl-admin-setting/bus/trips 維護的路線對班次完全沒有影響,
+   *   站點就會變成兩套各自為政的資料 (這是本專案長期的架構缺口)。
+   *
+   * nullable: 舊班次 / 手動建立的班次可以沒有對應路線。
+   */
+  routeId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -219,6 +264,72 @@ export interface Announcement {
   isTemplate: boolean;
   templateName: string | null;
   createdAt: string;
+}
+
+/* ==========================================================================
+ *  System Config — /system-admin-setting 的平台層設定 (L4 system_admin)
+ *
+ *  三層優先序 (高 → 低):
+ *    1. override — 裝置層覆寫 (localStorage), 可含機密
+ *    2. cloud    — 平台層設定 (Supabase cbl_system_config 表), 跨裝置一致
+ *    3. env      — 建置時環境變數 (NEXT_PUBLIC_SUPABASE_*)
+ *
+ *  安全邊界:
+ *    - Supabase anon key 本來就會 inline 在前端 bundle → 視為非機密, 可上雲
+ *    - gps.apiKey 是第三方 secret → 永不上雲, 只存 localStorage
+ *
+ *  Storage key: cbl_system_config (override) / cbl_system_config_cloud (快取)
+ * ========================================================================== */
+
+/** GPS / 追蹤 provider */
+export type GpsProvider = 'simulated' | 'mapbox' | 'google' | 'custom';
+
+/** 設定值的來源 (用於 UI 顯示 badge) */
+export type ConfigSource = 'override' | 'cloud' | 'env' | 'default' | 'none';
+
+/** 平台層設定 — 可上雲的部分 (不含任何 secret) */
+export interface SystemConfigCloud {
+  supabase: {
+    /** 專案端點, 例: https://xxxx.supabase.co */
+    url: string | null;
+    /** 前端安全金鑰 (client-safe, 本來就會 inline 在 bundle) */
+    anonKey: string | null;
+  };
+  gps: {
+    provider: GpsProvider | null;
+    /** 自訂 endpoint (僅 provider='custom' 時有意義) */
+    endpoint: string | null;
+    /** 更新頻率 (秒) */
+    refreshSeconds: number | null;
+  };
+  updatedAt: string;
+  updatedBy: string;
+}
+
+/** 裝置層覆寫 — 只存 localStorage, 可含機密 */
+export interface SystemConfigOverride extends SystemConfigCloud {
+  gps: SystemConfigCloud['gps'] & {
+    /** provider API Key — 機密, 永不上雲 */
+    apiKey: string | null;
+  };
+}
+
+/** 解析後的有效設定 (UI 直接吃這個) */
+export interface ResolvedSystemConfig {
+  supabase: {
+    url: string;
+    anonKey: string;
+    urlSource: ConfigSource;
+    keySource: ConfigSource;
+  };
+  gps: {
+    provider: GpsProvider;
+    apiKey: string;
+    endpoint: string;
+    refreshSeconds: number;
+    providerSource: ConfigSource;
+    apiKeySource: ConfigSource;
+  };
 }
 
 export interface SiteSettings {

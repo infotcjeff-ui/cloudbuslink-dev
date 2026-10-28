@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useMemo } from 'react';
 import { STORAGE } from '@/lib/storage';
 
 export type CblStats = {
@@ -26,6 +26,10 @@ export type CblStats = {
   totalAttendance: number;
   attendanceRate: number;
   announcementTemplates: number;
+  /** 今日 (開班中 + 已完成 + scheduled) ÷ 今日總班次, 0..100, 取整 */
+  scheduleProgressRate: number;
+  /** 今日狀態為 completed 的班次數 */
+  tripsCompletedToday: number;
 };
 
 const EMPTY_STATS: CblStats = {
@@ -51,17 +55,21 @@ const EMPTY_STATS: CblStats = {
   totalAttendance: 0,
   attendanceRate: 0,
   announcementTemplates: 0,
+  scheduleProgressRate: 0,
+  tripsCompletedToday: 0,
 };
 
 /**
  * 從 STORAGE 讀取 CBL Admin 平台概覽所需的真實數據。
  * 跨頁面共用 (overview / students / parents / buses / drivers / nannies / reports / announcements)。
+ *
+ * 注意: STORAGE 讀取是同步的 (localStorage), 所以這裡直接用 useMemo
+ * 同步計算 — 不要用 useState(EMPTY) + useEffect(setStats) 的模式,
+ * 那會讓第一次 render 先吐全 0, 下一幀才變真數 (stat tiles 閃一次)。
  */
 export function useCblStats(clientId: string | undefined): CblStats {
-  const [stats, setStats] = useState<CblStats>(EMPTY_STATS);
-
-  useEffect(() => {
-    if (!clientId) return;
+  const stats = useMemo(() => {
+    if (!clientId) return EMPTY_STATS;
 
     const students = STORAGE.students.getByClient(clientId);
     const parents = STORAGE.parents.getByClient(clientId);
@@ -87,7 +95,19 @@ export function useCblStats(clientId: string | undefined): CblStats {
     }, 0);
     const attendanceRate = totalAttendances > 0 ? Math.round((onTimeCount / totalAttendances) * 100) : 0;
 
-    setStats({
+    const todayTripsList = trips.filter((t: any) => t.date === todayStr);
+    const todayTripsTotal = todayTripsList.length;
+    const todayTripsDone =
+      todayTripsTotal === 0
+        ? 0
+        : todayTripsList.filter((t: any) => t.status !== 'cancelled').length;
+    const tripsCompletedToday = todayTripsList.filter(
+      (t: any) => t.status === 'completed',
+    ).length;
+    const scheduleProgressRate =
+      todayTripsTotal === 0 ? 0 : Math.round((todayTripsDone / todayTripsTotal) * 100);
+
+    return {
       students: students.length,
       parents: parents.length,
       buses: buses.length,
@@ -110,7 +130,9 @@ export function useCblStats(clientId: string | undefined): CblStats {
       totalAttendance: totalAttendances,
       attendanceRate,
       announcementTemplates: announcementTemplates.length,
-    });
+      scheduleProgressRate,
+      tripsCompletedToday,
+    } as CblStats;
   }, [clientId]);
 
   return stats;

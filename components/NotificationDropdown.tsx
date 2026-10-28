@@ -127,12 +127,17 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
       return;
     }
     const clientId = user.clientId || '';
-    const all = STORAGE.announcements.getActive(clientId);
-    // 只顯示「還沒達到顯示次數上限」的公告
-    const eligible = all.filter(a => a.currentCount < a.displayCount);
+    // super_admin 沒有自己的 clientId, 但依需求要看得見所有機構的公告。
+    const isSuperAdmin = user.role === 'super_admin';
+    // 下拉列表用 getActive() (所有「生效中且在有效期內」的公告),
+    // 不用 getEligible() — 因為 displayCount / maxViewsPerUser 是
+    // 「自動彈窗」的顯示上限, 不是「公告是否存在」的限制。
+    // 若用 getEligible, 公告被看過一次後就會整則從列表消失, 使用者永遠
+    // 找不到看過的公告。
+    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
     // Newest first is more useful than createdAt order, but storage order is fine
     // for now — sort by startDate DESC so the most recent broadcasts are on top.
-    const sorted = [...eligible].sort((a, b) =>
+    const sorted = [...active].sort((a, b) =>
       b.startDate.localeCompare(a.startDate)
     );
     setItems(sorted);
@@ -144,6 +149,32 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
   React.useEffect(() => {
     load();
   }, [load]);
+
+  /**
+   * 從 Supabase 拉最新公告到 localStorage。
+   *
+   * 為什麼 dropdown 需要自己拉:
+   * - 公告存在 DB, localStorage 只是快取
+   * - useInitData() 只在第一次載入時同步 → 之后管理員新增的公告,
+   *   使用者的鈴鐺列表會看不到
+   * - 背景同步 (不 await) — 不阻塞 UI, 拉完再觸發 refresh 重新 render
+   */
+  React.useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+        await supabaseAnnouncements.syncToStorage();
+        if (!cancelled) load();
+      } catch (e) {
+        console.warn('[NotificationDropdown] db sync failed:', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, load]);
 
   // 監聽公告資料更新事件 (來自 cbl-admin-setting/announcements 頁面)
   React.useEffect(() => {
@@ -267,9 +298,13 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
     // 動畫時間 (180ms) 後再開 dialog — 確保視覺上 dropdown 完全消失才進場
     setTimeout(async () => {
       const mod = await import('@/components/AnnouncementPopup');
-      mod.triggerAnnouncementPopup(index);
+      // 傳 announcement id (不是 index) — popup 的清單是「eligible」清單,
+      // index 可能對不上。用 id 讓 popup 直接定位到該則公告。
+      const target = items[index];
+      if (target) mod.triggerAnnouncementPopupById(target.id);
+      else mod.triggerAnnouncementPopup(index);
     }, 180);
-  }, []);
+  }, [items]);
 
   // 下拉內要列出的「active 公告總數」(給 header 文字用, 例如 "3 則")
   // 注意: 紅點用 `unreadCount` (扣除已讀); 這裡是下拉內共有幾則

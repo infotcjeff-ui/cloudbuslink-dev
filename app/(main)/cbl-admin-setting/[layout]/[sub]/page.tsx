@@ -1,5 +1,9 @@
 'use client';
 
+// 同上: 跳過 static-paths-worker 的 vendor-chunks race condition
+export const dynamic = 'force-dynamic';
+
+import * as React from 'react';
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -9,10 +13,12 @@ import {
 } from 'lucide-react';
 import { useAuth, useSettings } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
+import { syncFromSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 import { useCblStats } from '../../hooks/useCblStats';
 import { StatCard } from '../../components/Cards';
 import { TripsConsoleContent } from '../../bus/trips/TripsConsoleContent';
-import type { Route } from '@/lib/types';
+import { DriversConsoleContent } from '../../bus/drivers/DriversConsoleContent';
+import type { Route, Bus, Driver, Nanny, Student } from '@/lib/types';
 
 /**
  * 巢狀 sub-page: 處理 /cbl-admin-setting/{layout}/{sub} 路徑
@@ -20,8 +26,11 @@ import type { Route } from '@/lib/types';
  * 目前 sub 路徑:
  *   - bus/trips          → 校巴 / 路線 (related to 校巴)
  *   - bus/drivers        → 校巴 / 司機 (related to 校巴)
- *   - parents/childrens  → 家長 / 子女 (related to 家長, 路線)
  *   - parents/payment    → 家長 / 付款記錄 (應付未付, 應收未收, 完整 record, 即時 preview PDF)
+ *
+ * 注意: 「子女」子頁已移除 (子女資料統一在 /cbl-admin-setting/students 與
+ * /cbl-admin-setting/parents 列表的「檢視」popup 內管理), 因此本檔不再處理
+ * parents/childrens。
  *
  * 為什麼用 single dynamic [sub] 而不是 named folders:
  * - 全部子頁面共用同一個 layout.tsx (sidebar + header)
@@ -72,24 +81,26 @@ function getSubPageMeta(layout: string, sub: string): SubPageMeta | null {
         { icon: MapPin,  label: '排班',     desc: '綁定校巴 / 路線, 查看當週值勤表' },
         { icon: Wrench,  label: '狀態監控', desc: '可派 / 行駛中 / 休假 即時狀態' },
       ],
-      comingSoon: true,
+      // 有自刻的 DriversConsoleContent, render 時不走通用模板
+      customConsole: true,
     };
   }
 
   if (layout === 'parents' && sub === 'childrens') {
+    // 「子女」子頁已於 2026-10 移除 (子女資料統一在 /students 與 /parents 列表的
+    // 「檢視」popup 內管理)。此處保留一個 redirect 兼容舊連結 (避免使用者收藏的 URL
+    // 直接變 404), 重新導向到 /cbl-admin-setting/parents。
+    if (typeof window !== 'undefined') {
+      window.location.replace('/cbl-admin-setting/parents');
+    }
     return {
       title: '子女',
-      description: '家長頁面下的子女檢視, 資料與 /cbl-admin-setting/students 同步, 此處只讀。',
+      description: '已搬遷 — 請使用「家長」列表的「檢視」按鈕查看子女資料。',
       breadcrumb: [
         { label: '家長', path: '/cbl-admin-setting/parents' },
-        { label: '子女' },
+        { label: '子女 (已搬遷)' },
       ],
-      features: [
-        { icon: Baby,   label: '學生清單',     desc: '依家長檢視綁定的子女資料' },
-        { icon: MapPin, label: '路線資訊',     desc: '每個子女對應的校巴路線與上下車點' },
-        { icon: ShieldCheck, label: '監護人', desc: '緊急聯絡人 / 監護人權限檢視' },
-      ],
-      comingSoon: true,
+      features: [],
     };
   }
 
@@ -122,21 +133,161 @@ export default function CblAdminSubPage() {
   const stats = useCblStats(user?.clientId);
 
   // ---- bus/trips 頁面專用資料 (rule of hooks: 跟其他 hook 一起放在頂層) ----
-  const [routes, setRoutes] = useState<Route[]>([]);
-  const clientId = user?.clientId || '';
+  // 同步初始化: client side 立即從 LocalStorage 讀取, 避免首次 mount 空閃
+  // 超管 (super_admin / system_admin) 沒有 clientId → 讀全部 (跨機構管理)
+  const resolveVisibleInit = <T,>(getAll: () => T[], getByClient: (cid: string) => T[]): T[] => {
+    try {
+      const raw = localStorage.getItem('cbl_auth');
+      const u = raw ? JSON.parse(raw) : null;
+      const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
+      if (superMode) return getAll();
+      const cid = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+      return cid ? getByClient(cid) : [];
+    } catch { return []; }
+  };
+  const [routes, setRoutes] = useState<Route[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return resolveVisibleInit<Route>(() => STORAGE.routes.getAll(), (cid) => STORAGE.routes.getByClient(cid));
+  });
+  const [buses, setBuses] = useState<Bus[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return resolveVisibleInit<Bus>(() => STORAGE.buses.getAll(), (cid) => STORAGE.buses.getByClient(cid));
+  });
+  const [drivers, setDrivers] = useState<Driver[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return resolveVisibleInit<Driver>(() => STORAGE.drivers.getAll(), (cid) => STORAGE.drivers.getByClient(cid));
+  });
+  const [nannies, setNannies] = useState<Nanny[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return resolveVisibleInit<Nanny>(() => STORAGE.nannies.getAll(), (cid) => STORAGE.nannies.getByClient(cid));
+  });
+  const [students, setStudents] = useState<Student[]>(() => {
+    if (typeof window === 'undefined') return [];
+    return resolveVisibleInit<Student>(() => STORAGE.students.getAll(), (cid) => STORAGE.students.getByClient(cid));
+  });
+
+  // clientId 解析: 超管沒有 clientId → 用 '' + superMode 旗標 (看全部);
+  // 一般角色: 優先 user.clientId, fallback 到第一個 client
+  const isSuperAdminSub = user?.role === 'super_admin' || user?.role === 'system_admin';
+  const clientId = isSuperAdminSub ? '' : (user?.clientId || STORAGE.clients.getAll()[0]?.id || '');
+
+  /**
+   * 進場時從 Supabase 拉一次資料。
+   *
+   * 為什麼需要 (這是「編輯路線 → 跟車保姆顯示 undefined」的根因之一):
+   *   這頁 (bus/trips、bus/drivers、parents/payment) 原本「只讀 localStorage」,
+   *   從不向 Supabase 拉資料。相較之下 /cbl-admin-setting/bus 有自己呼叫
+   *   syncFromSupabase()。
+   *
+   *   結果: 使用者若直接從登入後進到「路線」頁 (或 localStorage 還沒被
+   *   登入頁的 initWithSupabase 填滿), cbl_nannies 是空的 →
+   *   路線的 nannyId 找不到對應實體 → dropdown 只能顯示 id 殼 → "undefined · undefined"。
+   *
+   * 補充: syncFromSupabase() 完成後會 dispatch cbl-*-refresh 事件,
+   *       下面的 reloadAll 會自動重讀, 所以這個 effect 只需負責「觸發同步」。
+   */
+  useEffect(() => {
+    if (!isSupabaseAvailable()) return;
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        await syncFromSupabase();
+        if (cancelled) return;
+        // sync 內部會 dispatch refresh 事件 → reloadAll 自動觸發。
+        // 這裡再保險 dispatch 一次, 處理「sync 早於監聽器掛上」的情況。
+        window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
+        window.dispatchEvent(new CustomEvent('cbl-nannies-refresh'));
+        window.dispatchEvent(new CustomEvent('cbl-nannys-refresh'));
+      } catch (e) {
+        console.warn('[CblAdminSubPage] Supabase sync failed:', e);
+      }
+    };
+    sync();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const layout = (params?.layout as string) ?? '';
     const sub = (params?.sub as string) ?? '';
-    if (layout !== 'bus' || sub !== 'trips') return;
-    const load = () => {
-      setRoutes(STORAGE.routes.getByClient(clientId));
+
+    // 通用資料載入 helper: 從 STORAGE 重新讀取所有相關資料
+    // 超管讀全部 (getAll), 一般角色讀自己學校 (getByClient)
+    // 注意: 用淺比較守衛 — 資料沒變就不 setState, 避免無謂重 render
+    // (之前每次 event / 輪詢都直接 set 新 array, 表格會跟著閃一次)。
+    const shallowSame = (a: { id: string }[], b: { id: string }[]) =>
+      a.length === b.length && a.every((x, i) => x === b[i]);
+    // 超管看全部 → clientId 為 '' 但 isSuperAdminSub 為 true 也要跑
+    const visibleBuses = () =>
+      isSuperAdminSub ? STORAGE.buses.getAll() : (clientId ? STORAGE.buses.getByClient(clientId) : []);
+    const visibleDrivers = () =>
+      isSuperAdminSub ? STORAGE.drivers.getAll() : (clientId ? STORAGE.drivers.getByClient(clientId) : []);
+    const visibleNannies = () =>
+      isSuperAdminSub ? STORAGE.nannies.getAll() : (clientId ? STORAGE.nannies.getByClient(clientId) : []);
+    const visibleStudents = () =>
+      isSuperAdminSub ? STORAGE.students.getAll() : (clientId ? STORAGE.students.getByClient(clientId) : []);
+    const visibleRoutes = () =>
+      isSuperAdminSub ? STORAGE.routes.getAll() : (clientId ? STORAGE.routes.getByClient(clientId) : []);
+    const reloadAll = () => {
+      if (!clientId && !isSuperAdminSub) return;
+      setBuses((prev) => {
+        const next = visibleBuses();
+        return shallowSame(prev, next) ? prev : next;
+      });
+      setDrivers((prev) => {
+        const next = visibleDrivers();
+        return shallowSame(prev, next) ? prev : next;
+      });
+      setNannies((prev) => {
+        const next = visibleNannies();
+        return shallowSame(prev, next) ? prev : next;
+      });
+      setStudents((prev) => {
+        const next = visibleStudents();
+        return shallowSame(prev, next) ? prev : next;
+      });
+      if (layout === 'bus' && sub === 'trips') {
+        setRoutes((prev) => {
+          const next = visibleRoutes();
+          return shallowSame(prev, next) ? prev : next;
+        });
+      }
     };
-    load();
-    const handler = () => load();
-    window.addEventListener('cbl-routes-refresh', handler);
-    return () => window.removeEventListener('cbl-routes-refresh', handler);
-  }, [params?.layout, params?.sub, clientId]);
+
+    // 首次載入
+    reloadAll();
+
+    // 監聽所有 cbl-*-refresh 事件, 任何資料同步完成都重新讀取
+    // 解決: 使用者進入頁面時 Supabase 同步可能尚未完成, STORAGE 為空,
+    // 等同步完成後 (syncFromSupabase dispatch events) 自動重新讀取,
+    // 不必手動按「重新整理」按鈕。
+    //
+    // 注意: 輪詢 fallback 已移除 — 之前每 150ms reloadAll 一次、
+    // 最多 5 秒, 每次都 set 新 array reference 觸發重 render,
+    // 這正是切頁時多閃 1~2 次的主因。STORAGE.isInitialized() 完成時
+    // 會 dispatch cbl-*-refresh, 只靠 event 就夠了。
+    const events = [
+      'cbl-drivers-refresh',
+      'cbl-buses-refresh',
+      'cbl-students-refresh',
+      'cbl-parents-refresh',
+      // 保姆事件有兩種拼法並存 → 兩種都要監聽, 否則收到一半的更新
+      'cbl-nannies-refresh',
+      'cbl-nannys-refresh',
+      'cbl-trips-refresh',
+      'cbl-routes-refresh',
+      'cbl-attendances-refresh',
+      'cbl-announcements-refresh',
+      'cbl-clients-refresh',
+      'cbl-users-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, reloadAll));
+
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, reloadAll));
+    };
+  }, [params?.layout, params?.sub, clientId, isSuperAdminSub]);
 
   const layout = (params?.layout as string) ?? '';
   const sub = (params?.sub as string) ?? '';
@@ -148,7 +299,7 @@ export default function CblAdminSubPage() {
   if (!meta) {
     const fallback =
       layout === 'bus' ? '/cbl-admin-setting/bus/trips' :
-      layout === 'parents' ? '/cbl-admin-setting/parents/childrens' :
+      layout === 'parents' ? '/cbl-admin-setting/parents' :
       '/cbl-admin-setting';
     if (typeof window !== 'undefined') router.replace(fallback);
     return null;
@@ -159,10 +310,20 @@ export default function CblAdminSubPage() {
     return (
       <TripsConsoleContent
         routes={routes}
-        buses={STORAGE.buses.getByClient(clientId)}
-        drivers={STORAGE.drivers.getByClient(clientId)}
-        nannies={STORAGE.nannies.getByClient(clientId)}
-        students={STORAGE.students.getByClient(clientId)}
+        buses={buses}
+        drivers={drivers}
+        nannies={nannies}
+        students={students}
+      />
+    );
+  }
+
+  // ---- bus/drivers: 自刻 console (OneFleet-style) ----
+  if (meta.customConsole && layout === 'bus' && sub === 'drivers') {
+    return (
+      <DriversConsoleContent
+        drivers={drivers}
+        buses={buses}
       />
     );
   }

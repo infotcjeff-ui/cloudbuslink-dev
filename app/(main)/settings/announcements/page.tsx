@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Plus, Edit2, Trash2, Megaphone, FileText, Sparkles, ArrowRight, Bell, BellOff, Power } from 'lucide-react';
+import { Plus, Edit2, Trash2, Megaphone, FileText, Sparkles, ArrowRight, BellOff } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -15,10 +15,12 @@ import { Label } from '@/components/ui/label';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
 import { cn, fmtDate } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Announcement } from '@/lib/types';
 
 export default function AnnouncementsPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [tab, setTab] = useState<'all' | 'templates'>('all');
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [editId, setEditId] = useState<string | null>(null);
@@ -27,14 +29,9 @@ export default function AnnouncementsPage() {
   // 記錄當前 dialog 是從哪個範本衍生的, 提交時直接建立為新公告 (isTemplate=false)
   // 用 id 標識, null = 全新建立 / 編輯現有
   const [sourceTemplateId, setSourceTemplateId] = useState<string | null>(null);
-  // 「全站公告彈窗」開關 — 預設 false (popup 正常彈), 開啟後即使用戶點鈴鐺
-  // 也不再打開 AnnouncementPopup dialog
-  const [popupDisabled, setPopupDisabled] = useState<boolean>(false);
-  // 切換「全站公告彈窗」開關的 confirm dialog 控制 state
-  // 為何加 confirm dialog: 這是「不可逆的體驗降級」動作,
-  // 用戶可能不小心按到, 失去未來看到重要公告的入口。
-  // 放在頂部是因為 React Hooks 必須在 conditional return 之前呼叫。
-  const [confirmToggleOpen, setConfirmToggleOpen] = useState<null | 'enable' | 'disable'>(null);
+  // 「已隱藏通告」清單 — 使用者勾選「不再顯示此通告」的公告
+  // (從 popup 的 checkbox 產生; 這裡可以手動恢復, 讓它重新開始自動彈出)
+  const [dismissedIds, setDismissedIds] = useState<string[]>([]);
   const [form, setForm] = useState({
     title: '', content: '', type: 'info' as Announcement['type'],
     displayCount: 1, maxViewsPerUser: 1,
@@ -44,16 +41,27 @@ export default function AnnouncementsPage() {
   });
   const [error, setError] = useState('');
 
+  // 目標機構 (super_admin 必填 — cbl_announcements.client_id 有 FK 約束)
+  const [targetClientIdInput, setTargetClientIdInput] = useState('');
+  // 可發佈的機構清單
+  const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
+
+  useEffect(() => {
+    setClientOptions(STORAGE.clients.getAll().map((c) => ({ id: c.id, name: c.name })));
+  }, []);
+
   useEffect(() => {
     if (!user) return;
+    const isSuperAdmin = user.role === 'super_admin' || user.role === 'system_admin';
+    const cid = user.clientId || '';
+    // super_admin 看得到所有機構的公告
     const all = tab === 'templates'
-      ? STORAGE.announcements.getTemplates(user.clientId || '')
-      : STORAGE.announcements.getByClient(user.clientId || '').filter(a => !a.isTemplate);
+      ? STORAGE.announcements.getTemplates(cid, isSuperAdmin)
+      : STORAGE.announcements.getVisible(cid, isSuperAdmin).filter(a => !a.isTemplate);
     setAnnouncements(all);
-    // 同步讀取「全站公告彈窗」開關狀態
-    setPopupDisabled(
-      STORAGE.announcementPopupPref.isDisabled(user.id, user.clientId || '')
-    );
+    // 同步讀取「已隱藏通告」清單 (使用者勾選「不再顯示此通告」的公告)
+    const dismissed = STORAGE.announcementDismiss.getDismissed(user.id, cid);
+    setDismissedIds(Array.from(dismissed));
   }, [user, tab]);
 
   if (!user) return null;
@@ -103,11 +111,18 @@ export default function AnnouncementsPage() {
     setDialogOpen(true);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setError('');
     if (!form.title.trim()) { setError('請輸入標題'); return; }
     if (!form.content.trim()) { setError('請輸入內容'); return; }
     if (form.isTemplate && !form.templateName.trim()) { setError('範本請輸入範本名稱'); return; }
+
+    // 目標機構: 跨機構角色沒有 clientId, 必須指定 (FK 約束)
+    const isSuperAdmin = user.role === 'super_admin' || user.role === 'system_admin';
+    const targetClientId = isSuperAdmin
+      ? (targetClientIdInput || '')
+      : (user.clientId || '');
+    if (!targetClientId) { setError('請選擇發佈機構'); return; }
 
     const data = {
       title: form.title.trim(),
@@ -118,124 +133,195 @@ export default function AnnouncementsPage() {
       startDate: new Date(form.startDate).toISOString(),
       endDate: new Date(form.endDate).toISOString(),
       isActive: true,
-      isTemplate: form.isTemplate,
-      templateName: form.isTemplate ? form.templateName.trim() : null,
+      // 公告本身永遠不是範本 (範本是另一筆獨立資料)
+      isTemplate: false,
+      templateName: null,
     };
 
-    if (editId) {
-      STORAGE.announcements.update(editId, data);
-    } else {
-      STORAGE.announcements.add({
-        id: STORAGE.genId('ann'),
-        clientId: user.clientId || '',
-        currentCount: 0,
-        ...data,
-        createdAt: new Date().toISOString(),
-      });
+    try {
+      let savedId = editId;
+      if (editId) {
+        const existing = STORAGE.announcements.getById(editId);
+        STORAGE.announcements.update(editId, {
+          ...data,
+          clientId: targetClientId,
+          currentCount: existing?.currentCount ?? 0,
+        });
+      } else {
+        savedId = STORAGE.genId('ann');
+        STORAGE.announcements.add({
+          id: savedId,
+          clientId: targetClientId,
+          currentCount: 0,
+          ...data,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      // 同步寫入 Supabase (讓其他瀏覽器/裝置也能看到)
+      try {
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+        const sbPayload = {
+          id: savedId!,
+          clientId: targetClientId,
+          ...data,
+          currentCount: STORAGE.announcements.getById(savedId!)?.currentCount ?? 0,
+          createdAt: new Date().toISOString(),
+        };
+        const res = editId
+          ? await supabaseAnnouncements.update(savedId!, {
+              title: sbPayload.title,
+              content: sbPayload.content,
+              type: sbPayload.type,
+              displayCount: sbPayload.displayCount,
+              maxViewsPerUser: sbPayload.maxViewsPerUser,
+              startDate: sbPayload.startDate,
+              endDate: sbPayload.endDate,
+              isActive: sbPayload.isActive,
+              isTemplate: sbPayload.isTemplate,
+              templateName: sbPayload.templateName,
+              clientId: sbPayload.clientId,
+            })
+          : await supabaseAnnouncements.add(sbPayload);
+        if (!res.success) {
+          console.warn('[Announcements] Supabase write failed:', res.error);
+          toast.error(`已儲存到本機，但同步到伺服器失敗：${res.error}`);
+        }
+      } catch (sbErr) {
+        console.warn('[Announcements] Supabase write error:', sbErr);
+        toast.error('已儲存到本機，但同步到伺服器失敗');
+      }
+
+      // 額外建立一份範本 (獨立資料)
+      if (form.isTemplate && form.templateName.trim()) {
+        const templateId = STORAGE.genId('anntpl');
+        const templatePayload = {
+          id: templateId,
+          clientId: targetClientId,
+          title: data.title,
+          content: data.content,
+          type: data.type,
+          displayCount: data.displayCount,
+          currentCount: 0,
+          maxViewsPerUser: data.maxViewsPerUser,
+          startDate: data.startDate,
+          endDate: data.endDate,
+          isActive: true,
+          isTemplate: true,
+          templateName: form.templateName.trim(),
+          createdAt: new Date().toISOString(),
+        };
+        STORAGE.announcements.add(templatePayload);
+        try {
+          const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+          await supabaseAnnouncements.add(templatePayload);
+        } catch (tplErr) {
+          console.warn('[Announcements] template sync error:', tplErr);
+        }
+      }
+
+      toast.success(sourceTemplateId ? `已從範本建立公告「${data.title}」` : `公告「${data.title}」已建立`);
+    } catch (e) {
+      console.error('[Announcements] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      return;
     }
     const all = tab === 'templates'
-      ? STORAGE.announcements.getTemplates(user.clientId || '')
-      : STORAGE.announcements.getByClient(user.clientId || '').filter(a => !a.isTemplate);
+      ? STORAGE.announcements.getTemplates(user.clientId || '', isSuperAdmin)
+      : STORAGE.announcements.getVisible(user.clientId || '', isSuperAdmin).filter(a => !a.isTemplate);
     setAnnouncements(all);
     setDialogOpen(false);
     setEditId(null);
     setSourceTemplateId(null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteId) return;
-    STORAGE.announcements.remove(deleteId);
-    const all = tab === 'templates'
-      ? STORAGE.announcements.getTemplates(user.clientId || '')
-      : STORAGE.announcements.getByClient(user.clientId || '').filter(a => !a.isTemplate);
-    setAnnouncements(all);
-    setDeleteId(null);
-  };
-
-  // 切換「全站公告彈窗」開關。
-  // 為何加 confirm dialog: 這是「不可逆的體驗降級」動作,
-  // 用戶可能不小心按到, 失去未來看到重要公告的入口。
-  const requestToggle = () => {
-    if (!user) return;
-    // 開 → 關 要 confirm; 關 → 開 直接生效 (恢復體驗, 無風險)
-    if (!popupDisabled) {
-      setConfirmToggleOpen('disable');
-    } else {
-      setConfirmToggleOpen('enable');
+    try {
+      const isSuperAdmin = user.role === 'super_admin' || user.role === 'system_admin';
+      const targetTitle = announcements.find((a) => a.id === deleteId)?.title ?? '';
+      STORAGE.announcements.remove(deleteId);
+      try {
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+        await supabaseAnnouncements.remove(deleteId);
+      } catch (sbErr) {
+        console.warn('[Announcements] Supabase delete error:', sbErr);
+      }
+      toast.success(`公告「${targetTitle}」已刪除`);
+      const all = tab === 'templates'
+        ? STORAGE.announcements.getTemplates(user.clientId || '', isSuperAdmin)
+        : STORAGE.announcements.getVisible(user.clientId || '', isSuperAdmin).filter(a => !a.isTemplate);
+      setAnnouncements(all);
+      setDeleteId(null);
+    } catch (e) {
+      console.error('[Announcements] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
     }
   };
-  const applyToggle = () => {
-    if (!user || !confirmToggleOpen) return;
-    const newVal = confirmToggleOpen === 'disable';
-    STORAGE.announcementPopupPref.setDisabled(
-      user.id, user.clientId || '', newVal
-    );
-    setPopupDisabled(newVal);
-    setConfirmToggleOpen(null);
+
+  // 恢復一則被隱藏的公告 → 下次進入主頁時會重新自動彈出
+  const restoreDismissed = (announcementId: string) => {
+    if (!user) return;
+    try {
+      STORAGE.announcementDismiss.restore(user.id, user.clientId || '', announcementId);
+      setDismissedIds((prev) => prev.filter((id) => id !== announcementId));
+      toast.success('已恢復顯示, 下次進入主頁將重新彈出');
+    } catch (e) {
+      console.error('[Announcements] restoreDismissed error:', e);
+      toast.error('操作失敗');
+    }
   };
 
   return (
     <div className="px-4 pt-4 pb-24 space-y-4">
-      {/* 「全站公告彈窗」開關
+      {/* 「已隱藏通告」清單
           ─ 為何放頁首: 這是「個人偏好」而非公告資料, 跟公告列表分離;
-          公告管理員也需要一眼看到自己是否關了彈窗, 避免「為什麼用戶說沒看到公告」;
-          點一下切換, 關閉方向需要 confirm dialog 防止誤觸。 */}
+          使用者勾選「不再顯示此通告」後, 該公告就不會再自動彈出,
+          這裡可以手動恢復 (重新開始自動彈出)。 */}
       <Card>
         <CardContent className="p-3">
           <div className="flex items-start gap-3">
-            <div
-              className={cn(
-                'w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0',
-                popupDisabled
-                  ? 'bg-muted text-muted-foreground'
-                  : 'bg-primary/10 text-primary'
-              )}
-            >
-              {popupDisabled
-                ? <BellOff className="w-5 h-5" />
-                : <Bell className="w-5 h-5" />}
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 bg-primary/10 text-primary">
+              <BellOff className="w-5 h-5" />
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5">
-                <p className="text-sm font-semibold">全站公告彈窗</p>
-                <Badge
-                  variant={popupDisabled ? 'secondary' : 'default'}
-                  className="text-[10px]"
-                >
-                  {popupDisabled ? '已關閉' : '已啟用'}
+                <p className="text-sm font-semibold">已隱藏通告</p>
+                <Badge variant="secondary" className="text-[10px]">
+                  {dismissedIds.length} 則
                 </Badge>
               </div>
               <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                {popupDisabled
-                  ? '目前已關閉。即便點頭部鈴鐺, 公告也不會再以彈窗方式顯示。'
-                  : '啟用時, 點頭部鈴鐺 → 選公告 → 全站彈窗會顯示完整內容。'}
+                生效中的公告會在每次進入主頁時自動彈出。若你不想再看到某則公告,
+                可在彈窗勾選「不再顯示此通告」; 這裡可以手動恢復。
               </p>
             </div>
-            {/* iOS-style switch */}
-            <button
-              type="button"
-              role="switch"
-              aria-checked={!popupDisabled}
-              aria-label={popupDisabled ? '開啟全站公告彈窗' : '關閉全站公告彈窗'}
-              onClick={requestToggle}
-              className={cn(
-                'relative w-12 h-7 rounded-full transition-colors flex-shrink-0',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-                popupDisabled ? 'bg-muted' : 'bg-primary'
-              )}
-            >
-              <span
-                className={cn(
-                  'absolute top-0.5 left-0.5 w-6 h-6 rounded-full bg-white shadow-sm transition-transform',
-                  popupDisabled ? 'translate-x-0' : 'translate-x-5'
-                )}
-              />
-            </button>
           </div>
-          {popupDisabled && (
-            <div className="mt-2 flex items-start gap-1.5 text-[11px] text-muted-foreground bg-muted/40 rounded-lg px-2 py-1.5">
-              <BellOff className="w-3 h-3 mt-0.5 flex-shrink-0" />
-              <span>關閉後仍可在頭部鈴鐺下拉中查看公告標題與摘要; 隨時在此頁重新開啟全站彈窗。</span>
+          {dismissedIds.length > 0 && (
+            <div className="mt-2 space-y-1.5">
+              {dismissedIds.map((id) => {
+                const a = STORAGE.announcements.getById(id);
+                return (
+                  <div
+                    key={id}
+                    className="flex items-center gap-2 text-[11px] text-muted-foreground bg-muted/40 rounded-lg px-2 py-1.5"
+                  >
+                    <BellOff className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                    <span className="flex-1 min-w-0 truncate">
+                      {a?.title || id}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => restoreDismissed(id)}
+                      className="flex-shrink-0 px-2 py-0.5 rounded-md bg-background hover:bg-primary/10 hover:text-primary transition-colors font-medium"
+                    >
+                      恢復顯示
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -335,7 +421,7 @@ export default function AnnouncementsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {sourceTemplateId ? '使用範本建立公告' : editId ? '編輯' : '新增'} {form.isTemplate ? '範本' : '公告'}
+              {sourceTemplateId ? '使用範本建立公告' : editId ? '編輯' : '新增'} 公告
             </DialogTitle>
             <DialogDescription>
               {sourceTemplateId
@@ -344,6 +430,23 @@ export default function AnnouncementsPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+            {(user.role === 'super_admin' || user.role === 'system_admin') && (
+              <div className="space-y-1.5">
+                <Label>發佈機構 *</Label>
+                <Select
+                  value={targetClientIdInput}
+                  onChange={(e) => setTargetClientIdInput(e.target.value)}
+                >
+                  <option value="">請選擇機構...</option>
+                  {clientOptions.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </Select>
+                <p className="text-[11px] text-muted-foreground">
+                  超級管理員沒有機構, 必須指定發佈機構 (資料庫有 FK 約束)
+                </p>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label>類型</Label>
               <Select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as any })}>
@@ -414,7 +517,7 @@ export default function AnnouncementsPage() {
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div className="space-y-1.5">
-                    <Label>總顯示次數</Label>
+                    <Label>總顯示次數 (統計)</Label>
                     <Input
                       type="number"
                       min={1}
@@ -423,7 +526,7 @@ export default function AnnouncementsPage() {
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label>每用戶上限</Label>
+                    <Label>每用戶上限 (統計)</Label>
                     <Input
                       type="number"
                       min={1}
@@ -452,53 +555,6 @@ export default function AnnouncementsPage() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteId(null)}>取消</Button>
             <Button variant="destructive" onClick={handleDelete}>刪除</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 切換全站公告彈窗的確認 dialog
-          - 「關閉」方向: 顯示風險說明, 用戶必須確認才生效
-          - 「開啟」方向: 仍是 dialog 但措辭正面, 維持一致的二次確認體驗 */}
-      <Dialog
-        open={!!confirmToggleOpen}
-        onOpenChange={(o) => !o && setConfirmToggleOpen(null)}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
-              {confirmToggleOpen === 'disable' ? '關閉全站公告彈窗?' : '開啟全站公告彈窗'}
-            </DialogTitle>
-            <DialogDescription>
-              {confirmToggleOpen === 'disable' ? (
-                <>
-                  關閉後, 即便點頭部鈴鐺, 公告也不會再以彈窗方式顯示完整內容。
-                  <br />
-                  <br />
-                  您仍可在鈴鐺下拉列表中查看公告標題與摘要;
-                  隨時可回到此頁重新開啟全站彈窗。
-                </>
-              ) : (
-                <>
-                  開啟後, 點頭部鈴鐺 → 選擇公告 → 將以全站彈窗顯示完整內容。
-                </>
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmToggleOpen(null)}>
-              取消
-            </Button>
-            {confirmToggleOpen === 'disable' ? (
-              <Button variant="destructive" onClick={applyToggle}>
-                <Power className="w-4 h-4" />
-                確認關閉
-              </Button>
-            ) : (
-              <Button onClick={applyToggle}>
-                <Bell className="w-4 h-4" />
-                確認開啟
-              </Button>
-            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -9,8 +9,9 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import { formatAcademicYear, parseAcademicYearCode } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 
 // 學生可選的學年清單 (UI 上顯示 '26-27' / '27-28' 等)。
 // 內部仍以 4 位 code (e.g. '2627') 儲存與產 studentId。
@@ -20,6 +21,7 @@ const ACADEMIC_YEAR_OPTIONS: string[] = ['2627', '2728'];
 export default function NewStudentPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [name, setName] = useState('');
   const [classNumber, setClassNumber] = useState('');
   const [phone, setPhone] = useState('');
@@ -43,38 +45,55 @@ export default function NewStudentPage() {
   const allParents = STORAGE.parents.getByClient(user.clientId || '');
   const allBuses = STORAGE.buses.getByClient(user.clientId || '');
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setError('');
     if (!name.trim()) { setError('請輸入姓名'); return; }
     if (!classNumber.trim()) { setError('請輸入班別'); return; }
     if (parentIds.length === 0) { setError('請至少關聯一位家長'); return; }
 
     setSaving(true);
-    const studentId = STORAGE.students.generateStudentId(user.clientId || '', academicYear);
+    try {
+      const studentId = STORAGE.students.generateStudentId(resolveClientId(user.clientId || null), academicYear);
 
-    STORAGE.students.add({
-      id: STORAGE.genId('student'),
-      clientId: user.clientId || '',
-      studentId,
-      name: name.trim(),
-      classNumber: classNumber.trim(),
-      phone: phone.trim() || null,
-      photo: null,
-      gender: 'male',
-      dateOfBirth: null,
-      emergencyContactName: null,
-      emergencyContactPhone: null,
-      emergencyContactRelationship: null,
-      status,
-      parentIds,
-      primaryParentId: null,
-      busId: busId || null,
-      pickupLocation: null,
-      dropoffLocation: null,
-      createdAt: new Date().toISOString(),
-    });
+      const newStudent = {
+        id: STORAGE.genId('student'),
+        clientId: resolveClientId(user.clientId || null),
+        studentId,
+        name: name.trim(),
+        classNumber: classNumber.trim(),
+        phone: phone.trim() || null,
+        photo: null,
+        gender: 'male' as const,
+        dateOfBirth: null,
+        emergencyContactName: null,
+        emergencyContactPhone: null,
+        emergencyContactRelationship: null,
+        status,
+        parentIds,
+        primaryParentId: null,
+        busId: busId || null,
+        pickupLocation: null,
+        dropoffLocation: null,
+        createdAt: new Date().toISOString(),
+      };
+      STORAGE.students.add(newStudent);
 
-    router.push('/settings/students');
+      // 推回雲端 (背景) — 沒有的話這筆學生只存在這台電腦
+      const { supabaseStudents } = await import('@/lib/supabase-entities');
+      const sbRes = await supabaseStudents.add(newStudent);
+      if (!sbRes.success) {
+        console.warn('[Students/New] Supabase add failed:', sbRes.error);
+        toast.warning(`學生已新增，但雲端同步失敗：${sbRes.error}`);
+      }
+
+      toast.success(`學生「${name.trim()}」已新增 (學號 ${studentId})`);
+      router.push('/settings/students');
+    } catch (e) {
+      console.error('[Students/New] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`新增失敗：${msg}`);
+      setSaving(false);
+    }
   };
 
   const toggleParent = (id: string) => {

@@ -23,6 +23,7 @@
  */
 
 import * as React from 'react';
+import maplibregl from 'maplibre-gl';
 import {
   Reorder,
   motion,
@@ -110,7 +111,16 @@ function StudentMultiSelect({
   selectedIds: string[];
   onChange: (next: string[]) => void;
 }) {
+  const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState('');
+
+  const selectedStudents = React.useMemo(
+    () =>
+      selectedIds
+        .map((id) => students.find((s) => s.id === id))
+        .filter((s): s is Student => Boolean(s)),
+    [selectedIds, students],
+  );
 
   if (students.length === 0) {
     return (
@@ -120,63 +130,166 @@ function StudentMultiSelect({
     );
   }
 
+  const q = query.trim().toLowerCase();
   const filtered = students
-    .filter((s) => s.name.toLowerCase().includes(query.toLowerCase()) || s.studentId.includes(query))
+    .filter((s) => !q || s.name.toLowerCase().includes(q) || s.studentId.toLowerCase().includes(q))
     .sort((a, b) => a.classNumber.localeCompare(b.classNumber));
+
+  const toggle = (id: string) =>
+    onChange(
+      selectedIds.includes(id) ? selectedIds.filter((sid) => sid !== id) : [...selectedIds, id],
+    );
+
+  const selectAllFiltered = () => {
+    const ids = new Set(selectedIds);
+    filtered.forEach((s) => ids.add(s.id));
+    onChange([...ids]);
+  };
+  const clearAll = () => onChange([]);
+
+  const MAX_CHIPS = 6;
+  const visibleChips = selectedStudents.slice(0, MAX_CHIPS);
+  const hiddenCount = selectedStudents.length - visibleChips.length;
 
   return (
     <div className="rounded-md border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700">
-      <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-700/80">
-        <Search width={11} height={11} className="text-slate-400" />
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜尋學生姓名 / 學號…"
-          className="flex-1 h-6 bg-transparent text-[12px] text-slate-700 placeholder:text-slate-400 focus:outline-none dark:text-slate-200"
-        />
-        <span className="text-[10px] text-slate-400 tabular-nums">
-          {selectedIds.length}/{students.length}
-        </span>
-      </div>
-      <ul className="max-h-[140px] overflow-y-auto py-1">
-        {filtered.length === 0 ? (
-          <li className="px-2.5 py-2 text-[11px] text-slate-500 dark:text-slate-400">
-            沒有符合「{query}」的學生
-          </li>
-        ) : (
-          filtered.map((s) => {
-            const checked = selectedIds.includes(s.id);
-            return (
-              <li
+      {/* 摘要列: 永遠可見, 不展開不佔位 */}
+      <div className="px-2.5 pt-2 pb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 tabular-nums">
+            已選 {selectedIds.length}/{students.length}
+          </span>
+          {selectedIds.length > 0 && (
+            <button
+              type="button"
+              onClick={clearAll}
+              className="text-[10.5px] text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
+            >
+              清除
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-950/40 transition-colors cursor-pointer"
+          >
+            {open ? '收合' : selectedIds.length > 0 ? '增減學生' : '選擇學生'}
+            <motion.span
+              animate={{ rotate: open ? 180 : 0 }}
+              transition={{ duration: 0.14 }}
+              className="block"
+            >
+              <ChevronDown width={12} height={12} />
+            </motion.span>
+          </button>
+        </div>
+        {/* 已選 chips (最多 6 + +N, 超長不撐版) */}
+        {selectedStudents.length > 0 ? (
+          <div className="flex flex-wrap gap-1 mt-1.5">
+            {visibleChips.map((s) => (
+              <span
                 key={s.id}
-                onClick={() =>
-                  onChange(checked ? selectedIds.filter((id) => id !== s.id) : [...selectedIds, s.id])
-                }
-                className={cn(
-                  'flex items-center gap-2 px-2.5 py-1 cursor-pointer text-[12px] transition-colors',
-                  checked
-                    ? 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200'
-                    : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/60',
-                )}
+                title={`${s.name} · ${s.classNumber} · ${s.studentId}`}
+                className="inline-flex items-center gap-1 max-w-[160px] pl-2 pr-1 py-0.5 rounded-full bg-blue-50 text-blue-800 border border-blue-200/70 text-[11px] dark:bg-blue-950/40 dark:text-blue-200 dark:border-blue-800/50"
               >
-                <span
-                  className={cn(
-                    'inline-flex h-4 w-4 items-center justify-center rounded border-2 shrink-0',
-                    checked ? 'border-blue-600 bg-blue-600' : 'border-slate-300 dark:border-slate-600',
-                  )}
+                <span className="truncate font-medium">{s.name}</span>
+                <button
+                  type="button"
+                  onClick={() => toggle(s.id)}
+                  aria-label={`移除 ${s.name}`}
+                  className="inline-flex h-4 w-4 items-center justify-center rounded-full hover:bg-blue-200/70 dark:hover:bg-blue-800/60 cursor-pointer shrink-0"
                 >
-                  {checked && <Check width={10} height={10} className="text-white" strokeWidth={3.5} />}
-                </span>
-                <span className="font-medium truncate">{s.name}</span>
-                <span className="text-[10px] text-slate-500 dark:text-slate-400 ml-auto shrink-0">
-                  {s.classNumber} · {s.studentId}
-                </span>
-              </li>
-            );
-          })
+                  <X width={10} height={10} strokeWidth={3} />
+                </button>
+              </span>
+            ))}
+            {hiddenCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setOpen(true)}
+                title={selectedStudents.map((s) => s.name).join('、')}
+                className="inline-flex items-center h-[22px] px-2 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+              >
+                +{hiddenCount} 更多
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+            尚未選擇學生, 撳「選擇學生」勾選此站上/落車名單。
+          </p>
         )}
-      </ul>
+      </div>
+
+      {/* 展開: 搜尋 + 滾動清單 (固定高度, 20-35 人唔會撐版) */}
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            key="student-picker"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: EASE }}
+            className="overflow-hidden border-t border-slate-100 dark:border-slate-700/80"
+          >
+            <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-700/80">
+              <Search width={11} height={11} className="text-slate-400 shrink-0" />
+              <input
+                type="text"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="搜尋學生姓名 / 學號…"
+                className="flex-1 h-6 bg-transparent text-[12px] text-slate-700 placeholder:text-slate-400 focus:outline-none dark:text-slate-200"
+              />
+              <button
+                type="button"
+                onClick={selectAllFiltered}
+                className="text-[10.5px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300 shrink-0 cursor-pointer"
+              >
+                全選篩選
+              </button>
+            </div>
+            <ul className="max-h-[168px] overflow-y-auto p-1.5 grid grid-cols-2 gap-1 content-start">
+              {filtered.length === 0 ? (
+                <li className="col-span-2 px-2.5 py-2 text-[11px] text-slate-500 dark:text-slate-400">
+                  沒有符合「{query}」的學生
+                </li>
+              ) : (
+                filtered.map((s) => {
+                  const checked = selectedIds.includes(s.id);
+                  return (
+                    <li
+                      key={s.id}
+                      onClick={() => toggle(s.id)}
+                      title={`${s.name} · ${s.classNumber} · ${s.studentId}`}
+                      className={cn(
+                        'flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer text-[12px] transition-colors min-w-0',
+                        checked
+                          ? 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200'
+                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/60',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'inline-flex h-4 w-4 items-center justify-center rounded border-2 shrink-0',
+                          checked ? 'border-blue-600 bg-blue-600' : 'border-slate-300 dark:border-slate-600',
+                        )}
+                      >
+                        {checked && <Check width={10} height={10} className="text-white" strokeWidth={3.5} />}
+                      </span>
+                      <span className="font-medium truncate">{s.name}</span>
+                      <span className="text-[9px] leading-tight text-slate-400 dark:text-slate-500 ml-auto shrink-0 tabular-nums">
+                        {s.classNumber} · {s.studentId}
+                      </span>
+                    </li>
+                  );
+                })
+              )}
+            </ul>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -242,10 +355,6 @@ function StopRow({
           <Pill tone={stopKindTone(stop.kind)} size="sm">
             {stopKindLabel(stop.kind)}
           </Pill>
-          <span className="inline-flex items-center gap-1 text-[10.5px] text-slate-500 dark:text-slate-400 tabular-nums">
-            <Clock width={10} height={10} />
-            {stop.eta || '—:—'}
-          </span>
           <div className="flex-1 min-w-0">
             <p className="text-[12.5px] font-medium text-slate-900 truncate dark:text-slate-100">
               {stop.name || (
@@ -328,20 +437,41 @@ function StopRow({
                   </div>
                 </div>
 
-                {/* 到站時間 */}
+                {/* 到站時間 ETA */}
+                <div>
+                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400 inline-flex items-center gap-1">
+                    <Clock width={11} height={11} />
+                    到站時間
+                  </label>
+                  <input
+                    type="time"
+                    value={stop.eta}
+                    onChange={(e) => onUpdate({ eta: e.target.value })}
+                    className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                  />
+                </div>
+
+                {/* 地理定位 GPS (地圖預覽用) */}
                 <div>
                   <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    到站時間 (ETA) <span className="text-rose-500">*</span>
+                    地理定位 GPS
                   </label>
-                  <div className="relative">
-                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-                      <Clock width={12} height={12} />
-                    </span>
+                  <div className="grid grid-cols-2 gap-1.5">
                     <input
-                      type="time"
-                      value={stop.eta}
-                      onChange={(e) => onUpdate({ eta: e.target.value })}
-                      className="w-full h-9 pl-8 pr-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                      type="number"
+                      step="any"
+                      value={stop.latitude ?? ''}
+                      onChange={(e) => onUpdate({ latitude: e.target.value === '' ? null : Number(e.target.value) })}
+                      placeholder="緯度 22.38"
+                      className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                    />
+                    <input
+                      type="number"
+                      step="any"
+                      value={stop.longitude ?? ''}
+                      onChange={(e) => onUpdate({ longitude: e.target.value === '' ? null : Number(e.target.value) })}
+                      placeholder="經度 114.17"
+                      className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
                     />
                   </div>
                 </div>
@@ -365,31 +495,6 @@ function StopRow({
                   </div>
                 </div>
 
-                {/* 經緯度 (選填) */}
-                <div className="md:col-span-2">
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400 inline-flex items-center gap-1">
-                    地理定位 (GPS) <span className="text-[10px] text-slate-400 normal-case font-medium">(選填 · 地圖預覽用)</span>
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <input
-                      type="number"
-                      step="0.0001"
-                      value={stop.latitude ?? ''}
-                      onChange={(e) => onUpdate({ latitude: e.target.value === '' ? null : Number(e.target.value) })}
-                      placeholder="緯度 (Latitude)"
-                      className="h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                    />
-                    <input
-                      type="number"
-                      step="0.0001"
-                      value={stop.longitude ?? ''}
-                      onChange={(e) => onUpdate({ longitude: e.target.value === '' ? null : Number(e.target.value) })}
-                      placeholder="經度 (Longitude)"
-                      className="h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                    />
-                  </div>
-                </div>
-
                 {/* 學生多選 (依第一步選定車輛) */}
                 <div className="md:col-span-2">
                   <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400 inline-flex items-center gap-1.5">
@@ -404,19 +509,6 @@ function StopRow({
                   />
                 </div>
 
-                {/* 備註 */}
-                <div className="md:col-span-2">
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    司機 / 家長備註
-                  </label>
-                  <input
-                    type="text"
-                    value={stop.notes}
-                    onChange={(e) => onUpdate({ notes: e.target.value })}
-                    placeholder="例: 屋苑車閘旁、請勿阻礙巴士站"
-                    className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                  />
-                </div>
               </div>
             </motion.div>
           )}
@@ -427,55 +519,192 @@ function StopRow({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  MapPreview — 地圖路徑預覽 (SVG, 不接外部 map provider)                         */
+/*  MapPreview — 地圖路徑預覽 (OpenStreetMap raster + maplibre-gl)               */
 /* -------------------------------------------------------------------------- */
 
-function MapPreview({ stops }: { stops: RouteStop[] }) {
-  const valid = stops.filter(
-    (s) => s.latitude !== null && s.longitude !== null,
-  ) as RouteStop[];
+const OSM_STYLE: unknown = {
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors',
+      maxzoom: 19,
+    },
+  },
+  layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
+};
 
-  if (valid.length < 2) {
+function kindColor(kind: RouteStopKind): string {
+  return kind === 'origin' ? '#10b981' : kind === 'terminal' ? '#f43f5e' : '#2563eb';
+}
+
+function MapPreview({ stops }: { stops: RouteStop[] }) {
+  // 用「節點 state」而不是 ref 追蹤容器 ——
+  // ref 只在 mount 時賦值, 若容器是後來才渲染出來 (例如 stops 從空變有資料),
+  // 底下那個 useEffect 依賴 [] 不會重跑, 地圖就永遠不會初始化 (空白框無 pin 無路線)。
+  const [container, setContainer] = React.useState<HTMLDivElement | null>(null);
+  const mapRef = React.useRef<maplibregl.Map | null>(null);
+  const markersRef = React.useRef<maplibregl.Marker[]>([]);
+  const [mapReady, setMapReady] = React.useState(false);
+
+  const valid = React.useMemo(
+    () =>
+      (stops as RouteStop[]).filter(
+        (s) => s.latitude !== null && s.longitude !== null,
+      ),
+    [stops],
+  );
+
+  /* 地圖初始化 — 依賴 container 節點 (節點出現/換掉時才重建) */
+  React.useEffect(() => {
+    if (!container) return;
+    if (mapRef.current) return;
+
+    const first = valid[0];
+    const map = new maplibregl.Map({
+      container,
+      style: OSM_STYLE as never,
+      center: first ? [first.longitude as number, first.latitude as number] : [114.1694, 22.3193],
+      zoom: first ? 13 : 11,
+      attributionControl: { compact: false } as never,
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    mapRef.current = map;
+    const ready = () => setMapReady(true);
+    map.on('load', ready);
+    map.on('idle', ready);
+    // 保險: 若 load 事件因故沒觸發 (例如 style 已在 cache), 3 秒後也放行
+    const timer = setTimeout(ready, 3000);
+    return () => {
+      clearTimeout(timer);
+      map.off('load', ready);
+      map.off('idle', ready);
+      setMapReady(false);
+      markersRef.current.forEach((m) => m.remove());
+      markersRef.current = [];
+      map.remove();
+      mapRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [container]);
+
+  /* 站點 / GPS 變動 → 重繪 markers + 路線 + 視野 */
+  React.useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+
+    const draw = () => {
+      // 清舊 markers
+      markersRef.current.forEach((m) => m.remove());
+      markersRef.current = [];
+
+      // 沒有任何有效站點 → 只清掉舊圖, 不畫線
+      if (valid.length === 0) return;
+
+      valid.forEach((s) => {
+        const el = document.createElement('div');
+        const c = kindColor(s.kind);
+        el.style.cssText = [
+          'width:26px;height:26px;border-radius:9999px',
+          `background:${c};border:2.5px solid #fff`,
+          'box-shadow:0 2px 8px rgba(0,0,0,.35)',
+          'display:flex;align-items:center;justify-content:center',
+          'color:#fff;font-size:12px;font-weight:800;line-height:1',
+          'cursor:default',
+        ].join(';');
+        el.textContent = String(s.seq);
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([s.longitude as number, s.latitude as number])
+          .setPopup(
+            new maplibregl.Popup({ offset: 14, closeButton: false }).setText(
+              `${s.seq}. ${s.name || '未命名站點'}`,
+            ),
+          )
+          .addTo(map);
+        markersRef.current.push(marker);
+      });
+
+      // 路線 (GeoJSON LineString) — 至少 2 個站點才畫線;
+      // 只有 1 站時送空 FeatureCollection (LineString 至少要 2 個點, 否則 GeoJSON 非法)
+      const hasLine = valid.length >= 2;
+      const geojson = {
+        type: 'FeatureCollection',
+        features: hasLine
+          ? [
+              {
+                type: 'Feature',
+                properties: {},
+                geometry: {
+                  type: 'LineString',
+                  coordinates: valid.map((s) => [s.longitude as number, s.latitude as number]),
+                },
+              },
+            ]
+          : [],
+      };
+
+      // source / layer 只建立一次, 之後用 setData 更新。
+      // 注意: 就算當下只有 1 個站點 (畫不出線), 也要先把 source 建立好 ——
+      // 否則之後新增第 2 個站點時 source 還沒建立, 線會一直畫不出來。
+      const src = map.getSource('route') as maplibregl.GeoJSONSource | undefined;
+      if (src) {
+        src.setData(geojson as never);
+      } else {
+        map.addSource('route', { type: 'geojson', data: geojson as never });
+        map.addLayer({
+          id: 'route-line',
+          type: 'line',
+          source: 'route',
+          paint: { 'line-color': '#2563eb', 'line-width': 4, 'line-opacity': 0.9 },
+        });
+      }
+
+      // 視野: 1 站 → 置中放大; 多站 → fitBounds
+      if (valid.length === 1) {
+        map.easeTo({
+          center: [valid[0].longitude as number, valid[0].latitude as number],
+          zoom: 15,
+          duration: 400,
+        });
+      } else if (hasLine) {
+        const bounds = new maplibregl.LngLatBounds();
+        valid.forEach((s) => bounds.extend([s.longitude as number, s.latitude as number]));
+        map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 400 });
+      }
+    };
+
+    // 用 isStyleLoaded() 而非 loaded() ——
+    // loaded() 會因瓦片載入而反覆 true/false, 一旦錯過 'load' 事件就再也畫不出來。
+    if (map.isStyleLoaded()) draw();
+    else map.once('style.load', draw);
+  }, [valid, mapReady]);
+
+  if (valid.length === 0) {
     return (
-      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50/60 dark:bg-slate-800/40 dark:border-slate-700 p-5">
-        <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
-          <Info width={12} height={12} />
-          {valid.length === 0
-            ? '尚未輸入經緯度, 輸入至少 2 個站點的 GPS 即可預覽路徑。'
-            : '需至少 2 個站點含 GPS 才能繪製路徑。'}
+      <div className="rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 overflow-hidden">
+        <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-700/80 flex items-center gap-2">
+          <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-100 text-blue-600 dark:bg-blue-950/40 dark:text-blue-300">
+            <RouteIcon width={12} height={12} />
+          </span>
+          <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+            地圖路徑預覽
+          </span>
+          <span className="ml-auto text-[10px] text-slate-400">© OpenStreetMap contributors</span>
+        </div>
+        <div className="p-5">
+          <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+            <Info width={12} height={12} />
+            尚未輸入經緯度, 輸入至少 1 個站點的 GPS 即可在 OSM 地圖預覽。
+          </div>
         </div>
       </div>
     );
   }
 
-  // 計算經緯度的 bounding box, 自動置中縮放
-  const lats = valid.map((s) => s.latitude as number);
-  const lngs = valid.map((s) => s.longitude as number);
-  const minLat = Math.min(...lats);
-  const maxLat = Math.max(...lats);
-  const minLng = Math.min(...lngs);
-  const maxLng = Math.max(...lngs);
-  const padLat = (maxLat - minLat) * 0.2 || 0.005;
-  const padLng = (maxLng - minLng) * 0.2 || 0.005;
-  const w = 100;
-  const h = 60;
-  const project = (lat: number, lng: number) => {
-    const x = ((lng - (minLng - padLng)) / ((maxLng + padLng) - (minLng - padLng))) * w;
-    const y = (1 - (lat - (minLat - padLat)) / ((maxLat + padLat) - (minLat - padLat))) * h;
-    return { x, y };
-  };
-  const points = valid.map((s) => ({
-    p: project(s.latitude as number, s.longitude as number),
-    name: s.name || `站點 ${s.seq}`,
-    seq: s.seq,
-    kind: s.kind,
-  }));
-
-  // 連成 path
-  const pathD = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.p.x.toFixed(2)} ${p.p.y.toFixed(2)}`).join(' ');
-
   return (
-    <div className="rounded-xl border border-slate-200 bg-gradient-to-br from-slate-50 to-blue-50/40 dark:from-slate-800 dark:to-blue-950/20 dark:border-slate-700 overflow-hidden">
+    <div className="rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 overflow-hidden">
       <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-700/80 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-6 w-6 items-center justify-center rounded-md bg-blue-100 text-blue-600 dark:bg-blue-950/40 dark:text-blue-300">
@@ -488,79 +717,18 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
             {valid.length} 站
           </Pill>
         </div>
-        <span className="text-[10px] text-slate-400 tabular-nums">
-          {valid[0].name} → {valid[valid.length - 1].name}
+        <span className="text-[10px] text-slate-400 tabular-nums truncate max-w-[45%]">
+          {valid[0].name || `站點 ${valid[0].seq}`} → {valid[valid.length - 1].name || `站點 ${valid[valid.length - 1].seq}`}
         </span>
       </div>
-      <div className="relative aspect-[5/3] w-full">
-        <svg
-          viewBox={`0 0 ${w} ${h}`}
-          preserveAspectRatio="xMidYMid meet"
-          className="absolute inset-0 w-full h-full"
-        >
-          {/* 底圖方格 */}
-          <defs>
-            <pattern id="mapgrid" width="5" height="5" patternUnits="userSpaceOnUse">
-              <path d="M 5 0 L 0 0 0 5" fill="none" stroke="currentColor" strokeWidth="0.15" className="text-slate-300 dark:text-slate-700" />
-            </pattern>
-          </defs>
-          <rect width={w} height={h} fill="url(#mapgrid)" />
-
-          {/* 路徑線 */}
-          <motion.path
-            d={pathD}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="0.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="text-blue-500"
-            initial={{ pathLength: 0 }}
-            animate={{ pathLength: 1 }}
-            transition={{ duration: 0.8, ease: EASE }}
-          />
-
-          {/* 站點 + 編號 */}
-          {points.map((p, i) => (
-            <g key={i}>
-              <circle
-                cx={p.p.x}
-                cy={p.p.y}
-                r="1.6"
-                className={cn(
-                  p.kind === 'origin'
-                    ? 'fill-emerald-500'
-                    : p.kind === 'terminal'
-                    ? 'fill-rose-500'
-                    : 'fill-blue-500',
-                )}
-              />
-              <circle
-                cx={p.p.x}
-                cy={p.p.y}
-                r="2.4"
-                fill="none"
-                className={cn(
-                  p.kind === 'origin'
-                    ? 'stroke-emerald-500'
-                    : p.kind === 'terminal'
-                    ? 'stroke-rose-500'
-                    : 'stroke-blue-500',
-                )}
-                strokeWidth="0.3"
-              />
-              <text
-                x={p.p.x}
-                y={p.p.y - 2.4}
-                textAnchor="middle"
-                fontSize="2.2"
-                className="fill-slate-700 dark:fill-slate-200 font-bold"
-              >
-                {p.seq}
-              </text>
-            </g>
-          ))}
-        </svg>
+      <div className="relative w-full" style={{ height: 300 }}>
+        <div ref={setContainer} className="absolute inset-0 w-full h-full" />
+      </div>
+      <div className="px-3 py-1.5 border-t border-slate-100 dark:border-slate-700/80 flex items-center justify-between">
+        <span className="text-[10px] text-slate-400">© OpenStreetMap contributors</span>
+        <span className="text-[10px] text-slate-400 tabular-nums">
+          {valid.length} 個站點有 GPS
+        </span>
       </div>
     </div>
   );

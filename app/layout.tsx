@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import AnnouncementPopup from '@/components/AnnouncementPopup';
 
 export const metadata: Metadata = {
@@ -22,12 +23,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-HK" suppressHydrationWarning>
-      <head>
-        <link
-          href="https://unpkg.com/maplibre-gl@5.0.0/dist/maplibre-gl.css"
-          rel="stylesheet"
-        />
-      </head>
       <body className="min-h-screen bg-background antialiased">
         {children}
         <AnnouncementPopup />

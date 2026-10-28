@@ -34,6 +34,13 @@ export function getParentPath(pathname: string): string {
     return '/trips';
   }
 
+  // ── /system-admin-setting/* → /settings
+  //    (後台 console 自帶返回鍵, 但 getParentPath 仍需正確映射,
+  //     給其他呼叫端 (例如 (main) layout) 使用)
+  if (/^\/system-admin-setting(?:\/|$)/.test(pathname)) {
+    return '/settings';
+  }
+
   // ── portal 子頁 → 各自的 portal 主頁
   //    (如 /nanny/trips -> /nanny, /parents/portal -> /parents/portal)
   //    注意: /parents/settings 與 /nanny/settings 是它們自己的首頁, 不在此,

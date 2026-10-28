@@ -23,12 +23,10 @@ import {
   Pencil,
   Trash2,
   Search,
-  RefreshCw,
   FileSpreadsheet,
   FolderOpen,
   CheckCircle2,
   Archive,
-  Power,
   Bell,
   BellOff,
   Sparkles,
@@ -38,6 +36,7 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import { Pill, Dot } from '../students/primitives';
 import {
   Button,
@@ -59,8 +58,6 @@ import {
   ANIMATION_EASE,
   PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
-  ROW_STAGGER_BASE,
-  ROW_STAGGER_CAP,
 } from '../students/design-tokens';
 
 /* -------------------------------------------------------------------------- */
@@ -214,7 +211,6 @@ function ConfirmDeleteModal({
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
           transition={{ duration: 0.14, ease: ANIMATION_EASE }}
           onClick={onClose}
         >
@@ -225,7 +221,6 @@ function ConfirmDeleteModal({
             className="relative w-full max-w-[420px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.14, ease: ANIMATION_EASE }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -284,19 +279,29 @@ export interface AnnouncementsConsoleContentProps {
   clientId: string;
   /** Initial loading flag */
   initiallyLoading?: boolean;
+  /**
+   * 目前使用者是否為 super_admin。
+   * super_admin 沒有自己的 clientId, 看得到所有機構的公告,
+   * 發佈時也必須指定「目標機構」 (cbl_announcements.client_id 有 FK 約束)。
+   */
+  isSuperAdmin?: boolean;
+  /** 可發佈的機構清單 (super_admin 用來選目標機構) */
+  clients?: { id: string; name: string }[];
 }
 
 export function AnnouncementsConsoleContent({
   announcements,
   clientId,
   initiallyLoading = false,
+  isSuperAdmin = false,
+  clients = [],
 }: AnnouncementsConsoleContentProps) {
+  const toast = useToast();
   const [tab, setTab] = React.useState<AnnouncementTab>('active');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [page, setPage] = React.useState(1);
   const [isLoading, setIsLoading] = React.useState(initiallyLoading);
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
 
   // Form modal state
   const [formModal, setFormModal] = React.useState<{
@@ -391,8 +396,10 @@ export function AnnouncementsConsoleContent({
         maxViewsPerUser: a.maxViewsPerUser,
         startDate: a.startDate.split('T')[0],
         endDate: a.endDate.split('T')[0],
-        isTemplate: a.isTemplate,
-        templateName: a.templateName ?? '',
+        isTemplate: false,
+        templateName: '',
+        // 編輯時保留原本的機構 (super_admin 也可以改發佈機構)
+        targetClientId: a.clientId,
       },
       editingId: a.id,
       sourceTemplateId: null,
@@ -414,17 +421,48 @@ export function AnnouncementsConsoleContent({
         endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
         isTemplate: false,
         templateName: '',
+        // 沿用範本所屬機構 (super_admin 可在 form 內改)
+        targetClientId: a.clientId,
       },
       editingId: undefined,
       sourceTemplateId: a.id,
     });
   }, []);
 
+  /**
+   * 儲存公告。
+   *
+   * 流程 (localStorage 先行 + Supabase 寫入):
+   *   1. 先寫 localStorage → UI 立即有反應 (不會等網路)
+   *   2. 再寫 Supabase → 讓其他瀏覽器/裝置的使用者也能看到
+   *   3. Supabase 失敗 → 保留 localStorage 資料 + 提示錯誤
+   *
+   * 為什麼不是「等 Supabase 成功才寫 localStorage」:
+   * - 網路失敗時管理員的編輯工作會全部白費, 體驗很差
+   * - localStorage 是這個 app 的 source of truth cache, Supabase 是持久化層
+   *
+   * 範本語意 (2026-10-26 修正):
+   *   「同時另存一份為範本」= 額外建立一筆 isTemplate=true 的資料,
+   *   而不是把這則公告本身標成範本 (那樣會讓它被 getActive() 濾掉、永遠不顯示)。
+   */
   const handleSave = React.useCallback(
     async (state: AnnouncementFormState) => {
       setIsSaving(true);
       try {
         const { STORAGE } = await import('@/lib/storage');
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+
+        // 目標機構: super_admin 必須在 form 內指定; 其他角色固定用自己的 clientId
+        const targetClientId = isSuperAdmin
+          ? state.targetClientId
+          : clientId;
+
+        if (!targetClientId) {
+          toast.error('請先選擇發佈機構');
+          setIsSaving(false);
+          return;
+        }
+
         const data = {
           title: state.title.trim(),
           content: state.content.trim(),
@@ -434,40 +472,140 @@ export function AnnouncementsConsoleContent({
           startDate: new Date(state.startDate).toISOString(),
           endDate: new Date(state.endDate).toISOString(),
           isActive: true,
-          isTemplate: state.isTemplate,
-          templateName: state.isTemplate ? state.templateName.trim() : null,
+          // 公告本身永遠不是範本 (範本是另一筆獨立資料)
+          isTemplate: false,
+          templateName: null,
         };
 
+        const trimmedTitle = state.title.trim();
+        let savedId = formModal.editingId;
+
         if (formModal.mode === 'edit' && formModal.editingId) {
-          STORAGE.announcements.update(formModal.editingId, data);
+          // 編輯: 保留原本的 currentCount (顯示次數統計不該被重設)
+          const existing = STORAGE.announcements.getById(formModal.editingId);
+          STORAGE.announcements.update(formModal.editingId, {
+            ...data,
+            clientId: targetClientId,
+            currentCount: existing?.currentCount ?? 0,
+          });
         } else {
+          savedId = STORAGE.genId('ann');
           STORAGE.announcements.add({
-            id: STORAGE.genId('ann'),
-            clientId,
+            id: savedId,
+            clientId: targetClientId,
             currentCount: 0,
             ...data,
             createdAt: new Date().toISOString(),
           });
         }
+
+        // ---- 寫入 Supabase ----
+        const sbPayload = {
+          id: savedId!,
+          clientId: targetClientId,
+          ...data,
+          currentCount:
+            formModal.mode === 'edit'
+              ? (STORAGE.announcements.getById(savedId!)?.currentCount ?? 0)
+              : 0,
+          createdAt: new Date().toISOString(),
+        };
+
+        const sbRes = formModal.mode === 'edit'
+          ? await supabaseAnnouncements.update(savedId!, {
+              title: sbPayload.title,
+              content: sbPayload.content,
+              type: sbPayload.type,
+              displayCount: sbPayload.displayCount,
+              maxViewsPerUser: sbPayload.maxViewsPerUser,
+              startDate: sbPayload.startDate,
+              endDate: sbPayload.endDate,
+              isActive: sbPayload.isActive,
+              isTemplate: sbPayload.isTemplate,
+              templateName: sbPayload.templateName,
+              clientId: sbPayload.clientId,
+            })
+          : await supabaseAnnouncements.add(sbPayload);
+
+        if (!sbRes.success) {
+          console.warn('[AnnouncementsConsole] Supabase write failed:', sbRes.error);
+          toast.error(`已儲存到本機，但同步到伺服器失敗：${sbRes.error}`);
+        } else {
+          toast.success(
+            formModal.mode === 'edit'
+              ? `公告「${trimmedTitle}」更新成功！`
+              : `公告「${trimmedTitle}」新增成功！`,
+          );
+        }
+
+        // ---- 額外建立一份範本 (獨立資料) ----
+        if (state.isTemplate && state.templateName.trim()) {
+          const templateId = STORAGE.genId('anntpl');
+          const templatePayload = {
+            id: templateId,
+            clientId: targetClientId,
+            title: trimmedTitle,
+            content: data.content,
+            type: data.type,
+            displayCount: data.displayCount,
+            currentCount: 0,
+            maxViewsPerUser: data.maxViewsPerUser,
+            startDate: data.startDate,
+            endDate: data.endDate,
+            isActive: true,
+            isTemplate: true,
+            templateName: state.templateName.trim(),
+            createdAt: new Date().toISOString(),
+          };
+          STORAGE.announcements.add(templatePayload);
+          const tplRes = await supabaseAnnouncements.add(templatePayload);
+          if (!tplRes.success) {
+            console.warn('[AnnouncementsConsole] template sync failed:', tplRes.error);
+          }
+        }
+
         setFormModal((p) => ({ ...p, open: false }));
         window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+      } catch (err) {
+        console.error('[AnnouncementsConsole] handleSave error:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`儲存失敗：${msg}`);
       } finally {
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId, clientId],
+    [formModal.mode, formModal.editingId, clientId, isSuperAdmin, toast],
   );
 
   // Toggle enable/disable announcement
   const handleToggleActive = React.useCallback(
     async (announcement: Announcement) => {
-      const { STORAGE } = await import('@/lib/storage');
-      STORAGE.announcements.update(announcement.id, {
-        isActive: !announcement.isActive,
-      });
-      window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+      try {
+        const { STORAGE } = await import('@/lib/storage');
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+        const nextActive = !announcement.isActive;
+
+        STORAGE.announcements.update(announcement.id, {
+          isActive: nextActive,
+        });
+
+        const sbRes = await supabaseAnnouncements.update(announcement.id, {
+          isActive: nextActive,
+        });
+        if (!sbRes.success) {
+          console.warn('[AnnouncementsConsole] Supabase toggle failed:', sbRes.error);
+          toast.error(`已在本機切換，但同步到伺服器失敗：${sbRes.error}`);
+        } else {
+          toast.success(`公告「${announcement.title}」已${announcement.isActive ? '停用' : '啟用'}`);
+        }
+        window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+      } catch (err) {
+        console.error('[AnnouncementsConsole] handleToggleActive error:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`切換狀態失敗：${msg}`);
+      }
     },
-    [],
+    [toast],
   );
 
   const handleDelete = React.useCallback(async () => {
@@ -475,19 +613,29 @@ export function AnnouncementsConsoleContent({
     setIsDeleting(true);
     try {
       const { STORAGE } = await import('@/lib/storage');
-      STORAGE.announcements.remove(deleteTarget.id);
+      const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+      const targetTitle = deleteTarget.title;
+      const targetId = deleteTarget.id;
+
+      STORAGE.announcements.remove(targetId);
+
+      const sbRes = await supabaseAnnouncements.remove(targetId);
+      if (!sbRes.success) {
+        console.warn('[AnnouncementsConsole] Supabase delete failed:', sbRes.error);
+        toast.error(`已在本機刪除，但同步到伺服器失敗：${sbRes.error}`);
+      } else {
+        toast.success(`公告「${targetTitle}」已刪除`);
+      }
       setDeleteTarget(null);
       window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+    } catch (err) {
+      console.error('[AnnouncementsConsole] handleDelete error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`刪除失敗：${msg}`);
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget]);
-
-  const handleRefresh = React.useCallback(() => {
-    setIsRefreshing(true);
-    window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
-    window.setTimeout(() => setIsRefreshing(false), 400);
-  }, []);
+  }, [deleteTarget, toast]);
 
   /* -------- Render -------- */
 
@@ -498,9 +646,6 @@ export function AnnouncementsConsoleContent({
       {/* L1. Header Row */}
       <motion.div
         className="flex flex-col lg:flex-row lg:items-center gap-4 lg:gap-6 pb-2"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white shrink-0">
@@ -549,16 +694,6 @@ export function AnnouncementsConsoleContent({
 
       {/* L2. Action Toolbar */}
       <div className="flex items-center gap-2 flex-wrap px-5 py-3 rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:bg-slate-900 dark:border-slate-700">
-        <Button
-          variant="secondary"
-          size="sm"
-          startIcon={<RefreshCw width={12} height={12} />}
-          onClick={handleRefresh}
-          isLoading={isRefreshing}
-        >
-          重新整理
-        </Button>
-
         <div className="ml-auto">
           <Button
             variant="primary"
@@ -603,18 +738,6 @@ export function AnnouncementsConsoleContent({
             options={TAB_OPTIONS}
             layoutId="announcements-tab-pill"
           />
-
-          <IconButton
-            onClick={handleRefresh}
-            title="重新整理列表"
-            variant="subtle"
-          >
-            <RefreshCw
-              width={13}
-              height={13}
-              className={cn(isRefreshing && 'animate-spin text-blue-600')}
-            />
-          </IconButton>
 
           <div className="relative ml-auto min-w-[220px]">
             <Search
@@ -724,6 +847,8 @@ export function AnnouncementsConsoleContent({
         isSaving={isSaving}
         onSave={handleSave}
         onClose={() => setFormModal((p) => ({ ...p, open: false }))}
+        clients={clients}
+        requireTargetClient={isSuperAdmin}
       />
 
       <ConfirmDeleteModal
@@ -746,7 +871,6 @@ function SkeletonRows() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -776,7 +900,6 @@ function EmptyState({ tab }: { tab: AnnouncementTab }) {
       key={`empty-${tab}`}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="flex flex-col items-center gap-2 py-12 px-5">
@@ -822,13 +945,8 @@ function DataTable({
   onUseTemplate: (a: Announcement) => void;
 }) {
   return (
-    <motion.table
-      className="w-full"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
-    >
+    <table
+      className="w-full">
       <thead>
         <tr className="bg-slate-50/60 border-b border-slate-100 text-[10px] uppercase tracking-[0.06em] text-slate-500 font-semibold dark:bg-slate-800/60 dark:border-slate-700/80 dark:text-slate-400">
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-5 py-2 text-left dark:bg-slate-800/95">
@@ -856,21 +974,14 @@ function DataTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((a, idx) => {
+        {rows.map((a) => {
           const typeColor = TYPE_COLORS[a.type];
           const isTemplateTab = tab === 'templates';
 
           return (
-            <motion.tr
+            <tr
               key={a.id}
               className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/50 transition-colors group dark:border-slate-700/80 dark:hover:bg-slate-800/50"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{
-                duration: 0.22,
-                ease: ANIMATION_EASE,
-                delay: Math.min(idx * ROW_STAGGER_BASE, ROW_STAGGER_CAP),
-              }}
             >
               {/* 公告 (title + content preview) */}
               <td className="px-5 py-2.5">
@@ -958,17 +1069,17 @@ function DataTable({
                         title="刪除公告"
                         variant="danger"
                       >
-                        <Power width={13} height={13} />
+                        <Trash2 width={13} height={13} />
                       </IconButton>
                     </>
                   )}
                 </div>
               </td>
-            </motion.tr>
+            </tr>
           );
         })}
       </tbody>
-    </motion.table>
+    </table>
   );
 }
 

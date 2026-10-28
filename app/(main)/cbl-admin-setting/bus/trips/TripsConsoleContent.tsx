@@ -25,7 +25,6 @@ import {
   Trash2,
   Eye,
   Search,
-  RefreshCw,
   FolderOpen,
   CheckCircle2,
   Bus as BusIcon,
@@ -38,10 +37,10 @@ import {
   User as UserIcon,
   Copy,
   Clock,
-  PowerOff,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import {
   Pill,
   Dot,
@@ -71,8 +70,6 @@ import {
   ANIMATION_EASE,
   PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
-  ROW_STAGGER_BASE,
-  ROW_STAGGER_CAP,
 } from './design-tokens';
 
 /* -------------------------------------------------------------------------- */
@@ -163,7 +160,6 @@ function ConfirmDeleteModal({
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
           transition={{ duration: 0.14, ease: ANIMATION_EASE }}
           onClick={onClose}
         >
@@ -174,7 +170,6 @@ function ConfirmDeleteModal({
             className="relative w-full max-w-[420px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.14, ease: ANIMATION_EASE }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -244,12 +239,12 @@ export function TripsConsoleContent({
   students,
   initiallyLoading = false,
 }: TripsConsoleContentProps) {
+  const toast = useToast();
   const [tab, setTab] = React.useState<RouteTab>('all');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [page, setPage] = React.useState(1);
   const [isLoading, setIsLoading] = React.useState(initiallyLoading);
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
 
   // Form modal state
   const [formModal, setFormModal] = React.useState<{
@@ -330,17 +325,26 @@ export function TripsConsoleContent({
       setIsSaving(true);
       try {
         const { STORAGE } = await import('@/lib/storage');
+        // 超管新增時若沒有所屬學校 → 掛到第一間學校 (cbl_routes.client_id 有 FK 必填)
         const clientId = (() => {
           try {
             const raw = localStorage.getItem('cbl_auth');
-            return raw ? JSON.parse(raw)?.clientId || '' : '';
+            const u = raw ? JSON.parse(raw) : null;
+            if (u?.clientId) return u.clientId as string;
+            if (u?.role === 'super_admin' || u?.role === 'system_admin') {
+              const firstBus = STORAGE.buses.getAll()[0];
+              if (firstBus?.clientId) return firstBus.clientId as string;
+              const firstRoute = STORAGE.routes.getAll()[0];
+              if (firstRoute?.clientId) return firstRoute.clientId as string;
+            }
+            return STORAGE.clients.getAll()[0]?.id || '';
           } catch {
-            return '';
+            return STORAGE.clients.getAll()[0]?.id || '';
           }
         })();
         const now = new Date().toISOString();
         if (formModal.mode === 'add') {
-          STORAGE.routes.add({
+          const newRoute = {
             id: STORAGE.genId('route'),
             clientId,
             code: master.code.trim(),
@@ -352,9 +356,18 @@ export function TripsConsoleContent({
             stops: stops.map((s, idx) => ({ ...s, seq: idx + 1 })),
             createdAt: now,
             updatedAt: now,
-          });
+          };
+          STORAGE.routes.add(newRoute);
+
+          // 推回雲端 (背景)
+          const { supabaseRouteRecords } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseRouteRecords.add(newRoute);
+          if (!sbRes.success) {
+            console.warn('[TripsConsole] Supabase add failed:', sbRes.error);
+            toast.warning(`路線已新增，但雲端同步失敗：${sbRes.error}`);
+          }
         } else if (formModal.editingId) {
-          STORAGE.routes.update(formModal.editingId, {
+          const updates = {
             code: master.code.trim(),
             name: master.name.trim(),
             shiftType: master.shiftType,
@@ -362,15 +375,33 @@ export function TripsConsoleContent({
             driverId: master.driverId,
             nannyId: master.nannyId,
             stops: stops.map((s, idx) => ({ ...s, seq: idx + 1 })),
-          });
+          };
+          STORAGE.routes.update(formModal.editingId, updates);
+
+          // 推回雲端 (背景)
+          const { supabaseRouteRecords } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseRouteRecords.update(formModal.editingId, updates);
+          if (!sbRes.success) {
+            console.warn('[TripsConsole] Supabase update failed:', sbRes.error);
+            toast.warning(`路線已更新，但雲端同步失敗：${sbRes.error}`);
+          }
         }
         setFormModal((p) => ({ ...p, open: false }));
+        if (formModal.mode === 'add') {
+          toast.success(`路線「${master.name.trim()} (${master.code.trim()})」新增成功！`);
+        } else {
+          toast.success(`路線「${master.name.trim()} (${master.code.trim()})」更新成功！`);
+        }
         window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
+      } catch (err) {
+        console.error('[TripsConsole] handleSave error:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`儲存失敗：${msg}`);
       } finally {
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId],
+    [formModal.mode, formModal.editingId, toast],
   );
 
   const handleDelete = React.useCallback(async () => {
@@ -378,19 +409,28 @@ export function TripsConsoleContent({
     setIsDeleting(true);
     try {
       const { STORAGE } = await import('@/lib/storage');
+      const targetName = deleteTarget.name;
       STORAGE.routes.remove(deleteTarget.id);
+
+      // 推回雲端 (刪除)
+      const { supabaseRouteRecords } = await import('@/lib/supabase-entities');
+      const sbRes = await supabaseRouteRecords.remove(deleteTarget.id);
+      if (!sbRes.success) {
+        console.warn('[TripsConsole] Supabase delete failed:', sbRes.error);
+        toast.warning(`路線已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+      }
+
+      toast.success(`路線「${targetName}」已刪除`);
       setDeleteTarget(null);
       window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
+    } catch (err) {
+      console.error('[TripsConsole] handleDelete error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`刪除失敗：${msg}`);
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget]);
-
-  const handleRefresh = React.useCallback(() => {
-    setIsRefreshing(true);
-    window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
-    window.setTimeout(() => setIsRefreshing(false), 400);
-  }, []);
+  }, [deleteTarget, toast]);
 
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
@@ -458,9 +498,6 @@ export function TripsConsoleContent({
       {/* L1. Header Row */}
       <motion.div
         className="flex flex-col lg:flex-row lg:items-center gap-4 lg:gap-6 pb-2"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-600 text-white shrink-0">
@@ -535,16 +572,6 @@ export function TripsConsoleContent({
         <Button
           variant="secondary"
           size="sm"
-          startIcon={<RefreshCw width={12} height={12} />}
-          onClick={handleRefresh}
-          isLoading={isRefreshing}
-        >
-          重新整理
-        </Button>
-
-        <Button
-          variant="secondary"
-          size="sm"
           startIcon={<FileSpreadsheet width={12} height={12} />}
           onClick={handleExportExcel}
           disabled={filtered.length === 0}
@@ -596,18 +623,6 @@ export function TripsConsoleContent({
             options={TAB_OPTIONS}
             layoutId="routes-tab-pill"
           />
-
-          <IconButton
-            onClick={handleRefresh}
-            title="重新整理列表"
-            variant="subtle"
-          >
-            <RefreshCw
-              width={13}
-              height={13}
-              className={cn(isRefreshing && 'animate-spin text-blue-600')}
-            />
-          </IconButton>
 
           <div className="relative ml-auto min-w-[220px]">
             <Search
@@ -742,7 +757,6 @@ function SkeletonRows() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -778,7 +792,6 @@ function EmptyState({
       key={`empty-${tab}-${search}`}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="flex flex-col items-center gap-2 py-12 px-5">
@@ -847,13 +860,8 @@ function DataTable({
   }, [nannies]);
 
   return (
-    <motion.table
-      className="w-full"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
-    >
+    <table
+      className="w-full">
       <thead>
         <tr className="bg-slate-50/60 border-b border-slate-100 text-[10px] uppercase tracking-[0.06em] text-slate-500 font-semibold dark:bg-slate-800/60 dark:border-slate-700/80 dark:text-slate-400">
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-5 py-2 text-left dark:bg-slate-800/95">
@@ -883,21 +891,14 @@ function DataTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((r, idx) => {
+        {rows.map((r) => {
           const bus = r.busId ? busesById.get(r.busId) : null;
           const driver = r.driverId ? driversById.get(r.driverId) : null;
           const nanny = r.nannyId ? nanniesById.get(r.nannyId) : null;
           return (
-            <motion.tr
+            <tr
               key={r.id}
               className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/50 transition-colors group dark:border-slate-700/80 dark:hover:bg-slate-800/50"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{
-                duration: 0.22,
-                ease: ANIMATION_EASE,
-                delay: Math.min(idx * ROW_STAGGER_BASE, ROW_STAGGER_CAP),
-              }}
             >
               {/* 路線 (icon + name) */}
               <td className="px-5 py-2.5">
@@ -996,7 +997,7 @@ function DataTable({
                         </>
                       )}
                       <Pill tone="neutral" size="sm" className="ml-1">
-                        {r.stops.reduce((acc, s) => acc + s.studentIds.length, 0)} 生
+                        {r.stops.reduce((acc, s) => acc + s.studentIds.length, 0)} 個
                       </Pill>
                     </>
                   )}
@@ -1025,15 +1026,15 @@ function DataTable({
                     title="刪除路線"
                     variant="danger"
                   >
-                    <PowerOff width={13} height={13} />
+                    <Trash2 width={13} height={13} />
                   </IconButton>
                 </div>
               </td>
-            </motion.tr>
+            </tr>
           );
         })}
       </tbody>
-    </motion.table>
+    </table>
   );
 }
 

@@ -2,26 +2,47 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { STORAGE } from './storage';
-import { initMockData } from './mock-data';
 import { initWithSupabase, isSupabaseAvailable } from './supabase-data';
 import type { User, UserRole } from './types';
 
-// 初始化 mock 數據 (僅在 client side)
+// 初始化資料 (僅在 client side, 只走 Supabase)
 export function useInitData() {
   useEffect(() => {
-    // 如果有 Supabase 配置，先嘗試同步，否則使用 mock 數據
     const init = async () => {
       if (isSupabaseAvailable()) {
-        const synced = await initWithSupabase();
-        if (!synced) {
-          console.log('[Auth] Falling back to mock data');
-          initMockData();
-        }
-      } else {
-        initMockData();
+        await initWithSupabase();
       }
     };
     init();
+  }, []);
+}
+
+/**
+ * 同步「登入帳號」到 LocalStorage — 每次 mount 都會執行 (不論是否已 initialized)。
+ *
+ * 為什麼要獨立於 useInitData:
+ * - initWithSupabase() 在 localStorage 已 initialized 時會直接 return true,
+ *   所以其他資料在第一次載入後就不再更新 (這是刻意的, 避免每次都重拉)
+ * - 但「登入帳號」是安全相關資料: 密碼被改、帳號被停用、名稱被更新...
+ *   這些都必須即時反映, 否則舊密碼仍可登入
+ * - cbl_users 是一張很小的表, 每次 mount 拉一次的成本可以忽略
+ */
+export function useSyncUsers() {
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      if (!isSupabaseAvailable()) return;
+      try {
+        const { supabaseUsers } = await import('./supabase-users');
+        await supabaseUsers.syncToStorage();
+      } catch (e) {
+        console.warn('[Auth] user sync failed:', e);
+      }
+    };
+    sync();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 }
 
@@ -36,6 +57,7 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useInitData();
+  useSyncUsers();
 
   useEffect(() => {
     setUser(STORAGE.auth.get());
@@ -48,51 +70,14 @@ export function useAuth() {
     password: string,
     allowedRoles?: UserRole[]
   ): { ok: boolean; error?: string; user?: User } => {
-    initMockData();
-
-    // 內建超級管理員帳號 (Bootstrap Admin)
-    // - 永遠存在, 與資料來源 (mock / Supabase) 解耦
-    // - 當 admin 嘗試登入時, 若 storage 內找不到, 自動補回, 避免「帳戶不存在」
-    // - 密碼不符仍回傳「密碼錯誤」(不繞過密碼檢查)
-    const ensureBootstrapAdmin = (): User | null => {
-      const BOOTSTRAP_ADMIN_PHONE = 'admin';
-      const BOOTSTRAP_ADMIN_PASSWORD = 'admin123';
-      if (password !== BOOTSTRAP_ADMIN_PASSWORD) return null;
-
-      const existing = STORAGE.users.findByPhone(BOOTSTRAP_ADMIN_PHONE);
-      if (existing) return existing;
-
-      const adminUser: User = {
-        id: 'user-admin-bootstrap',
-        phone: BOOTSTRAP_ADMIN_PHONE,
-        password: BOOTSTRAP_ADMIN_PASSWORD,
-        role: 'super_admin',
-        name: '系統管理員',
-        email: 'admin@cloudbuslink.com',
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      };
-      STORAGE.users.add(adminUser);
-      console.log('[Auth] Bootstrap admin account created on demand');
-      return adminUser;
-    };
-
-    // 支援 admin 登入 (超級管理員)
-    if (phone === 'admin') {
-      const found =
-        ensureBootstrapAdmin() ?? STORAGE.users.findByPhone('admin');
-      if (!found) return { ok: false, error: '帳戶不存在' };
-      if (found.password !== password) return { ok: false, error: '密碼錯誤' };
-      if (found.status !== 'active') return { ok: false, error: '帳戶已停用' };
-      if (allowedRoles && allowedRoles.length > 0 && !allowedRoles.includes(found.role)) {
-        return { ok: false, error: '您無權使用此入口登入' };
-      }
-      STORAGE.auth.set(found);
-      setUser(found);
-      return { ok: true, user: found };
-    }
-    
-    const found = STORAGE.users.findByPhone(phone);
+    // 帳號一律從 STORAGE 查找 (STORAGE 內的資料由 Supabase sync 帶進來,
+    // 且 useSyncUsers() 每次 mount 都會把 cbl_users 拉回來覆蓋)。
+    //
+    // 註: 這裡「刻意」不再保留任何 bootstrap / 後門管理員帳號。
+    // 舊版有一個 `admin` / `admin123` 的硬寫超管, 任何人知道帳密就能拿到
+    // 系統最高權限 — 已經移除。現在的超管必須是在 /cbl-admin-setting/user
+    // 建立的正式帳號 (密碼存在 cbl_users)。
+    const found = STORAGE.users.findByPhone(phone.trim());
     if (!found) return { ok: false, error: '帳戶不存在' };
     if (found.password !== password) return { ok: false, error: '密碼錯誤' };
     if (found.status !== 'active') return { ok: false, error: '帳戶已停用' };

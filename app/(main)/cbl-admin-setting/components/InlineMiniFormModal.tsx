@@ -3,20 +3,18 @@
 /**
  * InlineMiniFormModal — 通用小型「在表單內新增」彈窗
  *
- * 給 TripRouteFormModal 內聯使用, 讓使用者可在表單中即時新增:
- *   - 校巴 (Bus)
- *   - 司機 (Driver)
- *   - 保姆 (Nanny)
- *
- * 設計:
- *   - 共用同一個殼, 透過 type 切換欄位
+ * 設計範圍:
+ *   - 給 /cbl-admin-setting/ 內所有表單 (TripRouteFormModal, StudentFormModal,
+ *     TripFormModal, NannyFormModal 等) 共用, 讓使用者可在表單中即時新增:
+ *       - 校巴 (Bus)
+ *       - 司機 (Driver)
+ *       - 保姆 (Nanny)
  *   - 寫入 STORAGE 後回傳新建的 entity, 由父層自動勾選到對應 select
  *   - 沿用 OneFleet Modal chrome 風格 (與 students 一致)
- *
- * 範圍: 僅 /cbl-admin-setting/bus/trips/ 內使用。
  */
 
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   X,
@@ -31,8 +29,9 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { Button, Pill } from './primitives';
-import { MODAL_FADE, MODAL_SLIDE, EASE } from './design-tokens';
+import { useToast } from '@/components/ui/toast';
+import { Button, Pill } from '../[layout]/students/primitives';
+import { MODAL_FADE, MODAL_SLIDE, EASE } from '../[layout]/students/design-tokens';
 import type { Bus, Driver, Nanny } from '@/lib/types';
 
 type Mode = 'bus' | 'driver' | 'nanny';
@@ -62,9 +61,9 @@ const MODE_META: Record<
   Mode,
   { title: string; subtitle: string; Icon: LucideIcon }
 > = {
-  bus:    { title: '新增校巴', subtitle: '在路線表單內即時建立一輛校巴', Icon: BusIcon },
-  driver: { title: '新增司機', subtitle: '在路線表單內即時建立一位司機', Icon: UserCog },
-  nanny:  { title: '新增保姆', subtitle: '在路線表單內即時建立一位保姆', Icon: UserCheck },
+  bus:    { title: '新增校巴', subtitle: '在表單內即時建立一輛校巴', Icon: BusIcon },
+  driver: { title: '新增司機', subtitle: '在表單內即時建立一位司機', Icon: UserCog },
+  nanny:  { title: '新增保姆', subtitle: '即時建立保姆資料 + 登入帳號 (密碼預設為電話)', Icon: UserCheck },
 };
 
 function LabeledInput({
@@ -146,6 +145,7 @@ function InlineFieldError({ message }: { message: string | null }) {
 
 export function InlineMiniFormModal(props: Props) {
   const { open, mode, isSaving, onClose } = props;
+  const toast = useToast();
   const meta = MODE_META[mode];
   const Icon = meta.Icon;
 
@@ -155,7 +155,7 @@ export function InlineMiniFormModal(props: Props) {
   const [name, setName] = React.useState('');
   const [phone, setPhone] = React.useState('');
   const [license, setLicense] = React.useState('');
-  const [employeeId, setEmployeeId] = React.useState('');
+  const [employeeIdPreview, setEmployeeIdPreview] = React.useState('');
   const [touched, setTouched] = React.useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
@@ -166,8 +166,21 @@ export function InlineMiniFormModal(props: Props) {
       setName('');
       setPhone('');
       setLicense('');
-      setEmployeeId('');
       setTouched({});
+      // 保姆模式: 預先產生員工編號 preview (EMP-001 格式, 與保姆管理頁一致)
+      if (mode === 'nanny') {
+        import('@/lib/storage').then(({ STORAGE }) => {
+          try {
+            const raw = localStorage.getItem('cbl_auth');
+            const cid = raw ? JSON.parse(raw)?.clientId || '' : '';
+            setEmployeeIdPreview(cid ? STORAGE.nannies.generateEmployeeId(cid) : '');
+          } catch {
+            setEmployeeIdPreview('');
+          }
+        });
+      } else {
+        setEmployeeIdPreview('');
+      }
     }
   }, [open, mode]);
 
@@ -175,7 +188,7 @@ export function InlineMiniFormModal(props: Props) {
     const out: Record<string, string | null> = {};
     if (mode === 'bus') {
       out.plateNumber = !plateNumber.trim() ? '請輸入車牌' : null;
-      out.model = !model.trim() ? '請輸入型號' : null;
+      out.model = null; // 選填, busLabel 會顯示「未填型號」
       out.capacity =
         !capacity || isNaN(Number(capacity)) || Number(capacity) < 1
           ? '座位數需 > 0'
@@ -187,10 +200,11 @@ export function InlineMiniFormModal(props: Props) {
     } else {
       out.name = !name.trim() ? '請輸入姓名' : null;
       out.phone = !/^[0-9]{8}$/.test(phone) ? '電話需為 8 位數字' : null;
-      out.employeeId = !employeeId.trim() ? '請輸入員工編號' : null;
+      // 員工編號由系統自動生成, 不需使用者填寫
+      out.employeeId = null;
     }
     return out;
-  }, [mode, plateNumber, model, capacity, name, phone, license, employeeId]);
+  }, [mode, plateNumber, model, capacity, name, phone, license]);
 
   const canSubmit =
     !isSaving && Object.values(errors).every((e) => e === null);
@@ -203,7 +217,21 @@ export function InlineMiniFormModal(props: Props) {
     const all: Record<string, boolean> = {};
     Object.keys(errors).forEach((k) => (all[k] = true));
     setTouched(all);
-    if (!canSubmit) return;
+    if (!canSubmit) {
+      // 找出第一個錯誤欄位, 給 toast 一個明確訊息
+      const errorMap: Record<string, string> = {
+        plateNumber: '請輸入車牌',
+        model: '請輸入車輛型號',
+        capacity: '座位數必須大於 0',
+        name: '請輸入姓名',
+        phone: '請輸入有效的電話號碼 (8 位數字)',
+        license: '請輸入駕照號碼',
+        employeeId: '請輸入員工編號',
+      };
+      const firstError = Object.entries(errors).find(([, v]) => v)?.[0] ?? '';
+      toast.error(errorMap[firstError] || '請檢查並修正表單欄位');
+      return;
+    }
     try {
       const { STORAGE } = await import('@/lib/storage');
       const clientId = (() => {
@@ -227,6 +255,8 @@ export function InlineMiniFormModal(props: Props) {
           createdAt: new Date().toISOString(),
         };
         STORAGE.buses.add(bus);
+        window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+        toast.success(`校巴「${bus.plateNumber}」已新增`);
         (props as BusProps).onCreated(bus);
       } else if (mode === 'driver') {
         const driver: Driver = {
@@ -240,36 +270,100 @@ export function InlineMiniFormModal(props: Props) {
           createdAt: new Date().toISOString(),
         };
         STORAGE.drivers.add(driver);
+        window.dispatchEvent(new CustomEvent('cbl-drivers-refresh'));
+        toast.success(`司機「${driver.name}」已新增`);
         (props as DriverProps).onCreated(driver);
       } else {
+        // 保姆模式: 完整資料 = 保姆紀錄 + 登入帳號 (與保姆管理頁 handleSave 一致)
+        const trimmedName = name.trim();
+        const trimmedPhone = phone.trim();
+        // 員工編號 race-safe: 寫入當下重新生成一次, 避免 preview 與實際重號
+        const finalEmployeeId = STORAGE.nannies.generateEmployeeId(clientId);
+        // 1) 登入帳號 (cbl_users, role=nanny, 密碼預設為電話)
+        const existingUser = STORAGE.users.findByPhone(trimmedPhone);
+        if (existingUser) {
+          STORAGE.users.update(existingUser.id, { name: trimmedName });
+        } else {
+          STORAGE.users.add({
+            id: STORAGE.genId('user'),
+            phone: trimmedPhone,
+            password: trimmedPhone,
+            role: 'nanny',
+            name: trimmedName,
+            clientId,
+            status: 'active',
+            createdAt: new Date().toISOString(),
+          });
+        }
+        window.dispatchEvent(new CustomEvent('cbl-users-refresh'));
+        // 2) 背景推登入帳號到雲端 (不阻擋 UI, 與保姆管理頁邏輯一致)
+        try {
+          const { supabaseUsers } = await import('@/lib/supabase-users');
+          const account = STORAGE.users.findByPhone(trimmedPhone);
+          if (account) {
+            const existing = await supabaseUsers.findByPhone(trimmedPhone);
+            if (existing.data) {
+              await supabaseUsers.update(existing.data.id, { name: trimmedName });
+            } else {
+              await supabaseUsers.add({
+                id: account.id,
+                phone: account.phone,
+                password: account.password,
+                role: 'nanny',
+                name: account.name,
+                clientId: account.clientId,
+                status: account.status,
+                createdAt: account.createdAt,
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('[InlineMiniFormModal] nanny user cloud push failed:', e);
+        }
+        // 3) 保姆紀錄
         const nanny: Nanny = {
           id: STORAGE.genId('nanny'),
           clientId,
-          name: name.trim(),
-          phone: phone.trim(),
-          employeeId: employeeId.trim(),
+          name: trimmedName,
+          phone: trimmedPhone,
+          employeeId: finalEmployeeId,
           photo: null,
           assignedBusIds: [],
           status: 'active',
           createdAt: new Date().toISOString(),
         };
         STORAGE.nannies.add(nanny);
+        // 保姆事件有兩種拼法並存 → 同時送兩種 (相容所有監聽端)
+        window.dispatchEvent(new CustomEvent('cbl-nannies-refresh'));
+        window.dispatchEvent(new CustomEvent('cbl-nannys-refresh'));
+        // 4) 背景推保姆到雲端 (cbl_nannies, 不阻擋 UI)
+        try {
+          const { supabaseNannies } = await import('@/lib/supabase-entities');
+          const res = await supabaseNannies.add(nanny);
+          if (!res.success) {
+            console.warn('[InlineMiniFormModal] nanny cloud push failed:', res.error);
+          }
+        } catch (e) {
+          console.warn('[InlineMiniFormModal] nanny cloud push failed:', e);
+        }
+        toast.success(`保姆「${nanny.name}」已新增！登入帳號已建立 (密碼預設為電話)`);
         (props as NannyProps).onCreated(nanny);
       }
       onClose();
     } catch (e) {
-      // 失敗也不關 modal, 讓父層看到錯誤
-      console.error(e);
+      console.error('[InlineMiniFormModal] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`新增失敗：${msg}`);
     }
   };
 
-  return (
+  return createPortal(
     <AnimatePresence>
       {open && (
         <motion.div
           key="inline-mini-form-backdrop"
           role="presentation"
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -411,6 +505,18 @@ export function InlineMiniFormModal(props: Props) {
 
               {mode === 'nanny' && (
                 <>
+                  <div className="md:col-span-2">
+                    <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 mb-1 inline-flex items-center gap-1.5 dark:text-slate-400">
+                      員工編號
+                      <span className="text-[10px] text-slate-400 normal-case font-medium tracking-normal">
+                        (自動生成, 不可修改)
+                      </span>
+                    </label>
+                    <div className="h-9 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 text-[12px] font-mono text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200">
+                      <Hash width={11} height={11} className="text-slate-400" />
+                      {employeeIdPreview || '—'}
+                    </div>
+                  </div>
                   <div>
                     <LabeledInput
                       id="inline-nanny-name"
@@ -427,7 +533,7 @@ export function InlineMiniFormModal(props: Props) {
                   <div>
                     <LabeledInput
                       id="inline-nanny-phone"
-                      label="電話"
+                      label="電話 (登入帳號)"
                       value={phone}
                       onChange={(v) => setPhone(v.replace(/\D/g, '').slice(0, 8))}
                       onBlur={() => markTouched('phone')}
@@ -441,17 +547,9 @@ export function InlineMiniFormModal(props: Props) {
                     <InlineFieldError message={touched.phone ? errors.phone : null} />
                   </div>
                   <div className="md:col-span-2">
-                    <LabeledInput
-                      id="inline-nanny-employee"
-                      label="員工編號"
-                      value={employeeId}
-                      onChange={setEmployeeId}
-                      onBlur={() => markTouched('employeeId')}
-                      placeholder="EMP-003"
-                      required
-                      icon={<Hash width={12} height={12} />}
-                    />
-                    <InlineFieldError message={touched.employeeId ? errors.employeeId : null} />
+                    <div className="rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-[11px] text-blue-800/90 leading-relaxed dark:border-blue-800/40 dark:bg-blue-950/30 dark:text-blue-200/90">
+                      登入帳號會自動建立：帳號 = 電話，密碼預設 = 電話，保姆首次登入後可至「個人資料」修改。狀態預設為啟用，可登入打卡。
+                    </div>
                   </div>
                 </>
               )}
@@ -488,6 +586,7 @@ export function InlineMiniFormModal(props: Props) {
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+    </AnimatePresence>,
+    document.body,
   );
 }

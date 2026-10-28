@@ -66,6 +66,7 @@ export function isLate(planned: string, actual: string): boolean {
 // 角色中文標籤
 export function roleLabel(role: string): string {
   const map: Record<string, string> = {
+    system_admin: '系統開發者',
     super_admin: '系統管理員',
     client: '客戶',
     parent: '家長',

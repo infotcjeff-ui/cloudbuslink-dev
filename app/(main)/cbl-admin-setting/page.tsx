@@ -4,13 +4,11 @@ import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   Shield, Sparkles, Activity, Sun, UserCircle2,
-  MapPin, ChevronRight, Users, Bus, Baby, UserCheck,
-  BarChart3, Megaphone, Wrench, FileSpreadsheet, Receipt,
-  CalendarClock,
+  Users, Bus, Baby,
+  BarChart3,
 } from 'lucide-react';
 import { useAuth } from '@/lib/hooks';
 import { useCblStats } from './hooks/useCblStats';
-import Link from 'next/link';
 import { cn } from '@/lib/utils';
 
 /**
@@ -25,11 +23,12 @@ import { cn } from '@/lib/utils';
  * 內容:
  *  1. Welcome hero  (淺色, 含 greeting + 即時時間 + 角色 chip)
  *  2. 4 格 quick-stat (用現有 useCblStats, 配色跟專案 StatCard 一致)
- *  3. 模組捷徑 grid (每個 menu tab 一張卡, 點擊直達)
+ *  3. Footer line
  */
 
 function roleLabel(role: string | undefined): string {
   switch ((role || '').toLowerCase()) {
+    case 'system_admin':  return '系統開發者';
     case 'super_admin':
     case 'admin':       return '系統管理員';
     case 'client':      return '客戶管理員';
@@ -221,107 +220,7 @@ export default function CblAdminOverviewPage() {
       </motion.section>
 
       {/* ============================================================
-          3. 模組捷徑 — 每個 menu tab 一張卡
-          ============================================================ */}
-      <motion.section
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, delay: 0.1 }}
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-muted-foreground">模組捷徑</h2>
-          <span className="text-xs text-muted-foreground">從左側選單亦可進入</span>
-        </div>
-        <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-          <ModuleCard
-            href="/cbl-admin-setting/schedule"
-            icon={CalendarClock}
-            title="班次"
-            desc="今日班次、發車時間、即時狀態"
-            color="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/bus"
-            icon={Bus}
-            title="班次 · 校巴"
-            desc="校巴總覽、運行狀態、維護"
-            color="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/bus/trips"
-            icon={FileSpreadsheet}
-            title="班次 · 路線"
-            desc="站點、班次、學生名單"
-            color="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/bus/drivers"
-            icon={MapPin}
-            title="班次 · 司機"
-            desc="駕照、值勤、校巴指派"
-            color="bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/parents/childrens"
-            icon={Baby}
-            title="家長 · 子女"
-            desc="依家長檢視綁定子女"
-            color="bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/parents/payment"
-            icon={Receipt}
-            title="家長 · 付款記錄"
-            desc="應付 / 應收 / 完整記錄 / PDF"
-            color="bg-rose-100 text-rose-600 dark:bg-rose-900/30 dark:text-rose-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/students"
-            icon={Baby}
-            title="學生"
-            desc="完整資料含班級 / 監護人"
-            color="bg-sky-100 text-sky-600 dark:bg-sky-900/30 dark:text-sky-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/nannys"
-            icon={UserCheck}
-            title="保姆"
-            desc="校巴分配、聯絡資料"
-            color="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/reports"
-            icon={BarChart3}
-            title="報表"
-            desc="匯出 Excel 出席統計"
-            color="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/30 dark:text-indigo-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/user"
-            icon={Shield}
-            title="用戶 · 功能權限"
-            desc="switch button 分配功能"
-            color="bg-cyan-100 text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/announcements"
-            icon={Megaphone}
-            title="公告"
-            desc="發布通告給家長 / 保姆"
-            color="bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-300"
-          />
-          <ModuleCard
-            href="/cbl-admin-setting/site-tool"
-            icon={Wrench}
-            title="網站設定"
-            desc="公司資料、主題色、聯絡資訊"
-            color="bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-          />
-        </div>
-      </motion.section>
-
-      {/* ============================================================
-          4. Footer line
+          3. Footer line
           ============================================================ */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
         <span>© {new Date().getFullYear()} CloudBusLink · CBL Admin Console</span>
@@ -361,37 +260,5 @@ function QuickStat({
         <p className="mt-1 text-[11px] text-muted-foreground">{hint}</p>
       )}
     </div>
-  );
-}
-
-function ModuleCard({
-  href,
-  icon: Icon,
-  title,
-  desc,
-  color,
-}: {
-  href: string;
-  icon: any;
-  title: string;
-  desc: string;
-  color: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="group block rounded-2xl border border-border bg-card p-4 shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/5"
-    >
-      <div className="flex items-start gap-3">
-        <div className={cn('h-10 w-10 flex-shrink-0 rounded-xl flex items-center justify-center', color)}>
-          <Icon className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-foreground truncate">{title}</p>
-          <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{desc}</p>
-        </div>
-        <ChevronRight className="h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
-      </div>
-    </Link>
   );
 }

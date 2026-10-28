@@ -28,7 +28,6 @@ import {
   Trash2,
   Eye,
   Search,
-  RefreshCw,
   FolderOpen,
   CheckCircle2,
   Wrench,
@@ -44,6 +43,9 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
+import { supabaseBuses } from '@/lib/supabase-buses';
+import { dispatchNannyRefresh } from '@/lib/cbl-events';
 import {
   Pill,
   Dot,
@@ -61,13 +63,11 @@ import {
   type BusFormState,
   type BusTab,
 } from './types';
-import type { Bus, Driver, Student } from '@/lib/types';
+import type { Bus, Driver, Nanny, Student } from '@/lib/types';
 import {
   ANIMATION_EASE,
   PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
-  ROW_STAGGER_BASE,
-  ROW_STAGGER_CAP,
 } from './design-tokens';
 
 /* -------------------------------------------------------------------------- */
@@ -179,7 +179,6 @@ function ConfirmDeleteModal({
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
           transition={{ duration: 0.14, ease: ANIMATION_EASE }}
           onClick={onClose}
         >
@@ -190,7 +189,6 @@ function ConfirmDeleteModal({
             className="relative w-full max-w-[420px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.14, ease: ANIMATION_EASE }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -250,19 +248,195 @@ function ConfirmDeleteModal({
 export interface BusesConsoleContentProps {
   buses: Bus[];
   drivers: Driver[];
+  nannies?: Nanny[];
   students: Student[];
 }
 
 export function BusesConsoleContent({
-  buses,
-  drivers,
-  students,
+  buses: initialBuses,
+  drivers: initialDrivers,
+  nannies: initialNannies = [],
+  students: initialStudents,
 }: BusesConsoleContentProps) {
+  const toast = useToast();
   const [tab, setTab] = React.useState<BusTab>('all');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [page, setPage] = React.useState(1);
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
+
+  // 在組件內部管理狀態, 確保新增/刪除後立即更新列表
+  // 初始值: 優先用 props 傳入的資料, 若為空則立即從 LocalStorage 讀取 (避免首次 mount 空閃)
+  // 超管 (super_admin / system_admin) 沒有 clientId → 讀全部 (跨機構管理)
+  const resolveVisible = <T,>(getAll: () => T[], getByClient: (cid: string) => T[]): T[] => {
+    try {
+      const { STORAGE } = require('@/lib/storage');
+      const raw = localStorage.getItem('cbl_auth');
+      const u = raw ? JSON.parse(raw) : null;
+      const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
+      if (superMode) return getAll();
+      const cid = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+      return cid ? getByClient(cid) : [];
+    } catch {
+      return [];
+    }
+  };
+  const [buses, setBuses] = React.useState<Bus[]>(() => {
+    if (initialBuses.length > 0) return initialBuses;
+    if (typeof window === 'undefined') return [];
+    try {
+      const { STORAGE } = require('@/lib/storage');
+      return resolveVisible<Bus>(
+        () => STORAGE.buses.getAll(),
+        (cid) => STORAGE.buses.getByClient(cid),
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [drivers, setDrivers] = React.useState<Driver[]>(() => {
+    if (initialDrivers.length > 0) return initialDrivers;
+    if (typeof window === 'undefined') return [];
+    try {
+      const { STORAGE } = require('@/lib/storage');
+      return resolveVisible<Driver>(
+        () => STORAGE.drivers.getAll(),
+        (cid) => STORAGE.drivers.getByClient(cid),
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [students, setStudents] = React.useState<Student[]>(() => {
+    if (initialStudents.length > 0) return initialStudents;
+    if (typeof window === 'undefined') return [];
+    try {
+      const { STORAGE } = require('@/lib/storage');
+      return resolveVisible<Student>(
+        () => STORAGE.students.getAll(),
+        (cid) => STORAGE.students.getByClient(cid),
+      );
+    } catch {
+      return [];
+    }
+  });
+  const [nannies, setNannies] = React.useState<Nanny[]>(() => {
+    if (initialNannies.length > 0) return initialNannies;
+    if (typeof window === 'undefined') return [];
+    try {
+      const { STORAGE } = require('@/lib/storage');
+      return resolveVisible<Nanny>(
+        () => STORAGE.nannies.getAll(),
+        (cid) => STORAGE.nannies.getByClient(cid),
+      );
+    } catch {
+      return [];
+    }
+  });
+
+  // 當 prop 變化且新值非空時同步內部狀態 (避免初次 mount 的空陣列覆蓋 LocalStorage 資料)
+  // 邏輯: 內部已有資料就保留 (使用者操作優先), 只有 prop 是新資料才採用
+  React.useEffect(() => {
+    if (initialBuses.length > 0) {
+      setBuses((prev) => {
+        // 若內部已有資料 (>= prop 數量), 保留內部資料 (含本地新增)
+        // 若 prop 有更多資料 (例如 Supabase 同步回來), 用 prop
+        return initialBuses.length >= prev.length ? initialBuses : prev;
+      });
+    }
+  }, [initialBuses]);
+  React.useEffect(() => {
+    if (initialDrivers.length > 0) {
+      setDrivers((prev) => {
+        return initialDrivers.length >= prev.length ? initialDrivers : prev;
+      });
+    }
+  }, [initialDrivers]);
+  React.useEffect(() => {
+    if (initialStudents.length > 0) {
+      setStudents((prev) => {
+        return initialStudents.length >= prev.length ? initialStudents : prev;
+      });
+    }
+  }, [initialStudents]);
+  React.useEffect(() => {
+    if (initialNannies.length > 0) {
+      setNannies((prev) => {
+        return initialNannies.length >= prev.length ? initialNannies : prev;
+      });
+    }
+  }, [initialNannies]);
+
+  // 監聽 refresh 事件, 重新從 LocalStorage 讀取 (超管讀全部)
+  React.useEffect(() => {
+    const reloadVisible = (
+      set: (v: any) => void,
+      getAll: () => any[],
+      getByClient: (cid: string) => any[],
+    ) => {
+      try {
+        const { STORAGE } = require('@/lib/storage');
+        const raw = localStorage.getItem('cbl_auth');
+        const u = raw ? JSON.parse(raw) : null;
+        const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
+        if (superMode) {
+          set(getAll());
+          return;
+        }
+        const clientId = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+        if (clientId) {
+          set(getByClient(clientId));
+        }
+      } catch (e) {
+        console.warn('[BusesConsole] Failed to refresh:', e);
+      }
+    };
+    const onBusesRefresh = () => {
+      const { STORAGE } = require('@/lib/storage');
+      reloadVisible(
+        (v: Bus[]) => setBuses(v),
+        () => STORAGE.buses.getAll(),
+        (cid) => STORAGE.buses.getByClient(cid),
+      );
+    };
+    const onDriversRefresh = () => {
+      const { STORAGE } = require('@/lib/storage');
+      reloadVisible(
+        (v: Driver[]) => setDrivers(v),
+        () => STORAGE.drivers.getAll(),
+        (cid) => STORAGE.drivers.getByClient(cid),
+      );
+    };
+    const onStudentsRefresh = () => {
+      const { STORAGE } = require('@/lib/storage');
+      reloadVisible(
+        (v: Student[]) => setStudents(v),
+        () => STORAGE.students.getAll(),
+        (cid) => STORAGE.students.getByClient(cid),
+      );
+    };
+    const onNanniesRefresh = () => {
+      const { STORAGE } = require('@/lib/storage');
+      reloadVisible(
+        (v: Nanny[]) => setNannies(v),
+        () => STORAGE.nannies.getAll(),
+        (cid) => STORAGE.nannies.getByClient(cid),
+      );
+    };
+
+    window.addEventListener('cbl-buses-refresh', onBusesRefresh);
+    window.addEventListener('cbl-drivers-refresh', onDriversRefresh);
+    window.addEventListener('cbl-students-refresh', onStudentsRefresh);
+    // 保姆事件有兩種拼法並存 → 兩種都要監聽
+    window.addEventListener('cbl-nannys-refresh', onNanniesRefresh);
+    window.addEventListener('cbl-nannies-refresh', onNanniesRefresh);
+    return () => {
+      window.removeEventListener('cbl-buses-refresh', onBusesRefresh);
+      window.removeEventListener('cbl-drivers-refresh', onDriversRefresh);
+      window.removeEventListener('cbl-students-refresh', onStudentsRefresh);
+      window.removeEventListener('cbl-nannys-refresh', onNanniesRefresh);
+      window.removeEventListener('cbl-nannies-refresh', onNanniesRefresh);
+    };
+  }, []);
 
   // Form modal state
   const [formModal, setFormModal] = React.useState<{
@@ -296,14 +470,19 @@ export function BusesConsoleContent({
       if (tab !== 'all' && b.status !== tab) return false;
       if (!q) return true;
       const driver = b.driverId ? drivers.find((d) => d.id === b.driverId) : null;
+      const nannyIds = nannies.filter((n) => n.assignedBusIds.includes(b.id)).map((n) => n.id);
+      const nannyHit = nannies.some(
+        (n) => nannyIds.includes(n.id) && (n.name.toLowerCase().includes(q) || (n.employeeId ?? '').toLowerCase().includes(q)),
+      );
       return (
         b.plateNumber.toLowerCase().includes(q) ||
         b.model.toLowerCase().includes(q) ||
         (b.gpsDeviceId ?? '').toLowerCase().includes(q) ||
-        (driver?.name.toLowerCase().includes(q) ?? false)
+        (driver?.name.toLowerCase().includes(q) ?? false) ||
+        nannyHit
       );
     });
-  }, [buses, drivers, tab, debouncedSearch]);
+  }, [buses, drivers, nannies, tab, debouncedSearch]);
 
   /* -------- Stats (KPIs) -------- */
   const total = buses.length;
@@ -328,6 +507,12 @@ export function BusesConsoleContent({
   }, []);
 
   const openEdit = React.useCallback((b: Bus) => {
+    // 從現有綁定推導初始值
+    const boundStudentIds = students
+      .filter((s) => s.busId === b.id)
+      .map((s) => s.id);
+    // 保姆綁定是反向存 (Nanny.assignedBusIds 含此車) — 必須推導, 否則編輯時永遠空白
+    const boundNanny = nannies.find((n) => (n.assignedBusIds ?? []).includes(b.id));
     setFormModal({
       open: true,
       mode: 'edit',
@@ -336,12 +521,124 @@ export function BusesConsoleContent({
         model: b.model,
         capacity: String(b.capacity),
         driverId: b.driverId ?? '',
+        companyId: b.companyId ?? '',
+        nannyId: boundNanny?.id ?? '',
         gpsDeviceId: b.gpsDeviceId ?? '',
         status: b.status,
+        studentIds: boundStudentIds,
       },
       editingId: b.id,
     });
-  }, []);
+  }, [students, nannies]);
+
+  /**
+   * 把 studentIds (multi-select) 同步到 storage 與 state。
+   *
+   * 規則:
+   *  - selectedIds 內的學生 → busId = busId
+   *  - 「原本」綁這輛但 selectedIds 沒有 → busId = null (解除綁定)
+   *  - selectedIds 內但原本綁別輛 → 換綁 (busId = busId)
+   *
+   * 用「set diff」避免無謂寫入。
+   */
+  const syncStudentBindings = React.useCallback(
+    (busId: string, selectedIds: string[]) => {
+      const selected = new Set(selectedIds);
+      const previous = new Set(
+        students.filter((s) => s.busId === busId).map((s) => s.id),
+      );
+
+      // 1. 找出需綁 (在 selected 但不是 previous) — 包括「原本綁別輛」的換綁
+      const toBind = [...selected].filter((id) => !previous.has(id));
+      // 2. 找出需解除 (在 previous 但不在 selected)
+      const toUnbind = [...previous].filter((id) => !selected.has(id));
+
+      if (toBind.length === 0 && toUnbind.length === 0) return;
+
+      // 更新 LocalStorage
+      const { STORAGE } = require('@/lib/storage') as typeof import('@/lib/storage');
+      toBind.forEach((sid) => STORAGE.students.update(sid, { busId }));
+      toUnbind.forEach((sid) => STORAGE.students.update(sid, { busId: null }));
+
+      // 同步本地 state (讓 UI 即時更新)
+      setStudents((prev) =>
+        prev.map((s) => {
+          if (toBind.includes(s.id)) return { ...s, busId };
+          if (toUnbind.includes(s.id)) return { ...s, busId: null };
+          return s;
+        }),
+      );
+    },
+    [students],
+  );
+
+  /**
+   * 把跟車保姆 (單選) 同步到 Nanny.assignedBusIds (反向綁定)。
+   *
+   * 背景: Bus 本體沒有 nannyId 欄位, 綁定只存在 Nanny.assignedBusIds。
+   * 若這裡不寫, BusFormModal 選的保姆會在存檔時被丟掉,
+   * 路線頁選車後就找不到已綁保姆 (永遠空白)。
+   *
+   * 規則 (單選語意):
+   *  - nannyId 有值 → 該保姆的 assignedBusIds 必須含此車; 其他原本含此車的保姆一律移除
+   *    (否則路線頁 find() 會抓到舊保姆, 不是使用者剛選的)
+   *  - nannyId 為空 → 所有含此車的保姆一律移除 (解除綁定)
+   */
+  const syncNannyBinding = React.useCallback(
+    async (busId: string, nannyId: string) => {
+      const { STORAGE } = await import('@/lib/storage');
+      const { supabaseNannies } = await import('@/lib/supabase-entities');
+      const all = STORAGE.nannies.getAll();
+      const prevBound = all.filter((n: Nanny) => (n.assignedBusIds ?? []).includes(busId));
+      const prevIds = new Set(prevBound.map((n: Nanny) => n.id));
+      const nextIds = new Set(nannyId ? [nannyId] : []);
+
+      const toAdd = [...nextIds].filter((id) => !prevIds.has(id));
+      const toRemove = [...prevIds].filter((id) => !nextIds.has(id));
+      if (toAdd.length === 0 && toRemove.length === 0) return;
+
+      toAdd.forEach((nid) => {
+        const cur = STORAGE.nannies.getById(nid);
+        if (!cur) return;
+        const next = Array.from(new Set([...(cur.assignedBusIds ?? []), busId]));
+        STORAGE.nannies.update(nid, { assignedBusIds: next });
+      });
+      toRemove.forEach((nid) => {
+        const cur = STORAGE.nannies.getById(nid);
+        if (!cur) return;
+        STORAGE.nannies.update(nid, {
+          assignedBusIds: (cur.assignedBusIds ?? []).filter((b: string) => b !== busId),
+        });
+      });
+
+      // 同步本地 state (讓 UI 即時更新)
+      setNannies((prev) =>
+        prev.map((n) => {
+          if (toAdd.includes(n.id))
+            return { ...n, assignedBusIds: Array.from(new Set([...(n.assignedBusIds ?? []), busId])) };
+          if (toRemove.includes(n.id))
+            return { ...n, assignedBusIds: (n.assignedBusIds ?? []).filter((b) => b !== busId) };
+          return n;
+        }),
+      );
+
+      // 背景推回雲端 (逐筆 update, 失敗只 warn)
+      for (const nid of [...toAdd, ...toRemove]) {
+        try {
+          const cur = STORAGE.nannies.getById(nid);
+          if (!cur) continue;
+          const res = await supabaseNannies.update(nid, { assignedBusIds: cur.assignedBusIds } as any);
+          if (!res.success) console.warn('[BusesConsole] nanny cloud sync failed:', res.error);
+        } catch (e) {
+          console.warn('[BusesConsole] nanny cloud sync error:', e);
+        }
+      }
+
+      // 通知保姆頁 / 路線頁重讀 (兩種拼法都送, 相容歷史 typo)
+      dispatchNannyRefresh();
+    },
+    [],
+  );
 
   const handleSave = React.useCallback(
     async (state: BusFormState) => {
@@ -364,38 +661,112 @@ export function BusesConsoleContent({
         })();
         if (!clientId) {
           console.error('[BusesConsole] 無法取得 clientId, 取消儲存');
+          toast.error('無法取得客戶端資訊，請重新登入');
           return;
         }
         const now = new Date().toISOString();
+
         if (formModal.mode === 'add') {
-          STORAGE.buses.add({
+          // driverId 直接採用使用者選擇 — 雲端同步由 supabaseBuses 內部保證
+          // (若司機尚未在雲端, 會自動用本機資料補建; 補不了才降級為 null)。
+          // 這裡不再預先檢查 / 阻擋儲存, 避免雲端短暫失敗就讓整筆校巴存不下來。
+          const resolvedDriverId: string | null = state.driverId || null;
+
+          const newBus: Bus = {
             id: STORAGE.genId('bus'),
             clientId,
             plateNumber: state.plateNumber,
             model: state.model,
             capacity: Number(state.capacity),
-            driverId: state.driverId || null,
+            driverId: resolvedDriverId,
             gpsDeviceId: state.gpsDeviceId || null,
             status: state.status,
             createdAt: now,
-          });
+          };
+
+          // 1. 先存入 LocalStorage (即時顯示)
+          STORAGE.buses.add(newBus);
+
+          // 2. 立即更新內部狀態 (確保列表立即顯示, 不依賴事件)
+          setBuses((prev) => [...prev, newBus]);
+
+          // 2.5 同步學生綁定 (新增模式: 只需把選中的學生綁到新車上)
+          if (state.studentIds.length > 0) {
+            state.studentIds.forEach((sid) => {
+              STORAGE.students.update(sid, { busId: newBus.id });
+            });
+            setStudents((prev) =>
+              prev.map((s) =>
+                state.studentIds.includes(s.id) ? { ...s, busId: newBus.id } : s,
+              ),
+            );
+          }
+
+          // 2.6 同步跟車保姆綁定 (反向寫 Nanny.assignedBusIds, 否則路線頁選車帶不出保姆)
+          await syncNannyBinding(newBus.id, state.nannyId || '');
+
+          // 3. 同步到 Supabase (背景執行)
+          const supabaseResult = await supabaseBuses.add(newBus);
+          if (!supabaseResult.success) {
+            console.warn('[BusesConsole] Supabase sync failed:', supabaseResult.error);
+            // LocalStorage 已成功，仍顯示成功但加 warning
+            toast.warning(`校巴已新增，但 Supabase 同步失敗: ${supabaseResult.error}`);
+          } else {
+            toast.success(`校巴 ${state.plateNumber} 新增成功！`);
+          }
         } else if (formModal.editingId) {
-          STORAGE.buses.update(formModal.editingId, {
+          // 同 add 模式: driver 保證交給 supabaseBuses, 不在 UI 層阻擋儲存。
+          const resolvedDriverId: string | null = state.driverId || null;
+
+          const updates: Partial<Bus> = {
             plateNumber: state.plateNumber,
             model: state.model,
             capacity: Number(state.capacity),
-            driverId: state.driverId || null,
+            driverId: resolvedDriverId,
             gpsDeviceId: state.gpsDeviceId || null,
             status: state.status,
-          });
+          };
+
+          // 1. 先更新 LocalStorage (即時顯示)
+          STORAGE.buses.update(formModal.editingId, updates);
+
+          // 2. 立即更新內部狀態
+          setBuses((prev) =>
+            prev.map((b) =>
+              b.id === formModal.editingId ? { ...b, ...updates } : b,
+            ),
+          );
+
+          // 2.5 同步學生綁定 (diff 模式: 處理換綁與解除綁定)
+          syncStudentBindings(formModal.editingId, state.studentIds);
+
+          // 2.6 同步跟車保姆綁定 (反向寫 Nanny.assignedBusIds, 否則路線頁選車帶不出保姆)
+          await syncNannyBinding(formModal.editingId, state.nannyId || '');
+
+          // 3. 同步到 Supabase (背景執行)
+          const supabaseResult = await supabaseBuses.update(formModal.editingId, updates);
+          if (!supabaseResult.success) {
+            console.warn('[BusesConsole] Supabase sync failed:', supabaseResult.error);
+            toast.warning(`校巴已更新，但 Supabase 同步失敗: ${supabaseResult.error}`);
+          } else {
+            toast.success(`校巴 ${state.plateNumber} 更新成功！`);
+          }
         }
         setFormModal((p) => ({ ...p, open: false }));
         window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+        dispatchNannyRefresh();
+        // 若有變動 student 綁定, 也通知學生頁更新
+        if (state.studentIds.length > 0 || formModal.mode === 'edit') {
+          window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
+        }
+      } catch (err) {
+        console.error('[BusesConsole] handleSave error:', err);
+        toast.error('儲存失敗，請稍後再試');
       } finally {
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId],
+    [formModal.mode, formModal.editingId, toast, syncStudentBindings, syncNannyBinding],
   );
 
   const handleDelete = React.useCallback(async () => {
@@ -409,19 +780,64 @@ export function BusesConsoleContent({
         STORAGE.students.update(s.id, { busId: null });
       });
       STORAGE.buses.remove(deleteTarget.id);
+
+      // 立即更新內部狀態
+      setBuses((prev) => prev.filter((b) => b.id !== deleteTarget.id));
+      // 也更新學生狀態 (解除綁定)
+      setStudents((prev) =>
+        prev.map((s) => (s.busId === deleteTarget.id ? { ...s, busId: null } : s)),
+      );
+      // 解除保姆反向綁定 (Nanny.assignedBusIds 移除此車, 否則殘留 dangling 引用)
+      try {
+        const boundNannies = STORAGE.nannies.getAll().filter((n: Nanny) => (n.assignedBusIds ?? []).includes(deleteTarget.id));
+        boundNannies.forEach((n: Nanny) => {
+          STORAGE.nannies.update(n.id, {
+            assignedBusIds: (n.assignedBusIds ?? []).filter((bid: string) => bid !== deleteTarget.id),
+          });
+        });
+        if (boundNannies.length > 0) {
+          setNannies((prev) =>
+            prev.map((n) =>
+              (n.assignedBusIds ?? []).includes(deleteTarget.id)
+                ? { ...n, assignedBusIds: (n.assignedBusIds ?? []).filter((bid) => bid !== deleteTarget.id) }
+                : n,
+            ),
+          );
+          const { supabaseNannies } = await import('@/lib/supabase-entities');
+          for (const n of boundNannies) {
+            try {
+              const cur = STORAGE.nannies.getById(n.id);
+              if (!cur) continue;
+              const res = await supabaseNannies.update(n.id, { assignedBusIds: cur.assignedBusIds } as any);
+              if (!res.success) console.warn('[BusesConsole] nanny unbind cloud sync failed:', res.error);
+            } catch (e) {
+              console.warn('[BusesConsole] nanny unbind cloud sync error:', e);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[BusesConsole] nanny unbind failed:', e);
+      }
+
+      // 同步刪除到 Supabase (背景執行)
+      const supabaseResult = await supabaseBuses.delete(deleteTarget.id);
+      if (!supabaseResult.success) {
+        console.warn('[BusesConsole] Supabase delete sync failed:', supabaseResult.error);
+        toast.warning(`校巴已刪除，但 Supabase 同步失敗: ${supabaseResult.error}`);
+      } else {
+        toast.success(`校巴 ${deleteTarget.plateNumber} 已刪除`);
+      }
+
       setDeleteTarget(null);
       window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
       window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
+    } catch (err) {
+      console.error('[BusesConsole] handleDelete error:', err);
+      toast.error('刪除失敗，請稍後再試');
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget, students]);
-
-  const handleRefresh = React.useCallback(() => {
-    setIsRefreshing(true);
-    window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
-    window.setTimeout(() => setIsRefreshing(false), 400);
-  }, []);
+  }, [deleteTarget, students, toast]);
 
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
@@ -462,9 +878,6 @@ export function BusesConsoleContent({
       {/* L1. Header Row */}
       <motion.div
         className="flex flex-col lg:flex-row lg:items-center gap-4 lg:gap-6 pb-2"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-600 text-white shrink-0">
@@ -541,16 +954,6 @@ export function BusesConsoleContent({
         <Button
           variant="secondary"
           size="sm"
-          startIcon={<RefreshCw width={12} height={12} />}
-          onClick={handleRefresh}
-          isLoading={isRefreshing}
-        >
-          重新整理
-        </Button>
-
-        <Button
-          variant="secondary"
-          size="sm"
           startIcon={<FileSpreadsheet width={12} height={12} />}
           onClick={handleExportExcel}
           disabled={filtered.length === 0}
@@ -605,18 +1008,6 @@ export function BusesConsoleContent({
             options={TAB_OPTIONS}
             layoutId="buses-tab-pill"
           />
-
-          <IconButton
-            onClick={handleRefresh}
-            title="重新整理列表"
-            variant="subtle"
-          >
-            <RefreshCw
-              width={13}
-              height={13}
-              className={cn(isRefreshing && 'animate-spin text-blue-600')}
-            />
-          </IconButton>
 
           <div className="relative ml-auto min-w-[220px]">
             <Search
@@ -725,7 +1116,8 @@ export function BusesConsoleContent({
             ? buses.find((b) => b.id === formModal.editingId)?.plateNumber
             : undefined
         }
-        context={{ buses, drivers, students }}
+        editingId={formModal.editingId}
+        context={{ buses, drivers, nannies, students }}
         isSaving={isSaving}
         onSave={handleSave}
         onClose={() => setFormModal((p) => ({ ...p, open: false }))}
@@ -755,7 +1147,6 @@ function SkeletonRows() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -792,7 +1183,6 @@ function EmptyState({
       key={`empty-${tab}-${search}`}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="flex flex-col items-center gap-2 py-12 px-5">
@@ -854,13 +1244,8 @@ function DataTable({
   }, [students]);
 
   return (
-    <motion.table
-      className="w-full"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
-    >
+    <table
+      className="w-full">
       <thead>
         <tr className="bg-slate-50/60 border-b border-slate-100 text-[10px] uppercase tracking-[0.06em] text-slate-500 font-semibold dark:bg-slate-800/60 dark:border-slate-700/80 dark:text-slate-400">
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-5 py-2 text-left dark:bg-slate-800/95">
@@ -887,22 +1272,13 @@ function DataTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((b, idx) => {
+        {rows.map((b) => {
           const driver = b.driverId ? driversById.get(b.driverId) : null;
           const studentCount = studentCountByBus.get(b.id) ?? 0;
-          const utilization =
-            b.capacity > 0 ? Math.round((studentCount / b.capacity) * 100) : 0;
           return (
-            <motion.tr
+            <tr
               key={b.id}
               className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/50 transition-colors group dark:border-slate-700/80 dark:hover:bg-slate-800/50"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{
-                duration: 0.22,
-                ease: ANIMATION_EASE,
-                delay: Math.min(idx * ROW_STAGGER_BASE, ROW_STAGGER_CAP),
-              }}
             >
               {/* 校巴 (icon + plate + model) */}
               <td className="px-5 py-2.5">
@@ -986,23 +1362,9 @@ function DataTable({
               {/* 綁定學生 */}
               <td className="px-3 py-2.5">
                 <div className="flex items-center gap-1.5 min-w-0">
-                  <Pill tone="info" size="sm">
-                    {studentCount} 生
-                  </Pill>
-                  {b.capacity > 0 && (
-                    <span
-                      className={cn(
-                        'text-[10px] tabular-nums',
-                        utilization >= 100
-                          ? 'text-rose-600 dark:text-rose-400 font-semibold'
-                          : utilization >= 80
-                          ? 'text-amber-600 dark:text-amber-400 font-semibold'
-                          : 'text-slate-500 dark:text-slate-400',
-                      )}
-                    >
-                      {utilization}%
-                    </span>
-                  )}
+                  <span className="text-[11px] tabular-nums text-slate-600 dark:text-slate-300">
+                    {studentCount} 個
+                  </span>
                 </div>
               </td>
 
@@ -1023,15 +1385,15 @@ function DataTable({
                     title="刪除校巴"
                     variant="danger"
                   >
-                    <PowerOff width={13} height={13} />
+                    <Trash2 width={13} height={13} />
                   </IconButton>
                 </div>
               </td>
-            </motion.tr>
+            </tr>
           );
         })}
       </tbody>
-    </motion.table>
+    </table>
   );
 }
 

@@ -7,34 +7,43 @@
  * ─────────────────
  * - 公告數量可能是 0、1 或多則。`NotificationDropdown` 只負責「列表選擇」,
  *   真正顯示公告內容的 dialog 由本元件負責。dropdown 點選後透過
- *   `triggerAnnouncementPopup(index)` 通知本元件打開。
+ *   `triggerAnnouncementPopupById(id)` 通知本元件打開。
  * - 因為 popup 是「全站唯一」, 掛在 root layout (`app/layout.tsx`) 一次就好,
  *   這樣無論用戶從哪個頁面點通知, 都能開到同一個 dialog (state 不丟失、
  *   不需要每頁各掛一份)。
  * - 為了避免在「dropdown 與 dialog 屬於不同 React tree / 沒有共享 context」
  *   的情況下硬接 props, 通訊方式採「window 自訂事件」 — 簡單、零耦合。
  *
- * 為什麼這裡要 `"use client"`
- * ──────────────────────────
- * - 父層 `app/layout.tsx` 是 RSC, 但 RSC 可以直接渲染 client component;
- *   React 會自動把它包成 client boundary。原先 layout 報
- *   "Unsupported Server Component type: {...}" 是因為 `AnnouncementPopup.tsx`
- *   是空檔, default export 解析成 `undefined` / 空物件, JSX 的 type 就壞了。
- *   補上真正的 client component 後, 此錯誤就消失。
+ * 自動彈窗規則 (2026-10-26 依使用者需求重寫)
+ * ────────────────────────────────────────────
+ * 生效中的公告 (isActive && !isTemplate && 今天在 startDate~endDate 內),
+ * 在「每一次進入主頁」時都會自動彈出。
  *
- * 通訊協定
- * ───────
- * - 觸發: `window.dispatchEvent(new CustomEvent('bus:announcement:open', { detail: { index } }))`
- * - 由 `triggerAnnouncementPopup(index)` 發送, dropdown 內已用。
+ * 「主頁」依角色而定:
+ *   - super_admin / client → `/`
+ *   - parent → `/parents` 或 `/parents/portal`
+ *   - nanny   → `/nanny` 或 `/nanny/portal`
+ *
+ * 例外 (該則公告不再自動彈出):
+ *   - 使用者勾選「不再顯示此通告」並關閉 → 記錄在
+ *     `STORAGE.announcementDismiss`, 只影響「這則公告、這個用戶」。
+ *   - 使用者手動關閉 / 按 ESC / 點遮罩 → 沒有勾選就只是這次不看,
+ *     下次進入主頁照樣彈出。
+ *
+ * 關於「顯示次數上限」:
+ *   displayCount / maxViewsPerUser 降級為「純統計數字」, 不再限制自動彈窗。
+ *   (舊語意是看過一次就不彈, 與「限期內每次進入主頁都彈出」直接衝突。)
  *
  * 讀已寫邏輯
  * ───────
  * - 打開時把該公告 ID 寫入 `STORAGE.announcementReads`, 跟 dropdown 的紅點
  *   計算 (active 公告 - 已讀 = 未讀) 保持一致: 真正打開看過才算已讀。
+ * - 同時把該公告的 currentCount +1, 並累加「該用戶看過幾次」, 作為統計。
  */
 
 import * as React from 'react';
-import { Info, AlertTriangle, AlertCircle, ChevronRight, ChevronLeft, BellOff, Bell } from 'lucide-react';
+import { usePathname } from 'next/navigation';
+import { Info, AlertTriangle, AlertCircle, ChevronRight, ChevronLeft } from 'lucide-react';
 
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
@@ -51,6 +60,36 @@ import {
 import { Button } from '@/components/ui/button';
 
 const OPEN_EVENT = 'bus:announcement:open';
+
+/**
+ * 每個角色的「主頁」路徑。
+ *
+ * 為什麼要分角色:
+ * - 超管 / 客戶 → 系統主頁 `/`
+ * - 家長 → 家長 portal 主頁 `/parents` (或 `/parents/portal`, 兩個路徑共用同一份內容)
+ * - 保姆 → 保姆 portal 主頁 `/nanny` (或 `/nanny/portal`)
+ *
+ * 判斷「進入主頁」= pathname 變成上述任一路徑。
+ */
+const HOME_PATHS_BY_ROLE: Record<string, string[]> = {
+  super_admin: ['/'],
+  client: ['/'],
+  parent: ['/parents', '/parents/portal'],
+  nanny: ['/nanny', '/nanny/portal'],
+};
+
+/**
+ * 判斷某個路徑是否為該角色的主頁。
+ *
+ * 為什麼不用 startsWith:
+ * `/parents/trips` 也以 `/parents` 開頭, 但那不是主頁 — 进入班次頁不應該彈公告。
+ */
+function isHomePath(role: string | undefined, pathname: string): boolean {
+  if (!role) return false;
+  const paths = HOME_PATHS_BY_ROLE[role];
+  if (!paths) return false;
+  return paths.includes(pathname);
+}
 
 function getTypeIcon(type: Announcement['type']) {
   switch (type) {
@@ -76,69 +115,189 @@ function getTypeColor(type: Announcement['type']) {
   }
 }
 
+/** ISO date → yyyy/mm/dd (顯示用, 不含時間) */
+function formatDate(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}/${m}/${day}`;
+}
+
 export default function AnnouncementPopup() {
   const { user } = useAuth();
+  const pathname = usePathname();
 
   // 當前用戶的 active 公告 (新到舊)
   const [items, setItems] = React.useState<Announcement[]>([]);
   // dialog 開啟狀態 + 當前選中 index (相對於 items)
   const [open, setOpen] = React.useState(false);
   const [currentIndex, setCurrentIndex] = React.useState(0);
-  // 用戶是否已主動關閉全站彈窗 (來自 /settings/announcements 的開關)
-  // 預設 false = 允許彈; 設 true 後即便點鈴鐺也不再打開 dialog
-  const [popupDisabled, setPopupDisabled] = React.useState<boolean>(false);
+  // 「不再顯示此通告」checkbox 的勾選狀態 (每次開啟 dialog 都重設為未勾選)
+  const [dontShowAgain, setDontShowAgain] = React.useState(false);
 
-  // 載入當前用戶的 active 公告。user 變動時 (登入 / 切換 client) 重載。
+  // super_admin 沒有自己的 clientId, 但依需求要看得見所有機構的公告。
+  const isSuperAdmin = user?.role === 'super_admin';
+  const clientId = user?.clientId || '';
+
+  // dialog 是否正在開啟 (ref — 避免 stale closure, 也讓 load() 能即時判斷)
+  const openRef = React.useRef(false);
+  React.useEffect(() => { openRef.current = open; }, [open]);
+
+  // 本次開啟期間已計過次數的公告 id
+  // 避免 load() 造成 current 物件換新 (同一 id) 時重複 +1
+  const countedIdsRef = React.useRef<Set<string>>(new Set());
+
+  /**
+   * 從 Supabase 拉最新公告到 localStorage。
+   *
+   * 為什麼 popup 必須自己拉一次:
+   * - 公告是「會變動」的資料 (管理員在另一台裝置新增/停用)
+   * - useInitData() 只在「第一次」載入時同步 (initWithSupabase 在
+   *   isInitialized() 之後會直接 return) → 之後新增的公告永遠看不到
+   * - 後台頁 (/cbl-admin-setting/announcements) 有自己拉一次, 但主頁沒有
+   *
+   * 這就是「公告已啟用但主頁沒有 popup 彈出」的主要成因之一:
+   * 公告只存在 DB, localStorage 沒有 → 清單回傳空 → 不彈。
+   */
+  const syncFromDb = React.useCallback(async () => {
+    try {
+      const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+      await supabaseAnnouncements.syncToStorage();
+    } catch (e) {
+      console.warn('[AnnouncementPopup] db sync failed:', e);
+    }
+  }, []);
+
+  /**
+   * 載入當前用戶「可以看到的」公告。user 變動時 (登入 / 切換 client) 重載。
+   *
+   * 清單本身用 getActive() (範圍 + 有效期), 讓「上一則 / 下一則」可以瀏覽
+   * 所有生效中的公告。
+   */
   const load = React.useCallback(() => {
     if (!user) {
       setItems([]);
       return;
     }
-    const clientId = user.clientId || '';
-    const all = STORAGE.announcements.getActive(clientId);
-    // 只顯示「還沒達到顯示次數上限」的公告
-    const eligible = all.filter(a => a.currentCount < a.displayCount);
-    const sorted = [...eligible].sort((a, b) =>
+    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
+    // 新到舊 (startDate DESC)
+    const sorted = [...active].sort((a, b) =>
       b.startDate.localeCompare(a.startDate)
     );
-    setItems(sorted);
-    // 同步讀取用戶的 popup 開關偏好
-    setPopupDisabled(STORAGE.announcementPopupPref.isDisabled(user.id, clientId));
-  }, [user]);
+    // dialog 開啟中不更新清單 — 否則 currentCount 剛好達上限時,
+    // 使用者正在看的公告會突然從清單消失、dialog 直接關閉。
+    if (!openRef.current) {
+      setItems(sorted);
+    }
+  }, [user, clientId, isSuperAdmin]);
 
   React.useEffect(() => {
     load();
   }, [load]);
 
+  /**
+   * 自動彈窗 — 每次「進入主頁」時觸發。
+   *
+   * 條件 (全部符合才彈):
+   *   1. 有 user
+   *   2. pathname 是該角色的主頁
+   *   3. 至少有一則「生效中 + 未被隱藏」的公告
+   *
+   * 與舊版的差別:
+   *   - 舊版: 「本次登入只彈一次」+ 「排除已讀」+ 「套用次數上限」
+   *   - 新版: 「每次進入主頁都彈」+ 「只排除使用者手動隱藏的」
+   *
+   * 為什麼要等 syncFromDb()?
+   * - 公告存在 DB, localStorage 只是快取
+   * - 使用者進站時 localStorage 可能還是舊的 (甚至空的) →
+   *   清單回傳空 → 公告「已啟用」卻不彈
+   * - 先拉 DB 再判斷, 才能確保看到管理員剛發佈的公告
+   */
+  React.useEffect(() => {
+    if (!user) return;
+    if (!isHomePath(user.role, pathname)) return;
+
+    let cancelled = false;
+
+    const tryAutoShow = () => {
+      if (cancelled) return;
+      // dialog 已經開著 → 不要重新觸發 (避免把使用者正在看的公告重設回第 1 則)
+      if (openRef.current) return;
+      // getAutoPopupList: 生效中 + 有效期內 + 使用者未勾選「不再顯示此通告」
+      // (不套用 displayCount / maxViewsPerUser — 次數只是統計)
+      const list = STORAGE.announcements.getAutoPopupList(
+        user.id,
+        clientId,
+        isSuperAdmin,
+      );
+      if (list.length === 0) return;
+
+      setItems(list);
+      setCurrentIndex(0);
+      setDontShowAgain(false);
+      setOpen(true);
+    };
+
+    // 先嘗試用 localStorage 現有資料 (快, 避免每次進站都等網路)
+    const listNow = STORAGE.announcements.getAutoPopupList(
+      user.id,
+      clientId,
+      isSuperAdmin,
+    );
+    if (listNow.length > 0) {
+      tryAutoShow();
+      // localStorage 已有資料 → 不必再等 DB (但背景同步, 讓下次更準)
+      void syncFromDb();
+      return;
+    }
+
+    // localStorage 沒有 → 一定要等 DB 拉回來再判斷
+    void syncFromDb().then(() => {
+      tryAutoShow();
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, clientId, isSuperAdmin, pathname, syncFromDb]);
+
   // 監聽 dropdown 發出的開啟事件。
   React.useEffect(() => {
     const onOpen = (e: Event) => {
       // 自訂事件 detail; 容錯處理非預期 payload。
-      const detail = (e as CustomEvent<{ index?: number }>).detail || {};
-      const idx = typeof detail.index === 'number' ? detail.index : 0;
+      const detail = (e as CustomEvent<{ index?: number; id?: string }>).detail || {};
       // 重新載入一次, 確保拿到的是最新公告 (避免新增公告後 dropdown 與 popup 不一致)。
       load();
-      // 注意: load() 是非同步 setState, 此處直接以最新的 items 為準做
-      // index clamp, 因為 setState 後的 items 在下一輪 render 才生效 —
-      // 這裡用 functional updater 也救不了, 改用「若 idx 越界就 fallback 到 0」。
-      setCurrentIndex(Math.max(0, idx));
 
-      // 用戶已主動關閉全站彈窗 → 直接吞掉這個開啟事件, 什麼都不做。
-      // 不打 setOpen(true) 也不顯示空 dialog, 完全靜默。
-      // (我們重新 load() 拿到的 popupDisabled 雖然是 setState 後的值,
-      //  但因為 setState 不會同步生效, 這裡直接讀一次 storage 拿「最新值」判斷)
-      if (user) {
-        const clientId = user.clientId || '';
-        if (STORAGE.announcementPopupPref.isDisabled(user.id, clientId)) {
-          setOpen(false);
+      // 優先用 announcement id 定位 (dropdown 的清單是 getActive,
+      // popup 的清單可能不同 → index 會對不上)。
+      if (detail.id) {
+        const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
+        const sorted = [...active].sort((a, b) =>
+          b.startDate.localeCompare(a.startDate)
+        );
+        const idx = sorted.findIndex((a) => a.id === detail.id);
+        if (idx >= 0) {
+          setItems(sorted);
+          setCurrentIndex(idx);
+          setDontShowAgain(false);
+          setOpen(true);
           return;
         }
       }
+
+      // 沒有 id → 用 index (舊的呼叫方式)
+      const idx = typeof detail.index === 'number' ? detail.index : 0;
+      setCurrentIndex(Math.max(0, idx));
+      setDontShowAgain(false);
       setOpen(true);
     };
     window.addEventListener(OPEN_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_EVENT, onOpen);
-  }, [load, user]);
+  }, [load, clientId, isSuperAdmin]);
 
   // 監聽公告資料更新事件 (來自 cbl-admin-setting/announcements 頁面)
   React.useEffect(() => {
@@ -148,20 +307,6 @@ export default function AnnouncementPopup() {
     window.addEventListener('cbl-announcements-refresh', onRefresh);
     return () => window.removeEventListener('cbl-announcements-refresh', onRefresh);
   }, [load]);
-
-  // 切換 popup 開關的 handler。
-  // - 設為 disabled 時: 立即關掉當前 dialog (若有打開)
-  // - 設為啟用時: 不主動打開, 等用戶下次點鈴鐺
-  const togglePopupDisabled = React.useCallback((disabled: boolean) => {
-    if (!user) return;
-    const clientId = user.clientId || '';
-    STORAGE.announcementPopupPref.setDisabled(user.id, clientId, disabled);
-    setPopupDisabled(disabled);
-    if (disabled) {
-      // 關掉當前可能已打開的 dialog
-      setOpen(false);
-    }
-  }, [user]);
 
   // 當打開時, 確認 currentIndex 還在範圍內 (公告可能在使用期間被刪 / 過期)。
   React.useEffect(() => {
@@ -178,12 +323,68 @@ export default function AnnouncementPopup() {
 
   const current = items[currentIndex];
 
-  // 打開 → 標記已讀
+  // 打開 → 標記已讀 + 累加顯示次數 (統計用途)
   React.useEffect(() => {
     if (!open || !current || !user) return;
-    const clientId = user.clientId || '';
+    // 同一則公告在「本次開啟期間」只計一次
+    // (load() 造成 current 物件換新時不會重複 +1)
+    if (countedIdsRef.current.has(current.id)) return;
+    countedIdsRef.current.add(current.id);
+
     STORAGE.announcementReads.markRead(user.id, clientId, [current.id]);
-  }, [open, current, user]);
+    // 累加「該用戶看過幾次」→ 統計
+    STORAGE.announcementViews.markViewed(user.id, clientId, current.id);
+    // 累加「總顯示次數」→ 統計
+    STORAGE.announcements.incrementCount(current.id);
+
+    // 同步回 Supabase — 否則下次 syncToStorage() 會用 DB 的舊值覆蓋 localStorage,
+    // 造成統計數字在重新整理後被重設。
+    void (async () => {
+      try {
+        const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
+        const res = await supabaseAnnouncements.incrementCount(current.id);
+        if (!res.success) {
+          console.warn('[AnnouncementPopup] count sync failed:', res.error);
+        }
+      } catch (err) {
+        console.warn('[AnnouncementPopup] count sync error:', err);
+      }
+    })();
+
+    // 通知其他元件 (鈴鐺下拉 / 後台列表) 重新讀取
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+    }
+  }, [open, current, user, clientId]);
+
+  /**
+   * 關閉 dialog。
+   *
+   * 這裡是「不再顯示此通告」唯一的生效點:
+   * - checkbox 勾選 → 把「當前這則公告」寫入使用者的隱藏清單,
+   *   下次進入主頁就不再自動彈出這一則 (其他公告照樣彈)。
+   * - checkbox 沒勾 → 什麼都不存, 下次進入主頁照樣彈出。
+   *
+   * 注意: 只作用於「當前顯示的那一則」, 不是整批。
+   */
+  const handleOpenChange = React.useCallback((next: boolean) => {
+    if (!next) {
+      // 關閉時: 若勾選了「不再顯示此通告」, 記錄當前這則公告
+      if (dontShowAgain && current && user) {
+        STORAGE.announcementDismiss.dismiss(user.id, clientId, current.id);
+        // 讓「已隱藏通告」清單 (設定頁) 即時更新
+        window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+      }
+      // 清掉「本次開啟已計數」記錄, 下次開啟可重新計數
+      countedIdsRef.current.clear();
+      // 重設 checkbox — 下次開 dialog 預設為未勾選
+      setDontShowAgain(false);
+    }
+    setOpen(next);
+    if (!next) {
+      load();
+    }
+  }, [dontShowAgain, current, user, clientId, load]);
 
   const goNext = React.useCallback(() => {
     if (items.length === 0) return;
@@ -197,14 +398,18 @@ export default function AnnouncementPopup() {
 
   // 沒有當前公告時不渲染 dialog 內容 (Radix 需要 open 才有 portal, 但這裡
   // 直接不開以避免空 dialog 閃一下)。
-  // 用戶已主動關閉全站彈窗 → 永遠不開, 即便被外部觸發也吞掉。
-  const showDialog = open && !!current && !popupDisabled;
-
-  // 將 toggle handler 暴露給 dialog 內的「不再顯示全站彈窗」按鈕使用
+  const showDialog = open && !!current;
 
   return (
-    <Dialog open={showDialog} onOpenChange={setOpen}>
-      <DialogContent className="sm:max-w-md">
+    <Dialog open={showDialog} onOpenChange={handleOpenChange}>
+      {/* 專屬淡入淡出動畫 (方案 B: 只影響公告彈窗)
+          - .ann-popup-content / .ann-popup-overlay 用「屬性選擇器」而非
+            Tailwind 的 data-[state=open]: variant, 因為後者對手寫 CSS class
+            不會產生規則 (動畫會完全失效)。細節見 globals.css。 */}
+      <DialogContent
+        className="sm:max-w-md ann-popup-content"
+        overlayClassName="ann-popup-overlay"
+      >
         {current && (() => {
           const Icon = getTypeIcon(current.type);
           const colorCls = getTypeColor(current.type);
@@ -225,9 +430,9 @@ export default function AnnouncementPopup() {
                       {current.title || '公告'}
                     </DialogTitle>
                     <DialogDescription className="text-xs text-muted-foreground mt-1">
-                      {current.startDate}
+                      {formatDate(current.startDate)}
                       {current.endDate && current.endDate !== current.startDate
-                        ? ` ~ ${current.endDate}`
+                        ? ` ~ ${formatDate(current.endDate)}`
                         : ''}
                     </DialogDescription>
                   </div>
@@ -238,22 +443,23 @@ export default function AnnouncementPopup() {
                 {current.content}
               </div>
 
-              <DialogFooter className="flex-col items-stretch justify-between gap-2 sm:flex-row sm:items-center">
-                {/* 左側: 「不再顯示全站彈窗」— 一鍵關掉 AnnouncementPopup
-                    為什麼放在 footer 左側: 與「知道了」分開, 避免誤觸;
-                    用戶可能只是當下不想看, 但「不再顯示」是更強的設定行為 */}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => togglePopupDisabled(true)}
-                  className="h-9 px-2 text-xs text-muted-foreground hover:text-foreground"
-                  aria-label="不再顯示全站公告彈窗"
-                  title="關閉後, 點鈴鐺也不會再彈出公告, 可到「設定 > 公告」重新開啟"
+              <DialogFooter className="flex-col items-stretch justify-between gap-2 sm:flex-row sm:items-center sm:space-x-0">
+                {/* 左側: 「不再顯示此通告」checkbox
+                    只影響「當前這一則公告」, 不影響其他公告, 也不影響鈴鐺下拉。
+                    勾選後按「知道了」/ 關閉 / ESC 即生效。 */}
+                <label
+                  htmlFor="announcement-dont-show-again"
+                  className="flex items-center gap-2 cursor-pointer select-none text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  <BellOff className="w-3.5 h-3.5" />
-                  <span>不再顯示全站彈窗</span>
-                </Button>
+                  <input
+                    id="announcement-dont-show-again"
+                    type="checkbox"
+                    checked={dontShowAgain}
+                    onChange={(e) => setDontShowAgain(e.target.checked)}
+                    className="w-4 h-4 rounded border-input accent-primary cursor-pointer"
+                  />
+                  <span>不再顯示此通告</span>
+                </label>
                 <div className="flex items-center gap-2 sm:ml-auto">
                   {items.length > 1 && (
                     <span className="text-xs text-muted-foreground mr-1">
@@ -288,7 +494,7 @@ export default function AnnouncementPopup() {
                   <Button
                     type="button"
                     size="sm"
-                    onClick={() => setOpen(false)}
+                    onClick={() => handleOpenChange(false)}
                     className="h-9 px-4"
                   >
                     知道了
@@ -316,5 +522,20 @@ export function triggerAnnouncementPopup(index: number): void {
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent(OPEN_EVENT, { detail: { index } })
+  );
+}
+
+/**
+ * 從外部打開「特定一則」公告 (用 id 定位)。
+ *
+ * 為什麼需要 id 版本:
+ * - dropdown 的清單是 getActive() (所有生效中公告)
+ * - popup 的清單可能是 getAutoPopupList() (自動彈窗時排除已隱藏的)
+ * - 兩者內容可能不同 → 用 index 會開到錯的公告。用 id 定位最安全。
+ */
+export function triggerAnnouncementPopupById(announcementId: string): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent(OPEN_EVENT, { detail: { id: announcementId } })
   );
 }

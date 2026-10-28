@@ -12,6 +12,7 @@ import { AriaSelectRoot, AriaSelectItem, SelectedCheck } from '@/components/ui/a
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
 import { cn, today, cnWeekday, tripTypeLabel } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Waypoint, TripType } from '@/lib/types';
 import { StepsProgress } from '@/components/trips/steps-progress';
 import { SegmentedControl } from '@/components/trips/segmented-control';
@@ -30,6 +31,7 @@ type StepKey = (typeof STEPS)[number]['key'];
 export default function NewTripPage() {
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [mounted, setMounted] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [maxReached, setMaxReached] = useState(0);
@@ -184,29 +186,40 @@ export default function NewTripPage() {
   const handleSubmit = () => {
     if (!user) return;
     // Final validation
-    if (!validateStep('basic') || !validateStep('staff') || !validateStep('route')) return;
+    if (!validateStep('basic') || !validateStep('staff') || !validateStep('route')) {
+      toast.warning('請先完成所有步驟的必填欄位');
+      return;
+    }
     setSaving(true);
-    STORAGE.trips.add({
-      id: STORAGE.genId('trip'),
-      clientId: user.clientId || '',
-      busId,
-      nannyId,
-      date,
-      type,
-      status: 'scheduled',
-      plannedStartTime,
-      plannedEndTime,
-      actualStartTime: null,
-      actualEndTime: null,
-      currentRouteIndex: 0,
-      completedStops: [],
-      studentIds,
-      waypoints,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    setSuccess(true);
-    setTimeout(() => router.push('/trips'), 650);
+    try {
+      STORAGE.trips.add({
+        id: STORAGE.genId('trip'),
+        clientId: user.clientId || '',
+        busId,
+        nannyId,
+        date,
+        type,
+        status: 'scheduled',
+        plannedStartTime,
+        plannedEndTime,
+        actualStartTime: null,
+        actualEndTime: null,
+        currentRouteIndex: 0,
+        completedStops: [],
+        studentIds,
+        waypoints,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+      toast.success(`已建立新班次 (${date} ${plannedStartTime} → ${plannedEndTime})`);
+      setSuccess(true);
+      setTimeout(() => router.push('/trips'), 650);
+    } catch (e) {
+      console.error('[Trips/New] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      setSaving(false);
+    }
   };
 
   if (!mounted || !user) {

@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { useAuth, useSettings } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
+import { useToast } from '@/components/ui/toast';
 
 const PRESET_COLORS = [
   '#3b82f6', '#8b5cf6', '#ec4899', '#ef4444',
@@ -17,6 +18,7 @@ const PRESET_COLORS = [
 
 export default function SiteSettingsPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const { settings, updateSettings } = useSettings(user?.clientId);
   // 永遠不讓畫面空白: useSettings 在 hydration race 或 clientId 還沒拿到時
   // 可能回 null, 用 default() fallback 確保 input 一定有值可顯示。
@@ -32,12 +34,22 @@ export default function SiteSettingsPage() {
   const [success, setSuccess] = useState(false);
 
   const handleSave = () => {
-    if (!user?.clientId) return;
-    updateSettings({
-      title, phone, email, address, primaryColor, logo: logo || null
-    });
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 2000);
+    if (!user?.clientId) {
+      toast.error('無法取得客戶端資訊，請重新登入');
+      return;
+    }
+    try {
+      updateSettings({
+        title, phone, email, address, primaryColor, logo: logo || null
+      });
+      toast.success('網站設定已儲存');
+      setSuccess(true);
+      setTimeout(() => setSuccess(false), 2000);
+    } catch (e) {
+      console.error('[Site] handleSave error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+    }
   };
 
   return (

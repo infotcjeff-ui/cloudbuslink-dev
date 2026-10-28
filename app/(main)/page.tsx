@@ -123,7 +123,7 @@ function BusSelector({
   })), [buses]);
 
   return (
-    <AriaSelectRoot<{ value: string }>
+    <AriaSelectRoot
       selectedKey={selectedBusId}
       onSelectionChange={(key) => {
         if (typeof key === 'string') onSelectionChange(key);
@@ -374,7 +374,7 @@ export default function HomePage() {
         <StatusBadgeBar buses={buses} />
 
         {/* 狀態篩選 */}
-        <AriaSelectRoot<{ value: string }>
+        <AriaSelectRoot
           selectedKey={statusFilter}
           onSelectionChange={handleStatusChange}
           icon={<span className="w-2.5 h-2.5 rounded-full bg-white border border-gray-200 shrink-0" />}

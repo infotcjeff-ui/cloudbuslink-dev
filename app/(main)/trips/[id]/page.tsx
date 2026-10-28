@@ -45,7 +45,7 @@ export default function TripDetailPage() {
   const bus = STORAGE.buses.getById(trip.busId);
   const nanny = STORAGE.nannies.getById(trip.nannyId);
   const driver = bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null;
-  const canOperate = user?.role === 'super_admin' || user?.role === 'client' || user?.id === `user-${trip.nannyId}`;
+  const canOperate = user?.role === 'system_admin' || user?.role === 'super_admin' || user?.role === 'client' || user?.id === `user-${trip.nannyId}`;
 
   const startTrip = () => {
     STORAGE.trips.update(trip.id, {

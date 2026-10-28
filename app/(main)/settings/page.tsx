@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
   User, Settings as SettingsIcon, Megaphone, LogOut, ChevronRight,
-  Bus as BusIcon, Users, IdCard, BarChart3, CreditCard
+  Bus as BusIcon, Users, IdCard, BarChart3, CreditCard, Terminal
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -24,7 +24,11 @@ export default function SettingsPage() {
 
   if (!user) return null;
 
-  const isAdmin = user.role === 'super_admin' || user.role === 'client';
+  const isAdmin = user.role === 'super_admin' || user.role === 'client' || user.role === 'system_admin';
+
+  // L4 開發者專用 — 唯一能看到 System Admin Setting 入口的角色。
+  // 注意: 用「不渲染」而非 disabled, 避免向低權限暴露入口存在。
+  const isSystemAdmin = user.role === 'system_admin';
 
   const handleLogout = () => {
     logout();
@@ -52,6 +56,28 @@ export default function SettingsPage() {
           <ChevronRight className="w-5 h-5" />
         </button>
       </motion.div>
+
+      {/* System Admin Setting 入口 - 僅 system_admin (L4 開發者) 可見 */}
+      {isSystemAdmin && (
+        <motion.div
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+        >
+          <button
+            onClick={() => router.push('/system-admin-setting')}
+            className="w-full flex items-center gap-4 p-4 rounded-xl bg-gradient-to-r from-slate-900 to-slate-700 text-white shadow-lg hover:shadow-xl transition-shadow active:scale-[0.99]"
+          >
+            <div className="w-12 h-12 rounded-xl bg-white/20 flex items-center justify-center">
+              <Terminal className="w-6 h-6" />
+            </div>
+            <div className="flex-1 text-left">
+              <p className="font-bold text-base">System Admin Setting <span className="ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded bg-red-500/90 align-middle">DEV ONLY</span></p>
+              <p className="text-xs text-white/80">開發者專用 · 連線 / 整合 / 同步 / 帳號</p>
+            </div>
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </motion.div>
+      )}
 
       {/* 用戶資料卡片 */}
       <motion.div

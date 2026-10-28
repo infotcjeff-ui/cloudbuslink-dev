@@ -10,6 +10,7 @@ import { cn } from '@/lib/utils';
 import { getParentPath } from '@/lib/navigation';
 import { NotificationDropdown } from '@/components/NotificationDropdown';
 import { SideMenu } from '@/components/SideMenu';
+import { ToastProvider } from '@/components/ui/toast';
 
 const navItems = [
   { href: '/', label: '主頁', icon: Home },
@@ -136,6 +137,14 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   const isCblAdminSetting =
     pathname === '/cbl-admin-setting' || pathname.startsWith('/cbl-admin-setting/');
 
+  // System Admin Setting (/system-admin-setting) 同樣自帶完整後台 UI
+  // (共用 components/admin/AdminShell.tsx), 所以行為跟 cbl-admin-setting 一致:
+  // 隱藏外層 header + bottom nav, 並直接渲染 children (避免雙重捲動容器)。
+  const isSystemAdminSetting =
+    pathname === '/system-admin-setting' || pathname.startsWith('/system-admin-setting/');
+
+  const isAdminDashboard = isCblAdminSetting || isSystemAdminSetting;
+
   // 表單頁面 (/trips/new, /trips/[id]/edit) 自帶頁內返回/取消,
   // 不需要全局 header 的返回鍵重複顯示
   const isFormPage = /^\/trips\/new$/.test(pathname) || /^\/trips\/[^/]+\/edit$/.test(pathname);
@@ -147,11 +156,12 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
                       settings?.title || 'CloudBusLink';
 
   return (
-    <div className="h-[100dvh] flex flex-col bg-background overflow-hidden">
+    <ToastProvider>
+      <div className="h-[100dvh] flex flex-col bg-background overflow-hidden">
       {/* Header - h-[61px] (56 + 5) + liquid-glass backdrop + 公告 + burger 按鈕
           CBL Admin Setting 頁面自帶完整 header (有返回鍵 / 搜尋 / 暗色 / 時間),
           隱藏 layout 頂部 header 避免重複顯示 */}
-      {!isCblAdminSetting && (
+      {!isAdminDashboard && (
         <header className="flex-shrink-0 z-40 liquid-glass safe-top">
           <div className="flex items-center justify-between h-[61px] px-4">
           <div className="flex items-center gap-2 min-w-0">
@@ -206,27 +216,37 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
       )}
 
       {/* 主要內容 - 各 page 自行控制滾動
-          - 用 popLayout 讓新舊內容疊加, 避免 mode="wait" 的空檔期
-          - 初始 opacity 0.4 避免「從 0 載入」的感覺, 視覺上直接是換頁
-          - 頁面本身已是相對定位 + 絕對填充, 配合 absolute inset-0 */}
-      <main className="flex-1 min-h-0 overflow-hidden relative">
-        <AnimatePresence mode="popLayout" initial={false}>
-          <motion.div
-            key={pathname}
-            initial={{ opacity: 0.4 }}
-            animate={{ opacity: 1 }}
-            transition={{ duration: 0.12, ease: 'easeOut' }}
-            className="absolute inset-0 overflow-y-auto no-scrollbar"
-          >
-            {children}
-          </motion.div>
-        </AnimatePresence>
+          - 一般頁面: 用 popLayout 讓新舊內容疊加, 避免 mode="wait" 的空檔期
+          - CBL Admin Setting 頁面有自己的 layout (含 header / sidebar / motion.div 進場動畫)
+            和自己的 scroll container (overflow-y-auto p-4 lg:p-6)。
+            如果外層再用 absolute inset-0 overflow-y-auto 包一次，會產生雙重捲動容器 +
+            雙重 motion 進場動畫，導致 box-shadow 疊層與 scroll 殘影 (ghost scrolling)。
+            因此 cbl-admin-setting 直接渲染 children，跳過外層 AnimatePresence。 */}
+      <main className="flex-1 min-h-0 relative overflow-hidden">
+        {isAdminDashboard ? (
+          // 後台 dashboard (cbl-admin-setting / system-admin-setting) 自帶完整佈局
+          // (sidebar + header + 自己包 motion.div)。
+          // 這裡不需要外層 scroll container，直接傳遞讓它自己控制 overflow。
+          children
+        ) : (
+          <AnimatePresence mode="popLayout" initial={false}>
+            <motion.div
+              key={pathname}
+              initial={{ opacity: 0.4 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.12, ease: 'easeOut' }}
+              className="absolute inset-0 overflow-y-auto no-scrollbar"
+            >
+              {children}
+            </motion.div>
+          </AnimatePresence>
+        )}
       </main>
 
       {/* Bottom Nav - iOS-style 浮動 pill, 寬度 65% 置中
           - portal 用戶 (parent/nanny) 只有單一頁面, 不顯示底 nav
-          - CBL Admin Setting 頁面有自己的 Dashboard UI, 不顯示底 nav */}
-      {!isPortalUser && !isCblAdminSetting && (
+          - 後台 dashboard (cbl-admin-setting / system-admin-setting) 有自己的 UI, 不顯示底 nav */}
+      {!isPortalUser && !isAdminDashboard && (
         <nav className="fixed bottom-3 left-0 right-0 z-40 safe-bottom pointer-events-none">
           <div className="mx-auto max-w-[65vw] liquid-glass rounded-2xl shadow-lg p-1.5 pointer-events-auto">
             <div className="grid grid-cols-3 gap-1">
@@ -262,6 +282,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
 
       {/* 側邊選單 — 2026 Refined Glassmorphism, 從右側滑入 */}
       <SideMenu open={drawerOpen} onOpenChange={setDrawerOpen} />
-    </div>
+      </div>
+    </ToastProvider>
   );
 }

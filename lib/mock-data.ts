@@ -1,6 +1,6 @@
 // 預設 mock 數據 - Demo 階段使用
 import type {
-  User, Client, Driver, Bus, Student, Parent, Nanny, Trip, Attendance, Route
+  User, Client, Company, Driver, Bus, Student, Parent, Nanny, Trip, Attendance, Route
 } from './types';
 import { STORAGE, isInitialized, markInitialized } from './storage';
 
@@ -12,7 +12,7 @@ export function initMockData() {
   const clientId = 'client-demo-001';
   const academicYear = '2627';
 
-  // ==== Client (示範學校) ====
+  // ==== Client (示範學校 = cbl_clients 即學校表，選項 B) ====
   const client: Client = {
     id: clientId,
     name: '示範小學',
@@ -28,15 +28,30 @@ export function initMockData() {
   };
   STORAGE.clients.setAll([client]);
 
+  // ==== Company (示範機構/公司 = cbl_companies，保姆/司機/校巴可選配) ====
+  const company: Company = {
+    id: 'company-demo-001',
+    name: '示範校巴公司',
+    email: 'info@demo-bus.hk',
+    phone: '23456789',
+    address: '香港九龍示範街1號',
+    logo: null,
+    status: 'active',
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  STORAGE.companies.setAll([company]);
+
   // ==== Users (登入帳戶) ====
   const users: User[] = [
     {
-      id: 'user-admin',
+      // 系統擁有者帳號 — 密碼與 email 相同, 首次登入後請自行更改
+      id: 'user-super-admin',
       phone: 'admin',
-      password: 'admin123',
+      password: 'fonglongchan1018@gmail.com',
       role: 'super_admin',
-      name: '系統管理員',
-      email: 'admin@cloudbuslink.com',
+      name: 'Jeff Chan',
+      email: 'fonglongchan1018@gmail.com',
       status: 'active',
       createdAt: now(),
     },
@@ -94,11 +109,12 @@ export function initMockData() {
   ];
   STORAGE.users.setAll(users);
 
-  // ==== Drivers (司機) ====
+  // ==== Drivers (司機，所屬學校必填 + 所屬機構選配) ====
   const drivers: Driver[] = [
     {
       id: 'driver-001',
       clientId,
+      companyId: 'company-demo-001',
       name: '陳大明',
       phone: '91234567',
       licenseNumber: 'D1234567',
@@ -109,6 +125,7 @@ export function initMockData() {
     {
       id: 'driver-002',
       clientId,
+      companyId: 'company-demo-001',
       name: '林志強',
       phone: '91234568',
       licenseNumber: 'D2345678',
@@ -119,11 +136,12 @@ export function initMockData() {
   ];
   STORAGE.drivers.setAll(drivers);
 
-  // ==== Buses (校巴) ====
+  // ==== Buses (校巴，所屬學校必填 + 所屬機構選配) ====
   const buses: Bus[] = [
     {
       id: 'bus-001',
       clientId,
+      companyId: 'company-demo-001',
       plateNumber: 'YP 5678',
       model: 'Toyota Coaster',
       capacity: 40,
@@ -141,6 +159,7 @@ export function initMockData() {
     {
       id: 'bus-002',
       clientId,
+      companyId: 'company-demo-001',
       plateNumber: 'YZ 1234',
       model: 'Hyundai County',
       capacity: 25,
@@ -351,11 +370,12 @@ export function initMockData() {
   ];
   STORAGE.students.setAll(students);
 
-  // ==== Nannies (保姆) ====
+  // ==== Nannies (保姆，所屬學校必填 + 所屬機構選配) ====
   const nannies: Nanny[] = [
     {
       id: 'nanny-001',
       clientId,
+      companyId: 'company-demo-001',
       name: '李小美',
       phone: '90000003',
       employeeId: 'EMP-001',
@@ -367,6 +387,7 @@ export function initMockData() {
     {
       id: 'nanny-002',
       clientId,
+      companyId: 'company-demo-001',
       name: '王小花',
       phone: '90000004',
       employeeId: 'EMP-002',
@@ -651,7 +672,7 @@ export function initMockData() {
       id: 'ann-001',
       clientId,
       title: '歡迎使用 CloudBusLink',
-      content: '示範系統已準備就緒, 預設管理員/客戶/保姆/家長帳戶已建立。\n\n登入資訊:\n• 系統管理員: 90000001 / admin123\n• 客戶: 90000002 / client123\n• 保姆: 90000003 / nanny123\n• 家長: 90000005 / parent123',
+      content: '示範系統已準備就緒。\n\n登入資訊:\n• 系統管理員: admin / fonglongchan1018@gmail.com\n• 客戶: 90000002 / client123\n• 保姆: 90000003 / nanny123\n• 家長: 90000005 / parent123\n\n※ 密碼目前以明碼儲存, 上線前需改為 hash。',
       type: 'info',
       displayCount: 1,
       currentCount: 0,

@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
 import { formatAcademicYear, parseAcademicYearCode } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Student } from '@/lib/types';
 
 // 與 new 頁共用同一份白名單, 確保兩處 UI 一致。
@@ -32,6 +33,7 @@ export default function EditStudentPage() {
   const params = useParams();
   const router = useRouter();
   const { user } = useAuth();
+  const toast = useToast();
   const [student, setStudent] = useState<Student | null>(null);
   const [name, setName] = useState('');
   const [classNumber, setClassNumber] = useState('');
@@ -63,23 +65,40 @@ export default function EditStudentPage() {
   const allParents = STORAGE.parents.getByClient(user.clientId || '');
   const allBuses = STORAGE.buses.getByClient(user.clientId || '');
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setError('');
     if (!name.trim()) { setError('請輸入姓名'); return; }
     if (!classNumber.trim()) { setError('請輸入班別'); return; }
     if (parentIds.length === 0) { setError('請至少關聯一位家長'); return; }
 
-    // 注意: studentId 是 primary key, 不在這裡改; 學年 UI 主要讓使用者看到/確認
-    // 該學生目前屬於哪個學年, 不重編號。
-    STORAGE.students.update(student.id, {
-      name: name.trim(),
-      classNumber: classNumber.trim(),
-      phone: phone.trim() || null,
-      status,
-      busId: busId || null,
-      parentIds,
-    });
-    router.push('/settings/students');
+    try {
+      // 注意: studentId 是 primary key, 不在這裡改; 學年 UI 主要讓使用者看到/確認
+      // 該學生目前屬於哪個學年, 不重編號。
+      const updates = {
+        name: name.trim(),
+        classNumber: classNumber.trim(),
+        phone: phone.trim() || null,
+        status,
+        busId: busId || null,
+        parentIds,
+      };
+      STORAGE.students.update(student.id, updates);
+
+      // 推回雲端 (背景)
+      const { supabaseStudents } = await import('@/lib/supabase-entities');
+      const sbRes = await supabaseStudents.update(student.id, updates);
+      if (!sbRes.success) {
+        console.warn('[Students/Edit] Supabase update failed:', sbRes.error);
+        toast.warning(`學生已更新，但雲端同步失敗：${sbRes.error}`);
+      }
+
+      toast.success(`學生「${name.trim()}」已更新`);
+      router.push('/settings/students');
+    } catch (e) {
+      console.error('[Students/Edit] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+    }
   };
 
   const toggleParent = (id: string) => {

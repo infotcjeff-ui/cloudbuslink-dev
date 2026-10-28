@@ -27,13 +27,11 @@ import {
   Trash2,
   Eye,
   Search,
-  RefreshCw,
   Users as UsersAllIcon,
   AlertCircle,
   FolderOpen,
   CheckCircle2,
   Archive,
-  PowerOff,
   Phone,
   Copy,
   Hash,
@@ -44,6 +42,8 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
+import { resolveClientId } from '@/lib/storage';
 import { Pill, Dot } from './primitives';
 import {
   Button,
@@ -60,13 +60,11 @@ import {
   type StudentFormState,
   type StudentTab,
 } from './types';
-import type { Student, Parent, Bus, ParentRelationship } from '@/lib/types';
+import type { Student, Parent, Bus, Driver, ParentRelationship } from '@/lib/types';
 import {
   ANIMATION_EASE,
   PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
-  ROW_STAGGER_BASE,
-  ROW_STAGGER_CAP,
 } from './design-tokens';
 
 /* -------------------------------------------------------------------------- */
@@ -168,7 +166,6 @@ function ConfirmDeleteModal({
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
           transition={{ duration: 0.14, ease: ANIMATION_EASE }}
           onClick={onClose}
         >
@@ -179,7 +176,6 @@ function ConfirmDeleteModal({
             className="relative w-full max-w-[420px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700"
             initial={{ opacity: 0, y: 6 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 6 }}
             transition={{ duration: 0.14, ease: ANIMATION_EASE }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -236,6 +232,7 @@ export interface StudentsConsoleContentProps {
   students: Student[];
   parents: Parent[];
   buses: Bus[];
+  drivers: Driver[];
   /** Initial loading flag — true if we haven't loaded yet on mount. */
   initiallyLoading?: boolean;
 }
@@ -244,14 +241,15 @@ export function StudentsConsoleContent({
   students,
   parents,
   buses,
+  drivers,
   initiallyLoading = false,
 }: StudentsConsoleContentProps) {
+  const toast = useToast();
   const [tab, setTab] = React.useState<StudentTab>('active');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
   const [page, setPage] = React.useState(1);
   const [isLoading, setIsLoading] = React.useState(initiallyLoading);
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
 
   // Form modal state
   const [formModal, setFormModal] = React.useState<{
@@ -327,9 +325,12 @@ export function StudentsConsoleContent({
       const raw = localStorage.getItem('cbl_auth');
       if (!raw) return '';
       const u = JSON.parse(raw);
-      return u?.clientId || '';
+      // 跨機構角色 (super_admin / system_admin) 沒有自己的 clientId,
+      // 但建立資料時需要一個有效的 client_id (DB 有 NOT NULL + FK 約束)
+      // → 用 resolveClientId 兜底到已知學校的 clientId
+      return resolveClientId(u?.clientId || null);
     } catch {
-      return '';
+      return resolveClientId(null);
     }
   }, []);
 
@@ -406,13 +407,15 @@ export function StudentsConsoleContent({
     async (state: StudentFormState) => {
       setIsSaving(true);
       try {
+        let savedName = '';
         if (formModal.mode === 'add') {
           const { STORAGE } = await import('@/lib/storage');
           const settings = STORAGE.settings.getByClient('');
           const ay = settings.academicYear || academicYear;
           const studentId = STORAGE.students.generateStudentId(authClientId, ay);
-          STORAGE.students.add({
-            id: STORAGE.genId('student'),
+          const newId = STORAGE.genId('student');
+          const newStudent = {
+            id: newId,
             clientId: authClientId,
             studentId,
             name: state.name.trim(),
@@ -424,18 +427,28 @@ export function StudentsConsoleContent({
             emergencyContactName: state.emergencyContactName.trim() || null,
             emergencyContactPhone: state.emergencyContactPhone.trim() || null,
             emergencyContactRelationship:
-              (state.emergencyContactRelationship as ParentRelationship | '') || null,
-            status: 'active',
+              (state.emergencyContactRelationship as ParentRelationship) || null,
+            status: 'active' as const,
             parentIds: state.parentIds,
             primaryParentId: state.primaryParentId || null,
             busId: state.busId || null,
             pickupLocation: null,
             dropoffLocation: null,
             createdAt: new Date().toISOString(),
-          });
+          };
+          STORAGE.students.add(newStudent);
+          savedName = newStudent.name;
+
+          // 推回雲端 (背景) — 失敗不影響本機已完成的儲存
+          const { supabaseStudents } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseStudents.add(newStudent);
+          if (!sbRes.success) {
+            console.warn('[StudentsConsole] Supabase add failed:', sbRes.error);
+            toast.warning(`學生已新增，但雲端同步失敗：${sbRes.error}`);
+          }
         } else if (formModal.editingId) {
           const { STORAGE } = await import('@/lib/storage');
-          STORAGE.students.update(formModal.editingId, {
+          const updates = {
             name: state.name.trim(),
             classNumber: state.classNumber.trim(),
             phone: state.phone.trim() || null,
@@ -444,19 +457,38 @@ export function StudentsConsoleContent({
             emergencyContactName: state.emergencyContactName.trim() || null,
             emergencyContactPhone: state.emergencyContactPhone.trim() || null,
             emergencyContactRelationship:
-              (state.emergencyContactRelationship as ParentRelationship | '') || null,
+              (state.emergencyContactRelationship as ParentRelationship) || null,
             busId: state.busId || null,
             parentIds: state.parentIds,
             primaryParentId: state.primaryParentId || null,
-          });
+          };
+          STORAGE.students.update(formModal.editingId, updates);
+          savedName = updates.name;
+
+          // 推回雲端 (背景)
+          const { supabaseStudents } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseStudents.update(formModal.editingId, updates);
+          if (!sbRes.success) {
+            console.warn('[StudentsConsole] Supabase update failed:', sbRes.error);
+            toast.warning(`學生已更新，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
+        if (formModal.mode === 'add') {
+          toast.success(`學生「${savedName}」新增成功！`);
+        } else {
+          toast.success(`學生「${savedName}」更新成功！`);
         }
         setFormModal((p) => ({ ...p, open: false }));
         window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
+      } catch (err) {
+        console.error('[StudentsConsole] handleSave error:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`儲存失敗：${msg}`);
       } finally {
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId, authClientId, academicYear],
+    [formModal.mode, formModal.editingId, authClientId, academicYear, toast],
   );
 
   const handleDelete = React.useCallback(async () => {
@@ -464,19 +496,28 @@ export function StudentsConsoleContent({
     setIsDeleting(true);
     try {
       const { STORAGE } = await import('@/lib/storage');
+      const targetName = deleteTarget.name;
       STORAGE.students.remove(deleteTarget.id);
+
+      // 推回雲端 (刪除)
+      const { supabaseStudents } = await import('@/lib/supabase-entities');
+      const sbRes = await supabaseStudents.remove(deleteTarget.id);
+      if (!sbRes.success) {
+        console.warn('[StudentsConsole] Supabase delete failed:', sbRes.error);
+        toast.warning(`學生已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+      }
+
+      toast.success(`學生「${targetName}」已刪除`);
       setDeleteTarget(null);
       window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
+    } catch (err) {
+      console.error('[StudentsConsole] handleDelete error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`刪除失敗：${msg}`);
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget]);
-
-  const handleRefresh = React.useCallback(() => {
-    setIsRefreshing(true);
-    window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
-    window.setTimeout(() => setIsRefreshing(false), 400);
-  }, []);
+  }, [deleteTarget, toast]);
 
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
@@ -520,9 +561,6 @@ export function StudentsConsoleContent({
       {/* L1. Header Row — 規範 §8 */}
       <motion.div
         className="flex flex-col lg:flex-row lg:items-center gap-4 lg:gap-6 pb-2"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 text-white shrink-0">
@@ -598,16 +636,6 @@ export function StudentsConsoleContent({
         <Button
           variant="secondary"
           size="sm"
-          startIcon={<RefreshCw width={12} height={12} />}
-          onClick={handleRefresh}
-          isLoading={isRefreshing}
-        >
-          重新整理
-        </Button>
-
-        <Button
-          variant="secondary"
-          size="sm"
           startIcon={<FileSpreadsheet width={12} height={12} />}
           onClick={handleExportExcel}
           disabled={filtered.length === 0}
@@ -660,18 +688,6 @@ export function StudentsConsoleContent({
             options={TAB_OPTIONS}
             layoutId="students-tab-pill"
           />
-
-          <IconButton
-            onClick={handleRefresh}
-            title="重新整理列表"
-            variant="subtle"
-          >
-            <RefreshCw
-              width={13}
-              height={13}
-              className={cn(isRefreshing && 'animate-spin text-blue-600')}
-            />
-          </IconButton>
 
           <div className="relative ml-auto min-w-[220px]">
             <Search
@@ -777,7 +793,7 @@ export function StudentsConsoleContent({
         open={formModal.open}
         mode={formModal.mode}
         initial={formModal.initial}
-        context={{ students, parents, buses }}
+        context={{ students, parents, buses, drivers }}
         studentId={formModal.editingStudentId}
         previewStudentId={previewStudentId}
         clientId={authClientId}
@@ -806,7 +822,6 @@ function SkeletonRows() {
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -842,7 +857,6 @@ function EmptyState({
       key={`empty-${tab}-${search}`}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -6 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
       <div className="flex flex-col items-center gap-2 py-12 px-5">
@@ -900,13 +914,8 @@ function DataTable({
   }, [buses]);
 
   return (
-    <motion.table
-      className="w-full"
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: PAGE_FADE_DURATION, ease: ANIMATION_EASE }}
-    >
+    <table
+      className="w-full">
       <thead>
         <tr className="bg-slate-50/60 border-b border-slate-100 text-[10px] uppercase tracking-[0.06em] text-slate-500 font-semibold dark:bg-slate-800/60 dark:border-slate-700/80 dark:text-slate-400">
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-5 py-2 text-left dark:bg-slate-800/95">
@@ -933,22 +942,15 @@ function DataTable({
         </tr>
       </thead>
       <tbody>
-        {rows.map((s, idx) => {
+        {rows.map((s) => {
           const bus = s.busId ? busesById.get(s.busId) : null;
           const rowParents = s.parentIds
             .map((id) => parentsById.get(id))
             .filter((p): p is Parent => !!p);
           return (
-            <motion.tr
+            <tr
               key={s.id}
               className="border-b border-slate-100 last:border-b-0 hover:bg-slate-50/50 transition-colors group dark:border-slate-700/80 dark:hover:bg-slate-800/50"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{
-                duration: 0.22,
-                ease: ANIMATION_EASE,
-                delay: Math.min(idx * ROW_STAGGER_BASE, ROW_STAGGER_CAP),
-              }}
             >
               {/* 學生 (avatar + name + class) — 規範 §12 */}
               <td className="px-5 py-2.5">
@@ -1058,15 +1060,15 @@ function DataTable({
                     title="刪除學生"
                     variant="danger"
                   >
-                    <PowerOff width={13} height={13} />
+                    <Trash2 width={13} height={13} />
                   </IconButton>
                 </div>
               </td>
-            </motion.tr>
+            </tr>
           );
         })}
       </tbody>
-    </motion.table>
+    </table>
   );
 }
 

@@ -9,7 +9,6 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/hooks';
 import { isValidPhone } from '@/lib/utils';
-import { initMockData } from '@/lib/mock-data';
 
 export default function NannyLoginPage() {
   const router = useRouter();
@@ -19,10 +18,6 @@ export default function NannyLoginPage() {
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  useEffect(() => {
-    initMockData();
-  }, []);
 
   useEffect(() => {
     if (!loading && user) {
@@ -155,41 +150,18 @@ export default function NannyLoginPage() {
                 className="w-full h-12 text-base bg-gradient-to-r from-emerald-500 to-teal-500"
                 disabled={submitting}
               >
-                <LogIn className="w-4 h-4" />
-                {submitting ? '登入中...' : '登入'}
+                <motion.span
+                  animate={submitting ? { rotate: 360 } : { rotate: 0 }}
+                  transition={submitting ? { repeat: Infinity, duration: 0.8, ease: 'linear' } : {}}
+                  className="flex items-center gap-2"
+                >
+                  <LogIn className="w-4 h-4" />
+                  {submitting ? '登入中...' : '登入'}
+                </motion.span>
               </Button>
             </form>
           </CardContent>
         </Card>
-
-        {/* 示範帳戶 */}
-        <div className="mt-6">
-          <p className="text-xs text-center text-muted-foreground mb-2">示範帳戶 (一鍵登入)</p>
-          <div className="flex flex-col gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setPhone('90000003');
-                setPassword('nanny123');
-              }}
-              className="text-xs h-9"
-            >
-              保姆 - 李小美 (90000003)
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                setPhone('90000004');
-                setPassword('nanny123');
-              }}
-              className="text-xs h-9"
-            >
-              保姆 - 王小花 (90000004)
-            </Button>
-          </div>
-        </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
           © 2026 CloudBusLink

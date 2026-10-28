@@ -44,6 +44,8 @@ import {
   Star,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { STORAGE } from '@/lib/storage';
+import { useToast } from '@/components/ui/toast';
 import { Button, Pill } from './primitives';
 import { MODAL_FADE, MODAL_SLIDE, EASE } from './design-tokens';
 import {
@@ -57,7 +59,90 @@ import {
   GENDER_OPTIONS,
   type ParentFormState,
 } from './ParentFormModal';
-import type { Student, Parent } from '@/lib/types';
+import {
+  EntitySelectWithCreate,
+  busLabel,
+} from '../../components/EntitySelectWithCreate';
+import { InlineMiniFormModal } from '../../components/InlineMiniFormModal';
+import type { Student, Parent, Bus, Driver } from '@/lib/types';
+
+/* -------------------------------------------------------------------------- */
+/*  SelectedBusDetail — 右欄「已選校巴」詳情卡片 (含司機資訊)                        */
+/* -------------------------------------------------------------------------- */
+
+function SelectedBusDetail({
+  bus,
+  driver,
+}: {
+  bus: Bus | undefined;
+  driver: Driver | undefined;
+}) {
+  if (!bus) {
+    return (
+      <p className="text-[11.5px] text-slate-400 dark:text-slate-500">
+        校巴資料已不存在
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-blue-50 text-blue-600 ring-1 ring-inset ring-blue-100 shrink-0 dark:bg-blue-950/40 dark:text-blue-300 dark:ring-blue-800/50">
+          <BusIcon width={13} height={13} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[12.5px] font-semibold font-mono text-slate-900 dark:text-slate-100">
+              {bus.plateNumber}
+            </span>
+            {bus.model && (
+              <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                · {bus.model}
+              </span>
+            )}
+          </div>
+        </div>
+        <span
+          className={cn(
+            'inline-flex items-center gap-0.5 px-1 py-px rounded text-[9px] font-semibold uppercase tracking-wide ring-1 ring-inset shrink-0',
+            bus.status === 'active'
+              ? 'bg-emerald-50 text-emerald-700 ring-emerald-200/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800/50'
+              : bus.status === 'maintenance'
+              ? 'bg-amber-50 text-amber-700 ring-amber-200/70 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-800/50'
+              : 'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700',
+          )}
+        >
+          {bus.status === 'active' ? '運行' : bus.status === 'maintenance' ? '維護' : '停用'}
+        </span>
+      </div>
+      <div className="pt-1.5 border-t border-slate-100 dark:border-slate-700/80">
+        {driver ? (
+          <div className="flex items-center gap-1.5">
+            <div className="h-5 w-5 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 dark:text-slate-400 text-[9px] font-semibold shrink-0">
+              <UsersIcon width={9} height={9} />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[10.5px] text-slate-500 dark:text-slate-400 leading-tight">
+                <span className="text-slate-400 dark:text-slate-500">司機:</span>{' '}
+                <span className="font-semibold text-slate-800 dark:text-slate-200">{driver.name}</span>
+              </p>
+              {driver.phone && (
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 tabular-nums leading-tight">
+                  {driver.phone}
+                </p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <p className="text-[10.5px] text-amber-600 dark:text-amber-400 inline-flex items-center gap-1">
+            <AlertTriangle width={9} height={9} />
+            尚未指派司機
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /* -------------------------------------------------------------------------- */
 /*  LabeledInput — 2-欄 grid 表單欄位                                            */
@@ -322,10 +407,10 @@ function ParentTagSelect({
 
   return (
     <div ref={containerRef} className="relative">
-      {/* 已選 + 輸入框的容器 */}
+      {/* 已選 + 輸入框的容器 (高度與 NativeSelect h-9 對齊) */}
       <div
         className={cn(
-          'relative flex flex-wrap items-center gap-1.5 min-h-[38px] px-2 py-1.5 rounded-md border bg-white cursor-text transition-colors',
+          'relative flex flex-wrap items-center gap-1 min-h-[36px] px-2 py-1 rounded-md border bg-white cursor-text transition-colors',
           'focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-400/40',
           'border-slate-200 dark:bg-slate-900 dark:border-slate-700',
         )}
@@ -584,16 +669,42 @@ export function StudentFormModal({
   onSave,
   onClose,
 }: StudentFormModalProps) {
+  const toast = useToast();
   const [form, setForm] = React.useState<StudentFormState>(EMPTY_STUDENT_FORM);
 
   // 「在表單內新增家長」彈窗
-  const [parentModal, setParentModal] = React.useState<{
-    open: boolean;
-  }>({ open: false });
+  const [parentModal, setParentModal] = React.useState({
+    open: false,
+  });
   const [isAddingParent, setIsAddingParent] = React.useState(false);
 
   // 在 modal 開啟期間, 即時的家長清單 (包含 form 內剛新增的)
   const [inlineParents, setInlineParents] = React.useState<Parent[]>([]);
+
+  // 「在表單內新增校巴」彈窗
+  const [busModalOpen, setBusModalOpen] = React.useState(false);
+  const [isAddingBus, setIsAddingBus] = React.useState(false);
+  // 在 modal 開啟期間, 即時的校巴清單 (包含 form 內剛新增的)
+  const [inlineBuses, setInlineBuses] = React.useState<Bus[]>([]);
+
+  /** 直接從 STORAGE 讀取全部校巴 (繞過 clientId 過濾) */
+  const [storageBuses, setStorageBuses] = React.useState<Bus[]>([]);
+  /** 直接從 STORAGE 讀取全部司機 (繞過 clientId 過濾, 與 storageBuses 範圍對齊,
+   *  避免右欄「已選校巴」在綁定了跨機構司機時誤判「尚未指派司機」。) */
+  const [storageDrivers, setStorageDrivers] = React.useState<Driver[]>([]);
+
+  React.useEffect(() => {
+    setStorageBuses(STORAGE.buses.getAll());
+    setStorageDrivers(STORAGE.drivers.getAll());
+    const onBusRefresh = () => setStorageBuses(STORAGE.buses.getAll());
+    const onDriverRefresh = () => setStorageDrivers(STORAGE.drivers.getAll());
+    window.addEventListener('cbl-buses-refresh', onBusRefresh);
+    window.addEventListener('cbl-drivers-refresh', onDriverRefresh);
+    return () => {
+      window.removeEventListener('cbl-buses-refresh', onBusRefresh);
+      window.removeEventListener('cbl-drivers-refresh', onDriverRefresh);
+    };
+  }, []);
 
   // open / mode / initial 變動時重置 — 避免殘留舊資料。
   React.useEffect(() => {
@@ -603,8 +714,14 @@ export function StudentFormModal({
         ...initial,
       });
       setInlineParents([]); // 每次開啟重置
+      setInlineBuses([]); // 每次開啟重置
+      // 緊急聯絡人: edit mode 有資料 → 自動展開; add mode → 收合
+      setShowEmergency(!!initial.emergencyContactName?.trim());
     }
   }, [open, mode, initial]);
+
+  // SECTION — 緊急聯絡人 漸進式揭露 (預設收合, edit mode 自動展開)
+  const [showEmergency, setShowEmergency] = React.useState(false);
 
   // 合併 context 傳入的家長與「本次表單內新增的」家長
   const mergedParents = React.useMemo(
@@ -643,8 +760,10 @@ export function StudentFormModal({
     async (parentState: ParentFormState) => {
       setIsAddingParent(true);
       try {
-        const { STORAGE } = await import('@/lib/storage');
-        const effectiveClientId = clientId || '';
+        const { STORAGE, resolveClientId } = await import('@/lib/storage');
+        // 跨機構角色 (super_admin / system_admin) 傳進來的 clientId 是空的,
+        // 但 cbl_parents.client_id 在 DB 有 NOT NULL + FK 約束 → 必須兜底
+        const effectiveClientId = resolveClientId(clientId || null);
         const newParent: Parent = {
           id: STORAGE.genId('parent'),
           clientId: effectiveClientId,
@@ -663,6 +782,17 @@ export function StudentFormModal({
         };
 
         STORAGE.parents.add(newParent);
+        toast.success(`家長「${newParent.name}」已在表單內新增, 並已自動關聯至本學生`);
+
+        // 推回雲端 (背景) — 沒有的話這筆家長只存在這台電腦
+        {
+          const { supabaseParents } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseParents.add(newParent);
+          if (!sbRes.success) {
+            console.warn('[StudentFormModal] Supabase add parent failed:', sbRes.error);
+            toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
 
         // 1) 寫入到 inlineParents (讓本次 modal 立即可見)
         setInlineParents((prev) => [...prev, newParent]);
@@ -755,7 +885,7 @@ export function StudentFormModal({
             onClick={onClose}
           >
           <motion.div
-            className="relative w-full max-w-[760px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-visible flex flex-col dark:bg-slate-900 dark:border-slate-700"
+            className="relative w-full max-w-[900px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[calc(100vh-2rem)] dark:bg-slate-900 dark:border-slate-700"
             initial={{ opacity: 0, y: MODAL_SLIDE }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: MODAL_SLIDE }}
@@ -796,305 +926,115 @@ export function StudentFormModal({
               </button>
             </div>
 
-            {/* Body — 2-column grid */}
-            <div className="px-5 py-5 grid grid-cols-1 md:grid-cols-2 gap-4 dark:scrollbar-thin">
-              {/* 學年 (edit mode) — 顯示現有 studentId, 唯讀 */}
-              {mode === 'edit' && studentId && (
-                <div className="md:col-span-2">
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    學生編號
-                  </label>
-                  <div className="h-9 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 text-[12px] font-mono text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200">
-                    <Hash width={11} height={11} className="text-slate-400" />
-                    {studentId}
-                  </div>
-                </div>
-              )}
-
-              {/* Add mode: 學生編號預覽 (唯讀) */}
-              {mode === 'add' && (
-                <div className="md:col-span-2">
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    學生編號 <span className="text-[10px] text-slate-400 normal-case font-medium">(自動生成, 不可修改)</span>
-                  </label>
-                  <div className="h-9 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 text-[12px] font-mono text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200">
-                    <Hash width={11} height={11} className="text-slate-400" />
-                    {previewId}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <LabeledInput
-                  id="student-form-name"
-                  label="姓名"
-                  value={form.name}
-                  onChange={(v) => setForm((p) => ({ ...p, name: v }))}
-                  onBlur={() => markTouched('name')}
-                  placeholder="張小明"
-                  required
-                  icon={<IdCard width={12} height={12} />}
-                />
-                <InlineFieldError
-                  message={touched.name ? fieldErrors.name : null}
-                  onShow={() => markTouched('name')}
-                />
-              </div>
-
-              <div>
-                <LabeledInput
-                  id="student-form-class"
-                  label="班別"
-                  value={form.classNumber}
-                  onChange={(v) => setForm((p) => ({ ...p, classNumber: v }))}
-                  onBlur={() => markTouched('classNumber')}
-                  placeholder="1A"
-                  required
-                  icon={<GraduationCap width={12} height={12} />}
-                />
-                <InlineFieldError
-                  message={touched.classNumber ? fieldErrors.classNumber : null}
-                  onShow={() => markTouched('classNumber')}
-                />
-              </div>
-
-              <NativeSelect
-                id="student-form-gender"
-                label="性別"
-                value={form.gender}
-                onChange={(v) =>
-                  setForm((p) => ({ ...p, gender: v as Student['gender'] }))
-                }
-                required
-              >
-                {GENDER_OPTIONS.map((g) => (
-                  <option key={g.value} value={g.value}>
-                    {g.label}
-                  </option>
-                ))}
-              </NativeSelect>
-
-              <div>
-                <label
-                  htmlFor="student-form-dob"
-                  className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
-                >
-                  出生日期
-                  <span className="text-rose-500 ml-0.5">*</span>
-                </label>
-                <div className="relative">
-                  <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-                    <Calendar width={12} height={12} />
-                  </span>
-                  <input
-                    id="student-form-dob"
-                    type="date"
-                    value={form.dateOfBirth}
-                    onChange={(e) => {
-                      setForm((p) => ({ ...p, dateOfBirth: e.target.value }));
-                      markTouched('dateOfBirth');
-                    }}
-                    max={new Date().toISOString().slice(0, 10)}
-                    className="w-full h-9 rounded-md border border-slate-200 bg-white pl-8 pr-2.5 text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                  />
-                </div>
-                <InlineFieldError
-                  message={touched.dateOfBirth ? fieldErrors.dateOfBirth : null}
-                  onShow={() => markTouched('dateOfBirth')}
-                />
-              </div>
-
-              <LabeledInput
-                id="student-form-phone"
-                label="電話 (選填)"
-                value={form.phone}
-                onChange={(v) =>
-                  setForm((p) => ({
-                    ...p,
-                    phone: v.replace(/\D/g, '').slice(0, 8),
-                  }))
-                }
-                placeholder="91234567"
-                type="tel"
-                inputMode="tel"
-                maxLength={8}
-                icon={<Phone width={12} height={12} />}
-              />
-
-              <div className="md:col-span-2">
-                <NativeSelect
-                  id="student-form-bus"
-                  label="綁定校巴"
-                  value={form.busId}
-                  onChange={(v) => setForm((p) => ({ ...p, busId: v }))}
-                >
-                  <option value="">未指派</option>
-                  {context.buses.map((b) => (
-                    <option key={b.id} value={b.id}>
-                      {b.plateNumber}
-                      {b.model ? ` — ${b.model}` : ''}
-                    </option>
-                  ))}
-                </NativeSelect>
-              </div>
-
-              {/* 關聯家長 (現在放在「緊急聯絡人」上方) */}
-              <div className="md:col-span-2">
-                <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 mb-1.5 block dark:text-slate-400 inline-flex items-center gap-1.5">
-                  關聯家長
-                  <span className="text-rose-500">*</span>
-                </label>
-                <ParentTagSelect
-                  parents={parentChoices}
-                  selectedIds={form.parentIds}
-                  primaryId={form.primaryParentId || null}
-                  onToggle={(id) => {
-                    toggleParent(id);
-                    markTouched('parents');
-                  }}
-                  onSetPrimary={(id) => {
-                    setPrimaryParent(id);
-                    markTouched('parents');
-                  }}
-                  onAddNew={() => {
-                    markTouched('parents');
-                    setParentModal({ open: true });
-                  }}
-                />
-                <InlineFieldError
-                  message={touched.parents ? fieldErrors.parents : null}
-                  onShow={() => markTouched('parents')}
-                />
-              </div>
-
-              {/* 已選家長 — 每位可設為「主要聯繫人」 (學生視角) */}
-              {form.parentIds.length > 0 && (
-                <div className="md:col-span-2">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <p className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 dark:text-slate-400 inline-flex items-center gap-1.5">
-                      已選家長 ({form.parentIds.length})
-                    </p>
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500">
-                      選填 · 僅一位
-                    </span>
-                  </div>
-                  <ul className="rounded-md border border-slate-200 divide-y divide-slate-100 bg-white overflow-hidden dark:border-slate-700 dark:divide-slate-700/80 dark:bg-slate-900">
-                    {form.parentIds.map((id) => {
-                      const p = parentChoices.find((pp) => pp.id === id);
-                      if (!p) return null;
-                      const relLabel = p.relationship ? RELATIONSHIP_LABEL[p.relationship] : null;
-                      const isPrimary = form.primaryParentId === id;
-                      return (
-                        <li
-                          key={id}
-                          className={cn(
-                            'flex items-center gap-3 px-3 py-2 transition-colors',
-                            isPrimary
-                              ? 'bg-amber-50/60 dark:bg-amber-950/20'
-                              : 'hover:bg-slate-50 dark:hover:bg-slate-800/50',
-                          )}
-                        >
-                          <div
-                            className={cn(
-                              'p-1.5 rounded-md shrink-0',
-                              isPrimary
-                                ? 'bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-300'
-                                : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400',
-                            )}
-                          >
-                            <UsersIcon width={13} height={13} />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span
-                                className={cn(
-                                  'text-[12.5px] font-semibold truncate',
-                                  isPrimary
-                                    ? 'text-amber-900 dark:text-amber-100'
-                                    : 'text-slate-800 dark:text-slate-200',
-                                )}
-                              >
-                                {p.name}
-                              </span>
-                              {relLabel && (
-                                <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                                  ({relLabel})
-                                </span>
-                              )}
-                              {isPrimary && (
-                                <span className="inline-flex items-center gap-0.5 px-1 py-px rounded text-[9px] font-semibold bg-amber-100 text-amber-700 ring-1 ring-inset ring-amber-200/70 dark:bg-amber-950/60 dark:text-amber-200 dark:ring-amber-800/50">
-                                  ★ 主要
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-[11px] text-slate-500 mt-0.5 leading-snug dark:text-slate-400 tabular-nums">
-                              {p.phone || '未填電話'}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-[10.5px] font-medium text-slate-500 dark:text-slate-400">
-                              主要聯繫人
-                            </span>
-                            <PrimarySwitch
-                              checked={isPrimary}
-                              onChange={() => setPrimaryParent(id)}
-                              id={`primary-switch-${id}`}
-                            />
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {touched.parents && form.parentIds.length > 0 && !form.primaryParentId && (
-                    <p className="mt-1.5 text-[10.5px] text-amber-600 dark:text-amber-400 inline-flex items-center gap-1">
-                      <span>提示:</span>
-                      有任何事情時，第一順位負責聯絡的家長或法定監護人
-                    </p>
-                  )}
-                </div>
-              )}
-
-              {/* 緊急聯絡人 (選填, 與 parentIds 獨立) */}
-              <div className="md:col-span-2 pt-2 mt-1 border-t border-slate-100 dark:border-slate-700/80">
-                <p className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-400 mb-2 dark:text-slate-500 inline-flex items-center gap-1.5">
-                  <AlertTriangle width={11} height={11} />
-                  緊急聯絡人 (選填 — 若與關聯家長不同, 可在此填寫)
-                </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <LabeledInput
-                    id="student-form-emergency-name"
-                    label="緊急聯絡人姓名"
-                    value={form.emergencyContactName}
-                    onChange={(v) => setForm((p) => ({ ...p, emergencyContactName: v }))}
-                    placeholder="王阿姨 (姑姑)"
-                    icon={<Heart width={12} height={12} />}
-                  />
+            {/* Body — 2-Column 佈局 (左: 輸入 / 右: 已選詳情) */}
+            <div className="flex-1 min-h-0 overflow-y-auto dark:scrollbar-thin">
+              <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-0">
+                {/* ============== LEFT COLUMN (輸入欄位) ============== */}
+                <div className="px-5 py-5 space-y-4 lg:border-r border-slate-100 dark:border-slate-700/80">
+                  {/* 學生編號 (置頂) */}
                   <div>
+                    <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 mb-1 inline-flex items-center gap-1.5 dark:text-slate-400">
+                      學生編號
+                      <span className="text-[10px] text-slate-400 normal-case font-medium tracking-normal">
+                        (自動生成, 不可修改)
+                      </span>
+                    </label>
+                    <div className="h-9 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 text-[12px] font-mono text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200">
+                      <Hash width={11} height={11} className="text-slate-400" />
+                      {previewId}
+                    </div>
+                  </div>
+
+                  {/* Row 1: 姓名 / 班別 / 性別 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <LabeledInput
+                        id="student-form-name"
+                        label="姓名"
+                        value={form.name}
+                        onChange={(v) => setForm((p) => ({ ...p, name: v }))}
+                        onBlur={() => markTouched('name')}
+                        placeholder="張小明"
+                        required
+                        icon={<IdCard width={12} height={12} />}
+                      />
+                      <InlineFieldError
+                        message={touched.name ? fieldErrors.name : null}
+                        onShow={() => markTouched('name')}
+                      />
+                    </div>
+                    <div>
+                      <LabeledInput
+                        id="student-form-class"
+                        label="班別"
+                        value={form.classNumber}
+                        onChange={(v) => setForm((p) => ({ ...p, classNumber: v }))}
+                        onBlur={() => markTouched('classNumber')}
+                        placeholder="1A"
+                        required
+                        icon={<GraduationCap width={12} height={12} />}
+                      />
+                      <InlineFieldError
+                        message={touched.classNumber ? fieldErrors.classNumber : null}
+                        onShow={() => markTouched('classNumber')}
+                      />
+                    </div>
                     <NativeSelect
-                      id="student-form-emergency-relationship"
-                      label="與學生關係"
-                      value={form.emergencyContactRelationship}
+                      id="student-form-gender"
+                      label="性別"
+                      value={form.gender}
                       onChange={(v) =>
-                        setForm((p) => ({ ...p, emergencyContactRelationship: v }))
+                        setForm((p) => ({ ...p, gender: v as Student['gender'] }))
                       }
+                      required
                     >
-                      <option value="">未指定</option>
-                      {Object.entries(EMERGENCY_RELATIONSHIP_LABEL).map(([key, label]) => (
-                        <option key={key} value={key}>
-                          {label}
+                      {GENDER_OPTIONS.map((g) => (
+                        <option key={g.value} value={g.value}>
+                          {g.label}
                         </option>
                       ))}
                     </NativeSelect>
                   </div>
-                  <div>
+
+                  {/* Row 2: 出生日期 / 電話 (選填) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                    <div>
+                      <label
+                        htmlFor="student-form-dob"
+                        className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
+                      >
+                        出生日期
+                        <span className="text-rose-500 ml-0.5">*</span>
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                          <Calendar width={12} height={12} />
+                        </span>
+                        <input
+                          id="student-form-dob"
+                          type="date"
+                          value={form.dateOfBirth}
+                          onChange={(e) => {
+                            setForm((p) => ({ ...p, dateOfBirth: e.target.value }));
+                            markTouched('dateOfBirth');
+                          }}
+                          max={new Date().toISOString().slice(0, 10)}
+                          className="w-full h-9 rounded-md border border-slate-200 bg-white pl-8 pr-2.5 text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                        />
+                      </div>
+                      <InlineFieldError
+                        message={touched.dateOfBirth ? fieldErrors.dateOfBirth : null}
+                        onShow={() => markTouched('dateOfBirth')}
+                      />
+                    </div>
                     <LabeledInput
-                      id="student-form-emergency-phone"
-                      label="緊急聯絡人電話"
-                      value={form.emergencyContactPhone}
+                      id="student-form-phone"
+                      label="電話 (選填)"
+                      value={form.phone}
                       onChange={(v) =>
                         setForm((p) => ({
                           ...p,
-                          emergencyContactPhone: v.replace(/\D/g, '').slice(0, 8),
+                          phone: v.replace(/\D/g, '').slice(0, 8),
                         }))
                       }
                       placeholder="91234567"
@@ -1103,17 +1043,288 @@ export function StudentFormModal({
                       maxLength={8}
                       icon={<Phone width={12} height={12} />}
                     />
-                    <InlineFieldError
-                      message={touched.emergencyContactPhone ? fieldErrors.emergencyContactPhone : null}
-                      onShow={() => markTouched('emergencyContactPhone')}
+                  </div>
+
+                  {/* Row 3: 綁定校巴 / 關聯家長 (並列) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
+                    <EntitySelectWithCreate<Bus>
+                      id="student-form-bus"
+                      label="綁定校巴"
+                      value={form.busId}
+                      options={[...storageBuses, ...inlineBuses]}
+                      onChange={(v) => setForm((p) => ({ ...p, busId: v }))}
+                      onAddNew={() => setBusModalOpen(true)}
+                      emptyHint="尚未建立任何校巴, 從 dropdown 最底「＋ 在此新增…」建立第一輛"
+                      renderLabel={busLabel}
                     />
+                    <div>
+                      <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 mb-1 block dark:text-slate-400">
+                        關聯家長
+                        <span className="text-rose-500 ml-0.5">*</span>
+                      </label>
+                      <ParentTagSelect
+                        parents={parentChoices}
+                        selectedIds={form.parentIds}
+                        primaryId={form.primaryParentId || null}
+                        onToggle={(id) => {
+                          toggleParent(id);
+                          markTouched('parents');
+                        }}
+                        onSetPrimary={(id) => {
+                          setPrimaryParent(id);
+                          markTouched('parents');
+                        }}
+                        onAddNew={() => {
+                          markTouched('parents');
+                          setParentModal({ open: true });
+                        }}
+                      />
+                      <InlineFieldError
+                        message={touched.parents ? fieldErrors.parents : null}
+                        onShow={() => markTouched('parents')}
+                      />
+                    </div>
                   </div>
                 </div>
+
+                {/* ============== RIGHT COLUMN (已選詳情) ============== */}
+                <aside className="px-4 py-5 bg-slate-50/50 dark:bg-slate-800/30 space-y-4">
+                  {/* 已選校巴 */}
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 dark:text-slate-400 inline-flex items-center gap-1.5">
+                        <BusIcon width={11} height={11} />
+                        已選校巴
+                      </p>
+                      {form.busId && (
+                        <button
+                          type="button"
+                          onClick={() => setForm((p) => ({ ...p, busId: '' }))}
+                          className="inline-flex items-center gap-0.5 h-5 px-1.5 rounded text-[10px] text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer transition-colors dark:hover:bg-rose-950/30"
+                          aria-label="清除已選校巴"
+                        >
+                          <X width={9} height={9} />
+                          清除
+                        </button>
+                      )}
+                    </div>
+                    {form.busId ? (
+                      <SelectedBusDetail
+                        bus={storageBuses.find((b) => b.id === form.busId)}
+                        driver={(() => {
+                          const bus = storageBuses.find((b) => b.id === form.busId);
+                          // 與 storageBuses 範圍對齊: 用 storageDrivers 查找,
+                          // 避免 bus.driverId 指向跨機構司機時被誤判為「尚未指派」。
+                          return bus?.driverId
+                            ? storageDrivers.find((d) => d.id === bus.driverId)
+                            : undefined;
+                        })()}
+                      />
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-4 px-2 text-center">
+                        <div className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-1.5">
+                          <BusIcon width={14} height={14} className="text-slate-400" />
+                        </div>
+                        <p className="text-[11.5px] text-slate-400 dark:text-slate-500">
+                          尚未綁定校巴
+                        </p>
+                        <p className="text-[10px] text-slate-300 dark:text-slate-600 mt-0.5">
+                          在左側「綁定校巴」選擇
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 已選家長 */}
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 dark:text-slate-400 inline-flex items-center gap-1.5">
+                        <UsersIcon width={11} height={11} />
+                        已選家長
+                        <span className="ml-1 inline-flex items-center px-1 py-px rounded text-[9.5px] font-semibold tabular-nums bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700">
+                          {form.parentIds.length}
+                        </span>
+                      </p>
+                      <span className="text-[9.5px] text-slate-400 dark:text-slate-500">
+                        點 ★ 設主要
+                      </span>
+                    </div>
+                    {form.parentIds.length > 0 ? (
+                      <div className="flex flex-col gap-1.5">
+                        {form.parentIds.map((id) => {
+                          const p = parentChoices.find((pp) => pp.id === id);
+                          if (!p) return null;
+                          const relLabel = p.relationship ? RELATIONSHIP_LABEL[p.relationship] : null;
+                          const isPrimary = form.primaryParentId === id;
+                          return (
+                            <div
+                              key={id}
+                              className={cn(
+                                'flex items-center gap-1 pl-1.5 pr-1 h-7 rounded-md border text-[11.5px] transition-colors',
+                                isPrimary
+                                  ? 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/30 dark:text-amber-100'
+                                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800',
+                              )}
+                            >
+                              <button
+                                type="button"
+                                onClick={() => setPrimaryParent(id)}
+                                aria-label={isPrimary ? '取消主要聯繫人' : '設為主要聯繫人'}
+                                className={cn(
+                                  'inline-flex items-center justify-center w-5 h-5 rounded-sm cursor-pointer transition-colors',
+                                  isPrimary
+                                    ? 'text-amber-500 hover:bg-amber-100/70 dark:hover:bg-amber-900/40'
+                                    : 'text-slate-300 hover:text-amber-500 hover:bg-slate-100 dark:text-slate-600 dark:hover:bg-slate-800',
+                                )}
+                              >
+                                <Star
+                                  width={11}
+                                  height={11}
+                                  fill={isPrimary ? 'currentColor' : 'none'}
+                                  strokeWidth={isPrimary ? 0 : 1.5}
+                                />
+                              </button>
+                              <span className="font-semibold leading-none truncate flex-1 min-w-0">{p.name}</span>
+                              {relLabel && (
+                                <span className="text-[9.5px] text-slate-500 dark:text-slate-400 leading-none shrink-0">
+                                  {relLabel}
+                                </span>
+                              )}
+                              <span className="text-[10px] text-slate-400 dark:text-slate-500 leading-none tabular-nums shrink-0">
+                                {p.phone || '—'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => toggleParent(id)}
+                                aria-label={`移除 ${p.name}`}
+                                className="inline-flex items-center justify-center w-5 h-5 rounded-sm text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer transition-colors"
+                              >
+                                <X width={10} height={10} />
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-4 px-2 text-center">
+                        <div className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center mb-1.5">
+                          <UsersIcon width={14} height={14} className="text-slate-400" />
+                        </div>
+                        <p className="text-[11.5px] text-slate-400 dark:text-slate-500">
+                          尚未選擇家長
+                        </p>
+                        <p className="text-[10px] text-slate-300 dark:text-slate-600 mt-0.5">
+                          點左側「關聯家長」標籤
+                        </p>
+                      </div>
+                    )}
+                    {touched.parents && form.parentIds.length > 0 && !form.primaryParentId && (
+                      <p className="mt-2 text-[10px] text-amber-600 dark:text-amber-400 inline-flex items-center gap-1">
+                        <AlertTriangle width={9} height={9} />
+                        <span>請設主要聯繫人</span>
+                      </p>
+                    )}
+                  </div>
+
+                  {/* 緊急聯絡人 (右欄 section — 預設 button, 點擊展開 3 欄 field) */}
+                  <div className="rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+                    <div className="flex items-center justify-between mb-2">
+                      <p className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-amber-700 dark:text-amber-300 inline-flex items-center gap-1.5">
+                        <AlertTriangle width={11} height={11} />
+                        緊急聯絡人
+                      </p>
+                      {showEmergency && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowEmergency(false);
+                            setForm((p) => ({
+                              ...p,
+                              emergencyContactName: '',
+                              emergencyContactPhone: '',
+                              emergencyContactRelationship: '',
+                            }));
+                            markTouched('emergencyContactPhone');
+                          }}
+                          aria-label="移除緊急聯絡人"
+                          className="inline-flex items-center gap-0.5 h-5 px-1.5 rounded text-[10px] text-slate-400 hover:text-rose-600 hover:bg-rose-50 cursor-pointer transition-colors dark:hover:bg-rose-950/30"
+                        >
+                          <X width={9} height={9} />
+                          移除
+                        </button>
+                      )}
+                    </div>
+
+                    {!showEmergency ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowEmergency(true)}
+                        className="w-full inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-md border border-dashed border-amber-300 bg-amber-50/40 text-[12px] font-medium text-amber-700 hover:border-amber-400 hover:bg-amber-50 transition-colors cursor-pointer dark:border-amber-700/50 dark:bg-amber-950/20 dark:text-amber-300 dark:hover:border-amber-600 dark:hover:bg-amber-950/40"
+                      >
+                        <Plus width={12} height={12} />
+                        新增緊急聯絡人
+                        <span className="text-[10px] font-normal text-amber-600/70 dark:text-amber-400/70">
+                          (選填)
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <LabeledInput
+                            id="student-form-emergency-name"
+                            label="姓名"
+                            value={form.emergencyContactName}
+                            onChange={(v) => setForm((p) => ({ ...p, emergencyContactName: v }))}
+                            placeholder="王阿姨"
+                            icon={<Heart width={12} height={12} />}
+                          />
+                          <NativeSelect
+                            id="student-form-emergency-relationship"
+                            label="關係"
+                            value={form.emergencyContactRelationship}
+                            onChange={(v) =>
+                              setForm((p) => ({ ...p, emergencyContactRelationship: v }))
+                            }
+                          >
+                            <option value="">未指定</option>
+                            {Object.entries(EMERGENCY_RELATIONSHIP_LABEL).map(([key, label]) => (
+                              <option key={key} value={key}>
+                                {label}
+                              </option>
+                            ))}
+                          </NativeSelect>
+                          <div>
+                            <LabeledInput
+                              id="student-form-emergency-phone"
+                              label="電話"
+                              value={form.emergencyContactPhone}
+                              onChange={(v) =>
+                                setForm((p) => ({
+                                  ...p,
+                                  emergencyContactPhone: v.replace(/\D/g, '').slice(0, 8),
+                                }))
+                              }
+                              placeholder="91234567"
+                              type="tel"
+                              inputMode="tel"
+                              maxLength={8}
+                              icon={<Phone width={12} height={12} />}
+                            />
+                            <InlineFieldError
+                              message={touched.emergencyContactPhone ? fieldErrors.emergencyContactPhone : null}
+                              onShow={() => markTouched('emergencyContactPhone')}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </aside>
               </div>
             </div>
 
-            {/* Footer — 規範 §21 */}
-            <div className="px-5 py-3 bg-slate-50/40 border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/40 dark:border-slate-700/80">
+            {/* Footer — 規範 §21 (sticky bottom, 永遠可見) */}
+            <div className="sticky bottom-0 z-10 px-5 py-3 bg-white/95 backdrop-blur-sm border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/95 dark:border-slate-700/80">
               <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
                 <Pill tone="primary" size="sm">
                   {form.parentIds.length} 位家長
@@ -1135,7 +1346,21 @@ export function StudentFormModal({
                 <Button
                   variant="primary"
                   size="sm"
-                  onClick={() => onSave(form)}
+                  onClick={() => {
+                    if (!canSubmit) {
+                      const errorMessages: Record<string, string> = {
+                        name: '請填寫「姓名」',
+                        classNumber: '請填寫「班別」',
+                        dateOfBirth: '請填寫「出生日期」',
+                        parents: '請至少關聯一位家長',
+                        emergencyContactPhone: '緊急聯絡人電話需要 8 碼',
+                      };
+                      const firstError = Object.entries(fieldErrors).find(([, v]) => v !== null)?.[0] ?? '';
+                      toast.error(errorMessages[firstError] || '請檢查並修正表單欄位');
+                      return;
+                    }
+                    onSave(form);
+                  }}
                   isLoading={isSaving}
                   disabled={!canSubmit}
                   startIcon={!isSaving ? <Save width={12} height={12} /> : undefined}
@@ -1158,6 +1383,19 @@ export function StudentFormModal({
       isSaving={isAddingParent}
       onSave={handleInlineAddParent}
       onClose={() => setParentModal({ open: false })}
+    />
+
+    {/* 「在此新增校巴」彈窗 (z-index 60, 在 student modal 之上) */}
+    <InlineMiniFormModal
+      open={busModalOpen}
+      mode="bus"
+      isSaving={isAddingBus}
+      onClose={() => setBusModalOpen(false)}
+      onCreated={(b) => {
+        setInlineBuses((prev) => [...prev, b]);
+        setForm((p) => ({ ...p, busId: b.id }));
+        setBusModalOpen(false);
+      }}
     />
     </>
   );

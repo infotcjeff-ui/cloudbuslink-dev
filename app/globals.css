@@ -256,6 +256,65 @@
   }
 }
 
+/* ---------- AnnouncementPopup 專屬淡入淡出 ----------
+   為什麼這裡要另外寫一份 (而不是共用上面的 .dialog-anim-*)?
+
+   歷史原因: 共用的 .dialog-anim-* 在 dialog.tsx 是用 Tailwind 的
+   `data-[state=open]:dialog-anim-content-in` 套用的。但 .dialog-anim-*
+   本身是手寫 CSS (不是 Tailwind utility), Tailwind 找不到對應的
+   utility → 整條 `data-[state=open]:` 變體規則被丟棄 → 動畫從未生效
+   (實測 animationName: "none")。
+
+   為什麼這裡用屬性選擇器而不是 Tailwind variant:
+   - 屬性選擇器 (.xxx[data-state="open"]) 一定會產生 CSS, 不依賴 Tailwind
+     是否「知道」這個 class。side-panel 就是用這個寫法, 動畫正常運作。
+   - 公告彈窗只改自己的 class, 其他 modal 的行為完全不動 (方案 B)。
+
+   動畫規格 (與 side-panel 保持一致的曲線):
+   - 遮罩: 淡入 200ms / 淡出 180ms
+   - 內容: 淡入 + 輕微放大 (0.96 → 1) 220ms / 淡出 180ms
+   - Radix Presence 會等 animationend 才卸載 → 退場動畫不會被切掉 */
+@keyframes ann-popup-overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes ann-popup-overlay-out {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+@keyframes ann-popup-content-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes ann-popup-content-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to   { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+}
+
+.ann-popup-overlay[data-state="open"] {
+  animation: ann-popup-overlay-in 200ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+.ann-popup-overlay[data-state="closed"] {
+  animation: ann-popup-overlay-out 180ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+.ann-popup-content[data-state="open"] {
+  animation: ann-popup-content-in 220ms cubic-bezier(0.32, 0.72, 0, 1) both;
+  will-change: transform, opacity;
+}
+.ann-popup-content[data-state="closed"] {
+  animation: ann-popup-content-out 180ms cubic-bezier(0.32, 0.72, 0, 1) both;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ann-popup-overlay[data-state="open"],
+  .ann-popup-overlay[data-state="closed"],
+  .ann-popup-content[data-state="open"],
+  .ann-popup-content[data-state="closed"] {
+    animation-duration: 0.001ms !important;
+  }
+}
+
 /* ---------- SidePanel (header burger menu) ----------
    Same principle as the Dialog classes above: drive enter/exit with CSS
    animations keyed off Radix's `data-state`, so the unmount happens exactly
@@ -341,4 +400,44 @@
   .notif-dropdown-leave {
     animation-duration: 0.001ms !important;
   }
+}
+
+/* ---------- Login Background Floating Circles Animation ---------- */
+@keyframes float-1 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -30px) scale(1.05); }
+  66% { transform: translate(-20px, 20px) scale(0.98); }
+}
+@keyframes float-2 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(-40px, 20px) scale(1.08); }
+  66% { transform: translate(30px, -15px) scale(0.97); }
+}
+@keyframes float-3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-25px, 25px) scale(1.06); }
+}
+@keyframes float-4 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(20px, -20px) scale(1.04); }
+}
+@keyframes shimmer {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.5; }
+}
+
+.animate-float-1 {
+  animation: float-1 12s ease-in-out infinite;
+}
+.animate-float-2 {
+  animation: float-2 15s ease-in-out infinite;
+}
+.animate-float-3 {
+  animation: float-3 18s ease-in-out infinite;
+}
+.animate-float-4 {
+  animation: float-4 14s ease-in-out infinite;
+}
+.animate-shimmer {
+  animation: shimmer 6s ease-in-out infinite;
 }

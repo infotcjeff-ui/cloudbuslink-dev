@@ -1,44 +1,42 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
-import { motion } from 'framer-motion';
-import {
-  CalendarClock, ListChecks, Plus, CalendarDays, Clock,
-  Route as RouteIcon, Bus, MapPin, ChevronRight, Sparkles,
-} from 'lucide-react';
-import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
-import { useCblStats } from '../hooks/useCblStats';
-import { StatCard } from '../components/Cards';
-import { cn, today, tripTypeLabel } from '@/lib/utils';
-import type { Trip, TripType, TripStatus } from '@/lib/types';
-
 /**
- * /cbl-admin-setting/schedule → 班次 (Schedule) 獨立頂層頁
+ * /cbl-admin-setting/schedule → 班次總覽
  *
- * 角色定位:
- *   與 /cbl-admin-setting/bus/trips (校巴/路線) 平行, 但專注在「班次/時段」本身
- *   (每天的具體班次、起訖時間、當前狀態、自動派車), 不處理「路線模板」。
+ * 單頁面 = 1 section: Schedule Console (OneFleet-style)
+ *   - TripFormModal: 中央 Modal (非右側 Drawer)
+ *   - TripDetailDrawer: 右側 Drawer (檢視詳情 / 補打卡)
  *
- *   - 校巴/路線 (bus/trips):   路線模板 — 站點順序、學生名單、班次類型
- *   - 班次   (schedule):       每天的具體班次 — 日期、實際發車時間、狀態、駕駛/保姆指派
- *
- * 頁面結構 (沿用 CBL Admin 慣例):
- *   1. Hero 標題列 (含今日捷徑 + 新增班次 FAB)
- *   2. 4 格 stat tiles
- *   3. 今日班次清單 (依時間排序, 最多 8 筆, 點進去看詳情)
- *   4. 子模組捷徑 (新增班次 / 依路線瀏覽 / 行事曆檢視)
+ * Step 1: 改寫自舊版 (Hero + 4 stat + 今日清單 + 捷徑) 收斂成單一 Console section
+ * Step 2: 統一表單 → TripFormModal (中央彈出, 符合使用者要求)
+ * Step 3 之後: 進度即時、衝突強化、批次操作, ...
  */
 
-type Tab = TripType | 'all';
+import { useCallback, useMemo, useState } from 'react';
+import { motion } from 'framer-motion';
+import { CalendarClock } from 'lucide-react';
 
-const TRIP_TABS: { id: Tab; label: string; color: string }[] = [
-  { id: 'all',       label: '全部',     color: 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200' },
-  { id: 'morning',   label: '早班',     color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200' },
-  { id: 'afternoon', label: '午班',     color: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200' },
-  { id: 'custom',    label: '自訂',     color: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-200' },
-];
+import { useAuth } from '@/lib/hooks';
+import { STORAGE } from '@/lib/storage';
+import { useToast } from '@/components/ui/toast';
+import {
+  ensureTripParents,
+  supabaseTrips,
+  type TripRow,
+} from '@/lib/supabase-trips';
+
+import { useScheduleTrips } from './hooks/useScheduleTrips';
+import { ScheduleConsoleContent } from './ScheduleConsoleContent';
+import { TripFormModal } from './TripFormModal';
+import { TripDetailDrawer } from './TripDetailDrawer';
+import type {
+  ScheduleFilter,
+  ScheduleTab,
+  ScheduleSort,
+  TripWithRelations,
+  TripFormValues,
+} from './types';
+import type { TripStatus, Trip } from '@/lib/types';
 
 function statusLabel(s: TripStatus): string {
   switch (s) {
@@ -50,378 +48,496 @@ function statusLabel(s: TripStatus): string {
   }
 }
 
-function statusPillClass(s: TripStatus): string {
-  switch (s) {
-    case 'scheduled':
-      return 'bg-slate-100 text-slate-700 dark:bg-slate-700 dark:text-slate-200';
-    case 'in_progress':
-      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200';
-    case 'completed':
-      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-200';
-    case 'cancelled':
-      return 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200';
-    default:
-      return 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200';
-  }
-}
-
-function fmtTime(iso: string): string {
-  // 從 ISO 抽出 HH:mm, 若無效就原樣回傳
-  const m = iso?.match(/T(\d{2}:\d{2})/);
-  return m ? m[1] : (iso || '—');
-}
-
 export default function CblAdminSchedulePage() {
   const { user } = useAuth();
-  const stats = useCblStats(user?.clientId);
-  const [tab, setTab] = useState<Tab>('all');
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { toast } = useToast();
+  const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'system_admin';
+  // P1-3: client 解析 — user.clientId > URL ?client= > 記憶 > 第一位 client
+  // 超管沒有 clientId → clientId='' + isSuperAdmin=true (看全部)
+  const clientId = (() => {
+    if (user?.clientId) return user.clientId;
+    if (isSuperAdmin) return '';
+    if (typeof window === 'undefined') return '';
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const fromUrl = sp.get('client');
+      if (fromUrl && STORAGE.clients.getById(fromUrl)) {
+        STORAGE.selectedClient.set(fromUrl);
+        return fromUrl;
+      }
+    } catch { /* ignore */ }
+    const remembered = STORAGE.selectedClient.get();
+    if (remembered && STORAGE.clients.getById(remembered)) return remembered;
+    const first = STORAGE.clients.getAll()[0]?.id || '';
+    if (first) STORAGE.selectedClient.set(first);
+    return first;
+  })();
 
-  const clientId = user?.clientId || '';
+  /* Schedule 主 Console state */
+  const [tab, setTab] = useState<ScheduleTab>('all');
+  // P0-0: 預設看「今日」— 管理員每天開頁就是要看今天的班
+  const [filter, setFilter] = useState<ScheduleFilter>({ dateRange: 'today', q: '' });
+  const [sort, setSort] = useState<ScheduleSort>('start_asc');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  useEffect(() => {
-    if (!clientId) return;
-    setLoading(true);
-    const t = STORAGE.trips.getByDate(clientId, today());
-    setTrips(t);
-    setLoading(false);
+  /* Drawer / Modal 狀態 */
+  const [formModal, setFormModal] = useState<{
+    open: boolean;
+    mode: 'add' | 'edit';
+    initial: Partial<TripFormValues> | null;
+  }>({ open: false, mode: 'add', initial: null });
 
-    const handler = () => {
-      const next = STORAGE.trips.getByDate(clientId, today());
-      setTrips(next);
+  const [detailDrawer, setDetailDrawer] = useState<{
+    open: boolean;
+    row: TripWithRelations | null;
+  }>({ open: false, row: null });
+
+  const data = useScheduleTrips(clientId, filter, tab, isSuperAdmin);
+
+  /* ---- Drawer / Modal 動作 ---- */
+  const openAdd = useCallback(() => {
+    setDetailDrawer({ open: false, row: null });
+    setFormModal({ open: true, mode: 'add', initial: null });
+  }, []);
+
+  const openEdit = useCallback((row: TripWithRelations) => {
+    setDetailDrawer({ open: false, row: null });
+    setFormModal({
+      open: true,
+      mode: 'edit',
+      initial: {
+        id: row.trip.id,
+        type: row.trip.type,
+        date: row.trip.date,
+        plannedStartTime: row.trip.plannedStartTime?.slice(0, 5) ?? '07:30',
+        plannedEndTime: row.trip.plannedEndTime?.slice(0, 5) ?? '08:30',
+        busId: row.trip.busId,
+        driverId: row.bus?.driverId ?? '',
+        nannyId: row.trip.nannyId,
+        studentIds: row.trip.studentIds,
+        waypoints: row.trip.waypoints,
+        routeId: row.trip.routeId ?? null,
+      },
+    });
+  }, []);
+
+  const openView = useCallback((row: TripWithRelations) => {
+    setFormModal({ open: false, mode: 'add', initial: null });
+    setDetailDrawer({ open: true, row });
+  }, []);
+
+  const closeForm = useCallback(() => {
+    setFormModal({ open: false, mode: 'add', initial: null });
+  }, []);
+
+  const closeDetail = useCallback(() => {
+    setDetailDrawer({ open: false, row: null });
+  }, []);
+
+  /* ---- 寫入 / 維護 ---- */
+
+  /**
+   * 把本機的 trip 推到 Supabase。
+   *
+   * 流程 (FK-safe):
+   *   1. ensureTripParents — 保證 bus / driver / nanny / students / route 在 DB 存在
+   *      (cbl_trips.bus_id 是 NOT NULL FK, 父列不存在會直接 insert 失敗)
+   *   2. insert / update cbl_trips
+   *
+   * ⚠️ 失敗不阻擋本機寫入 — localStorage 仍保有資料 (mergeAll 會在下次 sync 保留),
+   *    只提示使用者「已存本機但未同步到雲端」。
+   */
+  const pushTripToCloud = useCallback(async (
+    trip: Trip,
+    mode: 'insert' | 'update',
+  ): Promise<string | null> => {
+    try {
+      const bus = STORAGE.buses.getById(trip.busId);
+      const driver = bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null;
+      const nanny = trip.nannyId ? STORAGE.nannies.getById(trip.nannyId) : null;
+      const route = trip.routeId ? STORAGE.routes.getById(trip.routeId) : null;
+      const students = STORAGE.students.getAll().filter((s) => trip.studentIds.includes(s.id));
+
+      const ensured = await ensureTripParents({
+        clientId: trip.clientId,
+        busId: trip.busId,
+        nannyId: trip.nannyId,
+        driverId: bus?.driverId ?? null,
+        studentIds: trip.studentIds,
+        routeId: trip.routeId ?? null,
+        client: STORAGE.clients.getById(trip.clientId),
+        bus,
+        driver,
+        nanny,
+        route,
+        students,
+      });
+
+      if (!ensured.ok) {
+        return `缺少關聯資料 (${ensured.missing.join(', ')})`;
+      }
+
+      const row: TripRow = {
+        id: trip.id,
+        clientId: trip.clientId,
+        busId: trip.busId,
+        nannyId: trip.nannyId,
+        date: trip.date,
+        type: trip.type,
+        status: trip.status,
+        plannedStartTime: trip.plannedStartTime,
+        plannedEndTime: trip.plannedEndTime,
+        actualStartTime: trip.actualStartTime,
+        actualEndTime: trip.actualEndTime,
+        waypoints: trip.waypoints,
+        studentIds: trip.studentIds,
+        currentRouteIndex: trip.currentRouteIndex,
+        completedStops: trip.completedStops,
+        routeId: trip.routeId ?? null,
+        createdAt: trip.createdAt,
+        updatedAt: trip.updatedAt,
+      };
+
+      const res = mode === 'insert'
+        ? await supabaseTrips.add(row)
+        : await supabaseTrips.update(trip.id, row);
+      return res.success ? null : (res.error ?? '未知錯誤');
+    } catch (err) {
+      console.error('[Schedule] pushTripToCloud failed:', err);
+      return err instanceof Error ? err.message : String(err);
+    }
+  }, []);
+
+  const handleSave = useCallback(async (values: TripFormValues) => {
+    const now = new Date().toISOString();
+    // 超管新增時 clientId='' → 用所選校巴 / 路線的學校兜底 (cbl_trips.client_id FK 必填)
+    const resolveClientId = () => {
+      if (clientId) return clientId;
+      const bus = values.busId ? STORAGE.buses.getById(values.busId) : null;
+      if (bus?.clientId) return bus.clientId;
+      const route = values.routeId ? STORAGE.routes.getById(values.routeId) : null;
+      if (route?.clientId) return route.clientId;
+      return STORAGE.clients.getAll()[0]?.id || '';
     };
-    window.addEventListener('cbl-trips-refresh', handler);
-    return () => window.removeEventListener('cbl-trips-refresh', handler);
-  }, [clientId]);
+    try {
+      if (formModal.mode === 'add' || !values.id) {
+        const newId = STORAGE.genId('trip');
+        const trip: Trip = {
+          id: newId,
+          clientId: resolveClientId(),
+          type: values.type,
+          date: values.date,
+          busId: values.busId,
+          nannyId: values.nannyId,
+          status: 'scheduled',
+          plannedStartTime: values.plannedStartTime,
+          plannedEndTime: values.plannedEndTime,
+          actualStartTime: null,
+          actualEndTime: null,
+          waypoints: values.waypoints,
+          studentIds: values.studentIds,
+          currentRouteIndex: 0,
+          completedStops: [],
+          routeId: values.routeId ?? null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        STORAGE.trips.add(trip);
+        window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        toast('success', `已建立新班次 ${newId.slice(-6)}`);
+
+        // 背景推雲端 (不阻擋 UI)
+        const syncErr = await pushTripToCloud(trip, 'insert');
+        if (syncErr) {
+          toast('warning', `班次已存本機, 但未同步到雲端：${syncErr}`, 6000);
+        }
+      } else {
+        const t = STORAGE.trips.getById(values.id);
+        if (!t) {
+          toast('error', '找不到原班次');
+          return;
+        }
+        STORAGE.trips.update(values.id, {
+          type: values.type,
+          date: values.date,
+          busId: values.busId,
+          nannyId: values.nannyId,
+          plannedStartTime: values.plannedStartTime,
+          plannedEndTime: values.plannedEndTime,
+          waypoints: values.waypoints,
+          studentIds: values.studentIds,
+          routeId: values.routeId ?? null,
+        });
+        window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        toast('success', `班次 ${values.id.slice(-6)} 已儲存`);
+
+        // 背景推雲端 (用 update 後的最新資料)
+        const updated = STORAGE.trips.getById(values.id);
+        if (updated) {
+          const syncErr = await pushTripToCloud(updated, 'update');
+          if (syncErr) {
+            toast('warning', `班次已存本機, 但未同步到雲端：${syncErr}`, 6000);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Schedule] handleSave error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `儲存失敗：${msg}`);
+    }
+  }, [clientId, formModal.mode, toast, pushTripToCloud]);
+
+  const onDelete = useCallback(async (row: TripWithRelations) => {
+    if (!confirm(`刪除班次 ${row.trip.id.slice(-6)}？此操作無法撤銷。`)) return;
+    try {
+      STORAGE.trips.remove(row.trip.id);
+      window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+      toast('success', `班次 ${row.trip.id.slice(-6)} 已刪除`);
+      if (detailDrawer.row?.trip.id === row.trip.id) closeDetail();
+
+      // 刪除雲端 (失敗只提示, 本機已刪)
+      const res = await supabaseTrips.delete(row.trip.id);
+      if (!res.success) {
+        toast('warning', `已從本機刪除, 但雲端刪除失敗：${res.error ?? '未知錯誤'}`, 6000);
+      }
+    } catch (err) {
+      console.error('[Schedule] onDelete error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `刪除失敗：${msg}`);
+    }
+  }, [toast, detailDrawer.row, closeDetail]);
+
+  const onDuplicate = useCallback(async (row: TripWithRelations) => {
+    try {
+      const copy = STORAGE.trips.duplicate(row.trip.id, { date: row.trip.date });
+      if (copy) {
+        window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        toast('success', `已複製新班次 ${copy.id.slice(-6)}`);
+
+        const syncErr = await pushTripToCloud(copy, 'insert');
+        if (syncErr) {
+          toast('warning', `副本已存本機, 但未同步到雲端：${syncErr}`, 6000);
+        }
+      } else {
+        toast('error', '複製失敗');
+      }
+    } catch (err) {
+      console.error('[Schedule] onDuplicate error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `複製失敗：${msg}`);
+    }
+  }, [toast, pushTripToCloud]);
+
+  const onChangeStatus = useCallback(async (rowOrIds: TripWithRelations | string[], next?: TripStatus) => {
+    try {
+      if (Array.isArray(rowOrIds)) {
+        const ids = rowOrIds;
+        const s = next!;
+        const n = STORAGE.trips.bulkUpdateStatus(ids, s);
+        window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        toast('success', `已批次更新 ${n} 班狀態 → ${statusLabel(s)}`);
+
+        // P0-5: 批次推雲端 — 一次 .in() 取代 N 個 update，失敗整批報數
+        const res = await supabaseTrips.bulkUpdateStatus(
+          ids,
+          { status: s } as Parameters<typeof supabaseTrips.bulkUpdateStatus>[1],
+        );
+        if (!res.success) {
+          toast('warning', `雲端同步失敗：${res.error ?? '未知錯誤'}（本機已更新）`, 6000);
+        }
+        return;
+      }
+      const s = next!;
+      STORAGE.trips.update(rowOrIds.trip.id, { status: s });
+      window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+      toast('success', `狀態已改為「${statusLabel(s)}」`);
+      if (detailDrawer.row?.trip.id === rowOrIds.trip.id) {
+        const refreshed = data.trips.find((t) => t.trip.id === rowOrIds.trip.id);
+        if (refreshed) setDetailDrawer({ open: true, row: refreshed });
+      }
+
+      const updated = STORAGE.trips.getById(rowOrIds.trip.id);
+      if (updated) {
+        const syncErr = await pushTripToCloud(updated, 'update');
+        if (syncErr) {
+          toast('warning', `狀態已存本機, 但未同步到雲端：${syncErr}`, 6000);
+        }
+      }
+    } catch (err) {
+      console.error('[Schedule] onChangeStatus error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `狀態更新失敗：${msg}`);
+    }
+  }, [toast, detailDrawer.row, data.trips, pushTripToCloud]);
+
+  const onBatchCancel = useCallback(async (ids: string[]) => {
+    try {
+      const n = STORAGE.trips.bulkUpdateStatus(ids, 'cancelled');
+      setSelectedIds([]);
+      window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+      toast(n > 0 ? 'success' : 'info', n > 0 ? `已批次取消 ${n} 個班次` : '無班次被取消 (可能已被刪除或更新)');
+
+      // P0-5: 批次推雲端 — 一次 .in() 取代 N 個 update
+      const res = await supabaseTrips.bulkUpdateStatus(
+        ids,
+        { status: 'cancelled' } as Parameters<typeof supabaseTrips.bulkUpdateStatus>[1],
+      );
+      if (!res.success) {
+        toast('warning', `雲端同步失敗：${res.error ?? '未知錯誤'}（本機已更新）`, 6000);
+      }
+    } catch (err) {
+      console.error('[Schedule] onBatchCancel error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `批次取消失敗：${msg}`);
+    }
+  }, [toast]);
+
+  const onBatchDuplicate = useCallback(async (ids: string[]) => {
+    try {
+      const copies: Trip[] = [];
+      ids.forEach((id) => {
+        const out = STORAGE.trips.duplicate(id);
+        if (out) copies.push(out);
+      });
+      const n = copies.length;
+      setSelectedIds([]);
+      window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+      toast(n > 0 ? 'success' : 'info', n > 0 ? `已批次複製 ${n} 個班次` : '無班次被複製 (可能已被刪除)');
+
+      // P0-5: 批次推雲端 — 一次 insert 多筆 (先 ensure 父列再 bulkAdd)
+      if (copies.length > 0) {
+        const missing: string[] = [];
+        for (const c of copies) {
+          const bus = STORAGE.buses.getById(c.busId);
+          const ensured = await ensureTripParents({
+            clientId: c.clientId,
+            busId: c.busId,
+            nannyId: c.nannyId,
+            driverId: bus?.driverId ?? null,
+            studentIds: c.studentIds,
+            routeId: c.routeId ?? null,
+            client: STORAGE.clients.getById(c.clientId),
+            bus,
+            driver: bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null,
+            nanny: c.nannyId ? STORAGE.nannies.getById(c.nannyId) : null,
+            route: c.routeId ? STORAGE.routes.getById(c.routeId) : null,
+            students: STORAGE.students.getAll().filter((s) => c.studentIds.includes(s.id)),
+          });
+          if (!ensured.ok) missing.push(c.id);
+        }
+        const ready = copies.filter((c) => !missing.includes(c.id));
+        if (ready.length > 0) {
+          const rows = ready.map((c) => ({
+            id: c.id, clientId: c.clientId, busId: c.busId, nannyId: c.nannyId,
+            date: c.date, type: c.type, status: c.status,
+            plannedStartTime: c.plannedStartTime, plannedEndTime: c.plannedEndTime,
+            actualStartTime: c.actualStartTime, actualEndTime: c.actualEndTime,
+            waypoints: c.waypoints, studentIds: c.studentIds,
+            currentRouteIndex: c.currentRouteIndex, completedStops: c.completedStops,
+            routeId: c.routeId ?? null, createdAt: c.createdAt, updatedAt: c.updatedAt,
+          }));
+          const res = await supabaseTrips.bulkAdd(rows);
+          if (!res.success) {
+            toast('warning', `副本已存本機, 但雲端同步失敗：${res.error ?? '未知錯誤'}`, 6000);
+          }
+        }
+        if (missing.length > 0) {
+          toast('warning', `${missing.length} 個副本缺少關聯資料未同步（本機已存）`, 6000);
+        }
+      }
+    } catch (err) {
+      console.error('[Schedule] onBatchDuplicate error:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast('error', `批次複製失敗：${msg}`);
+    }
+  }, [toast]);
+
+  const onJumpToConflict = useCallback((c: import('./types').TripConflict) => {
+    const first = c.tripIds[0];
+    const target = data.trips.find((t) => t.trip.id === first);
+    if (target) openView(target);
+    else toast('info', `衝突: ${c.description}`);
+  }, [data.trips, openView, toast]);
 
   if (!user) return null;
 
-  // 依 tab 篩選 + 依出發時間排序
-  const filtered = trips
-    .filter((t) => tab === 'all' || t.type === tab)
-    .sort((a, b) => (a.plannedStartTime || '').localeCompare(b.plannedStartTime || ''));
-
-  const counts = {
-    all:       trips.length,
-    morning:   trips.filter((t) => t.type === 'morning').length,
-    afternoon: trips.filter((t) => t.type === 'afternoon').length,
-    custom:    trips.filter((t) => t.type === 'custom').length,
-  };
+  /* 找出 detailDrawer 對應的最新 row (狀態更新後) */
+  const liveDrawerRow = detailDrawer.row
+    ? data.trips.find((t) => t.trip.id === detailDrawer.row!.trip.id) ?? detailDrawer.row
+    : null;
 
   return (
     <div className="space-y-6">
       {/* ============================================================
-          1. Hero — 標題 + 今日日期 + 新增班次 CTA
+          唯一區塊: 班次 Console
           ============================================================ */}
       <motion.section
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35 }}
-        className="relative overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
+        transition={{ duration: 0.3 }}
+        className="overflow-hidden rounded-2xl border border-border bg-card shadow-sm"
       >
-        <div
-          aria-hidden
-          className="absolute inset-0 -z-10"
-          style={{
-            background:
-              'linear-gradient(135deg, hsl(262 83% 60% / 0.06) 0%, hsl(0 0% 100%) 60%)',
-          }}
+        <div className="px-5 pt-4 pb-2 flex items-center gap-2 border-b border-border">
+          <span className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center">
+            <CalendarClock className="w-3.5 h-3.5 text-primary" />
+          </span>
+          <h2 className="text-sm font-semibold">班次 Console</h2>
+          <span className="text-[11px] text-muted-foreground ml-auto">
+            共 {data.trips.length} 班 ·{' '}
+            <span className="text-rose-600">{data.conflicts.length} 衝突</span>
+          </span>
+        </div>
+        <ScheduleConsoleContent
+          clientId={clientId}
+          data={data}
+          filter={filter}
+          onFilterChange={setFilter}
+          tab={tab}
+          onTabChange={setTab}
+          sort={sort}
+          onSortChange={setSort}
+          onOpenAdd={openAdd}
+          onEdit={openEdit}
+          onView={openView}
+          onDelete={onDelete}
+          onDuplicate={onDuplicate}
+          onChangeStatus={onChangeStatus}
+          onJumpToConflict={onJumpToConflict}
+          selectedIds={selectedIds}
+          onSelectedChange={setSelectedIds}
+          onBatchChangeStatus={(ids, s) => onChangeStatus(ids, s)}
+          onBatchCancel={onBatchCancel}
+          onBatchDuplicate={onBatchDuplicate}
         />
-        <div
-          aria-hidden
-          className="absolute -top-16 -right-16 -z-10 h-48 w-48 rounded-full opacity-40"
-          style={{
-            background: 'radial-gradient(circle, hsl(262 83% 60% / 0.18) 0%, transparent 70%)',
-          }}
-        />
-
-        <div className="relative px-6 py-7 sm:px-8 sm:py-8 flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-background/60 px-2.5 py-1 text-[11px] font-medium text-foreground backdrop-blur">
-                <CalendarClock className="h-3 w-3 text-violet-600" />
-                班次管理
-              </span>
-              <span className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-border bg-background/60 px-2.5 py-1 text-[11px] font-medium text-muted-foreground backdrop-blur">
-                <CalendarDays className="h-3 w-3" />
-                今日 · {today()}
-              </span>
-            </div>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-foreground">
-              班次總覽
-            </h1>
-            <p className="mt-1.5 text-sm text-muted-foreground">
-              管理每天的具體班次 — 早班 / 午班 / 自訂, 含發車時間、駕駛與跟車保姆指派、即時狀態。
-            </p>
-          </div>
-          <Link
-            href="/trips/new"
-            className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm active:scale-95 transition-transform"
-          >
-            <Plus className="h-4 w-4" />
-            新增班次
-          </Link>
-        </div>
       </motion.section>
 
       {/* ============================================================
-          2. 4 格 Stat Tiles
+          Drawer / Modal (在 section 外)
           ============================================================ */}
-      <motion.section
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, delay: 0.05 }}
-      >
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <StatCard
-            title="今日班次"
-            value={trips.length}
-            icon={CalendarClock}
-            color="bg-violet-100 text-violet-600"
-          />
-          <StatCard
-            title="進行中"
-            value={trips.filter((t) => t.status === 'in_progress').length}
-            icon={Clock}
-            color="bg-emerald-100 text-emerald-600"
-          />
-          <StatCard
-            title="本月接送"
-            value={stats.totalAttendance}
-            icon={ListChecks}
-            color="bg-blue-100 text-blue-600"
-          />
-          <StatCard
-            title="出席率"
-            value={`${stats.attendanceRate}%`}
-            icon={Sparkles}
-            color="bg-amber-100 text-amber-600"
-          />
-        </div>
-      </motion.section>
+      <TripFormModal
+        open={formModal.open}
+        mode={formModal.mode}
+        initial={formModal.initial}
+        context={{
+          buses: data.buses,
+          drivers: data.drivers,
+          nannies: data.nannies,
+          students: data.students,
+          routes: data.routes,
+        }}
+        onSave={handleSave}
+        onClose={closeForm}
+      />
 
-      {/* ============================================================
-          3. 今日班次清單
-          ============================================================ */}
-      <motion.section
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, delay: 0.1 }}
-        className="bg-card border border-border rounded-2xl shadow-sm"
-      >
-        <div className="flex flex-wrap items-center justify-between gap-3 p-5 border-b border-border">
-          <div>
-            <h2 className="text-base font-bold text-foreground">今日班次</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              依出發時間排序, 點選查看詳情或打卡。
-            </p>
-          </div>
-          {/* Tab chips */}
-          <div className="flex flex-wrap items-center gap-1.5">
-            {TRIP_TABS.map((t) => {
-              const active = t.id === tab;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setTab(t.id)}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-colors',
-                    active
-                      ? 'bg-primary text-primary-foreground shadow-sm'
-                      : `${t.color} hover:opacity-80`
-                  )}
-                >
-                  {t.label}
-                  <span className={cn(
-                    'tabular-nums rounded-full px-1.5 text-[10px] font-bold',
-                    active ? 'bg-white/25' : 'bg-black/10 dark:bg-white/10'
-                  )}>
-                    {counts[t.id]}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="p-3 sm:p-5">
-          {loading ? (
-            <div className="py-12 text-center text-sm text-muted-foreground">載入中…</div>
-          ) : filtered.length === 0 ? (
-            <div className="py-14 flex flex-col items-center justify-center text-center">
-              <div className="w-12 h-12 rounded-2xl bg-muted flex items-center justify-center mb-3">
-                <CalendarDays className="h-6 w-6 text-muted-foreground" />
-              </div>
-              <p className="text-sm font-semibold text-foreground">今日沒有班次</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {tab === 'all' ? '點選右上方「新增班次」開始建立第一個班次。' : `目前「${TRIP_TABS.find((t) => t.id === tab)?.label}」沒有班次。`}
-              </p>
-              <Link
-                href="/trips/new"
-                className="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground active:scale-95 transition-transform"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                新增班次
-              </Link>
-            </div>
-          ) : (
-            <ul className="divide-y divide-border">
-              {filtered.slice(0, 8).map((trip) => {
-                const bus = STORAGE.buses.getById(trip.busId);
-                const driver = bus?.driverId
-                  ? STORAGE.drivers.getById(bus.driverId)
-                  : undefined;
-                // 取第一個 waypoint 的地點名稱作為路線名稱
-                const routeName =
-                  trip.waypoints?.[0]?.location?.name ||
-                  bus?.plateNumber ||
-                  '未命名班次';
-                return (
-                  <li key={trip.id}>
-                    <Link
-                      href={`/trips/${trip.id}`}
-                      className="group flex items-center gap-3 sm:gap-4 px-3 py-3.5 rounded-lg hover:bg-muted/60 transition-colors"
-                    >
-                      {/* 時間 */}
-                      <div className="flex flex-col items-center justify-center min-w-[58px]">
-                        <span className="text-base font-bold tabular-nums text-foreground leading-none">
-                          {fmtTime(trip.plannedStartTime)}
-                        </span>
-                        <span className="mt-1 text-[10px] text-muted-foreground tabular-nums">
-                          → {fmtTime(trip.plannedEndTime)}
-                        </span>
-                      </div>
-
-                      {/* 主資訊 */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-sm font-semibold text-foreground truncate">
-                            {routeName}
-                          </span>
-                          <span className={cn(
-                            'rounded-full px-2 py-0.5 text-[10px] font-medium',
-                            statusPillClass(trip.status)
-                          )}>
-                            {statusLabel(trip.status)}
-                          </span>
-                        </div>
-                        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
-                          <span className="inline-flex items-center gap-1">
-                            <RouteIcon className="h-3 w-3" />
-                            {tripTypeLabel(trip.type)}
-                          </span>
-                          {bus && (
-                            <span className="inline-flex items-center gap-1">
-                              <Bus className="h-3 w-3" />
-                              {bus.plateNumber}
-                            </span>
-                          )}
-                          {driver && (
-                            <span className="inline-flex items-center gap-1">
-                              <MapPin className="h-3 w-3" />
-                              {driver.name}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <ChevronRight className="h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          {filtered.length > 8 && (
-            <div className="mt-3 text-center">
-              <Link
-                href="/trips"
-                className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-              >
-                查看全部 {filtered.length} 筆班次
-                <ChevronRight className="h-3.5 w-3.5" />
-              </Link>
-            </div>
-          )}
-        </div>
-      </motion.section>
-
-      {/* ============================================================
-          4. 子模組捷徑
-          ============================================================ */}
-      <motion.section
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, delay: 0.15 }}
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-muted-foreground">班次相關工具</h2>
-          <span className="text-xs text-muted-foreground">快速前往常用功能</span>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <ShortcutCard
-            href="/trips/new"
-            icon={Plus}
-            title="新增班次"
-            desc="建立一次性班次, 自動指派或手動綁定校巴 / 司機 / 保姆"
-            color="bg-violet-100 text-violet-600 dark:bg-violet-900/30 dark:text-violet-300"
-          />
-          <ShortcutCard
-            href="/cbl-admin-setting/bus/trips"
-            icon={RouteIcon}
-            title="校巴 · 路線模板"
-            desc="維護常駐路線: 站點順序、班次類型、學生名單 (作為班次的來源)"
-            color="bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300"
-          />
-          <ShortcutCard
-            href="/trips"
-            icon={CalendarDays}
-            title="班次完整列表"
-            desc="檢視所有日期的班次, 含歷史、篩選、批次操作"
-            color="bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300"
-          />
-        </div>
-      </motion.section>
-
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-4 text-[11px] text-muted-foreground">
-        <span>© {new Date().getFullYear()} CloudBusLink · Schedule Console</span>
-        <span className="font-mono">/cbl-admin-setting/schedule</span>
-      </div>
+      <TripDetailDrawer
+        open={detailDrawer.open}
+        row={liveDrawerRow}
+        progress={liveDrawerRow ? data.progress[liveDrawerRow.trip.id] : undefined}
+        onClose={closeDetail}
+        onEdit={() => liveDrawerRow && openEdit(liveDrawerRow)}
+        onDelete={() => liveDrawerRow && onDelete(liveDrawerRow)}
+        onChangeStatus={(s) => liveDrawerRow && onChangeStatus(liveDrawerRow, s)}
+      />
     </div>
-  );
-}
-
-function ShortcutCard({
-  href,
-  icon: Icon,
-  title,
-  desc,
-  color,
-}: {
-  href: string;
-  icon: any;
-  title: string;
-  desc: string;
-  color: string;
-}) {
-  return (
-    <Link
-      href={href}
-      className="group block rounded-2xl border border-border bg-card p-4 shadow-sm transition-colors hover:border-primary/40 hover:bg-primary/5"
-    >
-      <div className="flex items-start gap-3">
-        <div className={cn('h-10 w-10 flex-shrink-0 rounded-xl flex items-center justify-center', color)}>
-          <Icon className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-foreground truncate">{title}</p>
-          <p className="mt-0.5 text-xs text-muted-foreground line-clamp-2">{desc}</p>
-        </div>
-        <ChevronRight className="h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
-      </div>
-    </Link>
   );
 }

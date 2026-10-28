@@ -11,8 +11,9 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import { isValidPhone } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Nanny } from '@/lib/types';
 
 // 編輯模式的密碼 sentinel: 代表「保留現有密碼」
@@ -22,6 +23,7 @@ const MASK = '••••••••';
 
 export default function NanniesPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [nannies, setNannies] = useState<Nanny[]>([]);
   const [search, setSearch] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -71,7 +73,7 @@ export default function NanniesPage() {
     setDialogOpen(true);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     setError('');
     if (!form.name.trim()) { setError('請輸入姓名'); return; }
     if (!isValidPhone(form.phone)) { setError('電話格式錯誤'); return; }
@@ -81,64 +83,113 @@ export default function NanniesPage() {
     const isKeepPassword = form.password === KEEP_PASSWORD;
     const newPassword = isKeepPassword ? '' : form.password;
 
-    if (editId) {
-      // 編輯模式: 密碼留空 = 不改; 有填 = 至少 6 字元才更新
-      if (newPassword && newPassword.length < 6) {
-        setError('密碼至少需要 6 個字元');
-        return;
-      }
-      STORAGE.nannies.update(editId, {
-        name: form.name.trim(), phone: form.phone,
-        employeeId: form.employeeId.trim(), assignedBusIds: form.assignedBusIds, status: form.status,
-      });
-      // 若有填新密碼, 同步更新對應 user 帳號
-      if (newPassword) {
-        const u = STORAGE.users.findByPhone(form.phone);
-        if (u) STORAGE.users.update(u.id, { password: newPassword });
-      }
-    } else {
-      // 新增: 密碼必填, 至少 6 字元
-      if (!newPassword) { setError('請設定登入密碼'); return; }
-      if (newPassword.length < 6) { setError('密碼至少需要 6 個字元'); return; }
-      // 檢查電話是否已被註冊
-      if (STORAGE.users.findByPhone(form.phone)) {
-        setError('此電話已被註冊, 請用其他號碼');
-        return;
-      }
-      const userId = STORAGE.genId('user');
-      STORAGE.users.add({
-        id: userId,
-        phone: form.phone,
-        password: newPassword,  // 使用管理員自訂密碼
-        role: 'nanny',
-        name: form.name.trim(),
-        clientId: user.clientId,
-        status: 'active',
-        createdAt: new Date().toISOString(),
-      });
+    try {
+      if (editId) {
+        // 編輯模式: 密碼留空 = 不改; 有填 = 至少 6 字元才更新
+        if (newPassword && newPassword.length < 6) {
+          setError('密碼至少需要 6 個字元');
+          return;
+        }
+        const nannyUpdates = {
+          name: form.name.trim(), phone: form.phone,
+          employeeId: form.employeeId.trim(), assignedBusIds: form.assignedBusIds, status: form.status,
+        };
+        STORAGE.nannies.update(editId, nannyUpdates);
+        // 推回雲端 (背景)
+        {
+          const { supabaseNannies } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseNannies.update(editId, nannyUpdates);
+          if (!sbRes.success) {
+            console.warn('[Nannies] Supabase update failed:', sbRes.error);
+            toast.warning(`保姆已更新，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
+        // 若有填新密碼, 同步更新對應 user 帳號
+        if (newPassword) {
+          const u = STORAGE.users.findByPhone(form.phone);
+          if (u) STORAGE.users.update(u.id, { password: newPassword });
+        }
+        toast.success(newPassword ? `保姆「${form.name.trim()}」已更新 (含新密碼)` : `保姆「${form.name.trim()}」已更新`);
+      } else {
+        // 新增: 密碼必填, 至少 6 字元
+        if (!newPassword) { setError('請設定登入密碼'); return; }
+        if (newPassword.length < 6) { setError('密碼至少需要 6 個字元'); return; }
+        // 檢查電話是否已被註冊
+        if (STORAGE.users.findByPhone(form.phone)) {
+          setError('此電話已被註冊, 請用其他號碼');
+          return;
+        }
+        const userId = STORAGE.genId('user');
+        STORAGE.users.add({
+          id: userId,
+          phone: form.phone,
+          password: newPassword,  // 使用管理員自訂密碼
+          role: 'nanny',
+          name: form.name.trim(),
+          clientId: user.clientId,
+          status: 'active',
+          createdAt: new Date().toISOString(),
+        });
 
-      STORAGE.nannies.add({
-        id: STORAGE.genId('nanny'),
-        clientId: user.clientId || '',
-        name: form.name.trim(),
-        phone: form.phone,
-        employeeId: form.employeeId.trim(),
-        photo: null,
-        assignedBusIds: form.assignedBusIds,
-        status: form.status,
-        createdAt: new Date().toISOString(),
-      });
+        const newNanny = {
+          id: STORAGE.genId('nanny'),
+          clientId: resolveClientId(user.clientId || null),
+          name: form.name.trim(),
+          phone: form.phone,
+          employeeId: form.employeeId.trim(),
+          photo: null,
+          assignedBusIds: form.assignedBusIds,
+          status: form.status,
+          createdAt: new Date().toISOString(),
+        };
+        STORAGE.nannies.add(newNanny);
+
+        // 推回雲端 (背景)
+        {
+          const { supabaseNannies } = await import('@/lib/supabase-entities');
+          const sbRes = await supabaseNannies.add(newNanny);
+          if (!sbRes.success) {
+            console.warn('[Nannies] Supabase add failed:', sbRes.error);
+            toast.warning(`保姆已新增，但雲端同步失敗：${sbRes.error}`);
+          }
+        }
+        toast.success(`保姆「${form.name.trim()}」已新增, 登入帳號已建立`);
+      }
+      setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
+      setDialogOpen(false);
+      setEditId(null);
+    } catch (e) {
+      console.error('[Nannies] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
     }
-    setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
-    setDialogOpen(false);
-    setEditId(null);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!deleteId) return;
-    STORAGE.nannies.remove(deleteId);
-    setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
-    setDeleteId(null);
+    try {
+      const targetName = nannies.find((n) => n.id === deleteId)?.name ?? '';
+      const id = deleteId;
+      STORAGE.nannies.remove(id);
+      // 推回雲端 (刪除)
+      try {
+        const { supabaseNannies } = await import('@/lib/supabase-entities');
+        const sbRes = await supabaseNannies.remove(id);
+        if (!sbRes.success) {
+          console.warn('[Nannies] Supabase delete failed:', sbRes.error);
+          toast.warning(`保姆已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+        }
+      } catch (e) {
+        console.warn('[Nannies] Supabase delete error:', e);
+      }
+      toast.success(`保姆「${targetName}」已刪除`);
+      setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
+      setDeleteId(null);
+    } catch (e) {
+      console.error('[Nannies] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
+    }
   };
 
   const toggleBus = (id: string) => {

@@ -11,12 +11,14 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import { isValidPhone } from '@/lib/utils';
+import { useToast } from '@/components/ui/toast';
 import type { Driver } from '@/lib/types';
 
 export default function DriversPage() {
   const { user } = useAuth();
+  const toast = useToast();
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [search, setSearch] = useState('');
   const [deleteId, setDeleteId] = useState<string | null>(null);
@@ -56,22 +58,31 @@ export default function DriversPage() {
     if (!isValidPhone(form.phone)) { setError('電話格式錯誤'); return; }
     if (!form.licenseNumber.trim()) { setError('請輸入駕照號碼'); return; }
 
-    if (editId) {
-      STORAGE.drivers.update(editId, {
-        name: form.name.trim(), phone: form.phone,
-        licenseNumber: form.licenseNumber.trim(), status: form.status,
-      });
-    } else {
-      STORAGE.drivers.add({
-        id: STORAGE.genId('driver'),
-        clientId: user.clientId || '',
-        name: form.name.trim(),
-        phone: form.phone,
-        licenseNumber: form.licenseNumber.trim(),
-        photo: null,
-        status: form.status,
-        createdAt: new Date().toISOString(),
-      });
+    try {
+      if (editId) {
+        STORAGE.drivers.update(editId, {
+          name: form.name.trim(), phone: form.phone,
+          licenseNumber: form.licenseNumber.trim(), status: form.status,
+        });
+        toast.success(`司機「${form.name.trim()}」已更新`);
+      } else {
+        STORAGE.drivers.add({
+          id: STORAGE.genId('driver'),
+          clientId: resolveClientId(user.clientId || null),
+          name: form.name.trim(),
+          phone: form.phone,
+          licenseNumber: form.licenseNumber.trim(),
+          photo: null,
+          status: form.status,
+          createdAt: new Date().toISOString(),
+        });
+        toast.success(`司機「${form.name.trim()}」已新增`);
+      }
+    } catch (e) {
+      console.error('[Drivers] handleSubmit error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`儲存失敗：${msg}`);
+      return;
     }
     setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
     setDialogOpen(false);
@@ -80,9 +91,17 @@ export default function DriversPage() {
 
   const handleDelete = () => {
     if (!deleteId) return;
-    STORAGE.drivers.remove(deleteId);
-    setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
-    setDeleteId(null);
+    try {
+      const targetName = drivers.find((d) => d.id === deleteId)?.name ?? '';
+      STORAGE.drivers.remove(deleteId);
+      toast.success(`司機「${targetName}」已刪除`);
+      setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
+      setDeleteId(null);
+    } catch (e) {
+      console.error('[Drivers] handleDelete error:', e);
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(`刪除失敗：${msg}`);
+    }
   };
 
   return (
