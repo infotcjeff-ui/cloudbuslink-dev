@@ -24,6 +24,8 @@ export interface TripRow {
   nannyId: string;
   date: string;
   type: 'morning' | 'afternoon' | 'custom';
+  /** 自訂班次類型名稱 — 僅 type='custom' 時有值, 供預覽 / 清單顯示 (DB 欄位待 migration 0010) */
+  customTypeLabel?: string | null;
   status: 'scheduled' | 'in_progress' | 'completed' | 'cancelled';
   plannedStartTime: string;
   plannedEndTime: string;
@@ -281,6 +283,8 @@ export async function ensureTripParents(
 
 /** route_id 欄位存在與否的快取 (null = 尚未探測) */
 let routeIdColumnCache: boolean | null = null;
+/** custom_type_label 欄位存在與否的快取 (null = 尚未探測, migration 0010) */
+let customTypeLabelColumnCache: boolean | null = null;
 
 export const supabaseTrips = {
   async getAll(): Promise<{ data: TripRow[]; error?: string }> {
@@ -327,12 +331,34 @@ export const supabaseTrips = {
     return routeIdColumnCache;
   },
 
+  /**
+   * custom_type_label 欄位是否存在於 DB (migration 0010)?
+   * 未套用時寫入會剔除該欄, 自訂名稱僅存本機, 班次照常同步。
+   */
+  async hasCustomTypeLabelColumn(): Promise<boolean> {
+    if (customTypeLabelColumnCache !== null) return customTypeLabelColumnCache;
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase.from('cbl_trips').select('custom_type_label').limit(1);
+    customTypeLabelColumnCache = !error;
+    if (!customTypeLabelColumnCache) {
+      console.warn(
+        '[Supabase] cbl_trips.custom_type_label 欄位不存在 — 請到 Supabase SQL Editor 執行 ' +
+        'supabase/migrations/0010_trip_custom_label.sql (目前班次會照常同步, 自訂名稱僅存本機)',
+      );
+    }
+    return customTypeLabelColumnCache;
+  },
+
   async add(trip: TripRow): Promise<{ success: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
     const payload = snakify(trip);
     // migration 0005 未套用時, 剔除 route_id 避免整筆 insert 失敗
     if (!(await this.hasRouteIdColumn())) {
       delete payload.route_id;
+    }
+    // migration 0010 未套用時, 剔除 custom_type_label (自訂班次名稱僅存本機)
+    if (!(await this.hasCustomTypeLabelColumn())) {
+      delete payload.custom_type_label;
     }
     const { error } = await supabase.from('cbl_trips').insert(payload);
     if (error) return { success: false, error: error.message };
@@ -348,6 +374,10 @@ export const supabaseTrips = {
     // migration 0005 未套用時, 剔除 route_id 避免整筆 update 失敗
     if (!(await this.hasRouteIdColumn())) {
       delete payload.route_id;
+    }
+    // migration 0010 未套用時, 剔除 custom_type_label
+    if ('customTypeLabel' in patch && !(await this.hasCustomTypeLabelColumn())) {
+      delete payload.custom_type_label;
     }
     const { error } = await supabase
       .from('cbl_trips')
@@ -397,9 +427,11 @@ export const supabaseTrips = {
     if (rows.length === 0) return { success: true };
     const { supabase } = await import('./supabase');
     const hasRouteId = await this.hasRouteIdColumn();
+    const hasCustomLabel = await this.hasCustomTypeLabelColumn();
     const payload = rows.map((r) => {
       const p = snakify(r) as Record<string, unknown>;
       if (!hasRouteId) delete p.route_id;
+      if (!hasCustomLabel) delete p.custom_type_label;
       return p;
     });
     const { error } = await supabase.from('cbl_trips').insert(payload);

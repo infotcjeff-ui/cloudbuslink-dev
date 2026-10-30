@@ -11,7 +11,8 @@ export interface DriverFormState {
   phone: string;
   licenseNumber: string;
   companyId: string;       // '' 表示未選擇所屬機構/公司 (非必填)
-  status: Driver['status'];
+  assignedBusId: string;   // '' 表示未綁定校巴 (對應 Bus.driverId 反向關聯)
+  status: Driver['status']; // 執勤狀態 (非必填, 預設 'available')
 }
 
 export const EMPTY_DRIVER_FORM: DriverFormState = {
@@ -19,6 +20,7 @@ export const EMPTY_DRIVER_FORM: DriverFormState = {
   phone: '',
   licenseNumber: '',
   companyId: '',
+  assignedBusId: '',
   status: 'available',
 };
 

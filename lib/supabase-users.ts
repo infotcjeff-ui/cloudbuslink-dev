@@ -15,10 +15,47 @@
 import { camelize, snakify } from './supabase-case';
 import type { User } from './types';
 
+/**
+ * 從 PostgREST / Postgres 錯誤解析「不存在的欄位名」。
+ *
+ * PostgREST 對未知欄位會回兩種錯誤碼:
+ *   - 42703   (Postgres 原生)  "column cbl_users.account_name does not exist"
+ *   - PGRST204 (PostgREST 層)  "Could not find the 'account_name' column of 'cbl_users' in the schema cache"
+ *
+ * 兩種都要能解析, 否則帳號寫入的降欄機制會失效
+ * (還沒跑 migration 0013 的 DB 會讓整筆 insert 被拒 → 變回「無帳號」)。
+ */
+function parseMissingColumn(error: { code?: string; message?: string }): string | null {
+  const code = error.code;
+  const message = error.message ?? '';
+
+  if (code === 'PGRST204') {
+    const m = message.match(/Could not find the '([\w]+)' column/i);
+    return m?.[1] ?? null;
+  }
+
+  if (code === '42703') {
+    const m = message.match(/column\s+[\w.]+"?([\w]+)"?\s+does not exist/i);
+    return m?.[1] ?? null;
+  }
+
+  if (/does not exist/i.test(message) && /column/i.test(message)) {
+    const m = message.match(/column\s+[\w.]+"?([\w]+)"?\s+does not exist/i);
+    return m?.[1] ?? null;
+  }
+
+  return null;
+}
+
 /** 帳號寫入時的欄位集合 (對應 cbl_users) */
 export interface SupabaseUserPayload {
   id: string;
   phone: string;
+  /**
+   * 帳戶名稱 (選填) — 與 phone 皆可作為登入帳號。
+   * 對應 DB 欄位 `account_name`。
+   */
+  accountName?: string | null;
   password: string;
   role: 'system_admin' | 'super_admin' | 'client' | 'parent' | 'nanny';
   name: string;
@@ -112,74 +149,119 @@ export const supabaseUsers = {
   /**
    * 新增登入帳號
    * - insert 後用 .select() 二次驗證, 避免 RLS 靜默拒絕 (insert 回傳成功但資料沒寫進去)
+   * - account_name 若 live DB 還沒跑 migration 0013 會回 42703 → 降欄重試,
+   *   帳號照樣建得起來 (只是帳戶名稱暫時存不到雲端, 电话登入不受影響)
    */
   async add(
     user: SupabaseUserPayload,
   ): Promise<{ success: boolean; error?: string; id?: string }> {
     const { supabase } = await import('./supabase');
-    const payload = snakify(user);
+    let payload: Record<string, unknown> = snakify(user);
+    const dropped: string[] = [];
 
-    const { data, error } = await supabase
-      .from('cbl_users')
-      .insert(payload)
-      .select('id')
-      .maybeSingle();
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const { data, error } = await supabase
+        .from('cbl_users')
+        .insert(payload)
+        .select('id')
+        .maybeSingle();
 
-    if (error) {
+      if (!error) {
+        if (!data) {
+          console.warn('[Supabase] add user was silently rejected by RLS', user.id);
+          return {
+            success: false,
+            error: 'RLS 政策拒絕 (無寫入權限或欄位不符)',
+          };
+        }
+
+        // 二次驗證: 真的 select 出來才算數
+        const { data: verifyData, error: verifyError } = await supabase
+          .from('cbl_users')
+          .select('id')
+          .eq('id', data.id)
+          .maybeSingle();
+
+        if (verifyError) {
+          console.warn('[Supabase] verify select error:', verifyError);
+        } else if (!verifyData) {
+          console.warn('[Supabase] insert 回傳成功但 verify select 找不到 row');
+          return { success: false, error: 'RLS 政策過濾掉 insert (verify 失敗)' };
+        }
+
+        if (dropped.length > 0) {
+          console.warn(
+            `[Supabase] cbl_users.insert 已略過 live schema 沒有的欄位: ${dropped.join(', ')} (請跑 migration 0013)`,
+          );
+        }
+        return { success: true, id: data.id };
+      }
+
+      // 42703 = undefined column (account_name 還沒加到 DB) → 移除該欄再試
+      const colName = parseMissingColumn(error);
+      if (colName && colName in payload) {
+        const next = { ...payload };
+        delete next[colName];
+        payload = next;
+        dropped.push(colName);
+        continue;
+      }
+
       console.error('[Supabase] Failed to add user:', error);
       return { success: false, error: error.message };
     }
 
-    if (!data) {
-      console.warn('[Supabase] add user was silently rejected by RLS', user.id);
-      return {
-        success: false,
-        error: 'RLS 政策拒絕 (無寫入權限或欄位不符)',
-      };
-    }
-
-    // 二次驗證: 真的 select 出來才算數
-    const { data: verifyData, error: verifyError } = await supabase
-      .from('cbl_users')
-      .select('id')
-      .eq('id', data.id)
-      .maybeSingle();
-
-    if (verifyError) {
-      console.warn('[Supabase] verify select error:', verifyError);
-    } else if (!verifyData) {
-      console.warn('[Supabase] insert 回傳成功但 verify select 找不到 row');
-      return { success: false, error: 'RLS 政策過濾掉 insert (verify 失敗)' };
-    }
-
-    return { success: true, id: data.id };
+    return { success: false, error: '新增帳號失敗 (欄位降級重試已用盡)' };
   },
 
-  /** 更新登入帳號 */
+  /**
+   * 更新登入帳號
+   * - 同上: account_name 若 live DB 還沒跑 migration 會回 PGRST204/42703 → 降欄重試
+   */
   async update(
     id: string,
     patch: SupabaseUserPatch,
   ): Promise<{ success: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
+    let payload: Record<string, unknown> = snakify(patch);
+    const dropped: string[] = [];
 
-    const { data, error } = await supabase
-      .from('cbl_users')
-      .update(snakify(patch))
-      .eq('id', id)
-      .select('id')
-      .maybeSingle();
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const { data, error } = await supabase
+        .from('cbl_users')
+        .update(payload)
+        .eq('id', id)
+        .select('id')
+        .maybeSingle();
 
-    if (error) {
+      if (!error) {
+        if (!data) {
+          console.warn('[Supabase] update user was silently rejected by RLS', id);
+          return { success: false, error: 'RLS 政策拒絕 (無更新權限)' };
+        }
+        if (dropped.length > 0) {
+          console.warn(
+            `[Supabase] cbl_users.update 已略過 live schema 沒有的欄位: ${dropped.join(', ')} (請跑 migration 0013)`,
+          );
+        }
+        return { success: true };
+      }
+
+      // PGRST204 (schema cache) / 42703 (undefined column) → 移除該欄再試
+      const colName = parseMissingColumn(error);
+      if (colName && colName in payload) {
+        const next = { ...payload };
+        delete next[colName];
+        payload = next;
+        dropped.push(colName);
+        continue;
+      }
+
       console.error('[Supabase] Failed to update user:', error);
       return { success: false, error: error.message };
     }
 
-    if (!data) {
-      console.warn('[Supabase] update user was silently rejected by RLS', id);
-      return { success: false, error: 'RLS 政策拒絕 (無更新權限)' };
-    }
-
-    return { success: true };
+    return { success: false, error: '更新帳號失敗 (欄位降級重試已用盡)' };
   },
 
   /** 刪除登入帳號 */

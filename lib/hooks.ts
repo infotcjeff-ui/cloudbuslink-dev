@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { STORAGE } from './storage';
 import { initWithSupabase, isSupabaseAvailable } from './supabase-data';
+import { resolveLoginAccount } from './auth-lookup';
 import type { User, UserRole } from './types';
 
 // 初始化資料 (僅在 client side, 只走 Supabase)
@@ -65,8 +66,13 @@ export function useAuth() {
   }, []);
 
   // allowRoles: 可選, 限定只有特定角色可登入
+  //
+  // account 可以是「電話號碼」或「帳戶名稱」:
+  //   - 電話號碼: 8 位數字 (香港)
+  //   - 帳戶名稱: 3-32 位英數字元 (自訂, 例如 `siu-ming`)
+  // 兩者都會先經過 STORAGE.users.findByAccount() 查找。
   const login = useCallback((
-    phone: string,
+    account: string,
     password: string,
     allowedRoles?: UserRole[]
   ): { ok: boolean; error?: string; user?: User } => {
@@ -77,7 +83,17 @@ export function useAuth() {
     // 舊版有一個 `admin` / `admin123` 的硬寫超管, 任何人知道帳密就能拿到
     // 系統最高權限 — 已經移除。現在的超管必須是在 /cbl-admin-setting/user
     // 建立的正式帳號 (密碼存在 cbl_users)。
-    const found = STORAGE.users.findByPhone(phone.trim());
+    //
+    // ⚠️ 帳戶名稱存在哪裡?
+    //   早期以為帳戶名稱只是「電話的別名」, 所以只存在 cbl_users.account_name。
+    //   但實際上 cbl_users 這張表在「有 RLS 政策 + 沒跑過 add migration」時
+    //   讀不到剛建立的帳號 → 登入時查無此人 → 使用者看到「帳戶不存在」。
+    //   為了讓「剛建立的帳號」一定找得到, 帳戶名稱同時寫在:
+    //     1. cbl_users.account_name  (雲端 — 跨裝置)
+    //     2. cbl_nannies.account_name / cbl_parents.account_name (該筆資料上)
+    //   查找順序: 先查 cbl_users, 查不到再查 nannies / parents 兩張表,
+    //   藉由該筆資料的 phone 反查 user。詳見 lib/auth-lookup.ts。
+    const found = resolveLoginAccount(account);
     if (!found) return { ok: false, error: '帳戶不存在' };
     if (found.password !== password) return { ok: false, error: '密碼錯誤' };
     if (found.status !== 'active') return { ok: false, error: '帳戶已停用' };

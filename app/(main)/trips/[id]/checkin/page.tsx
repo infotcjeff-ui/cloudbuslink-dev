@@ -1,24 +1,27 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
   Check, X, Clock, AlertCircle, MapPin, ChevronLeft, ChevronRight,
-  Camera, StickyNote, CheckCircle2, Loader2, Save, Phone
+  StickyNote, Phone, Undo2, Users, Flag,
 } from 'lucide-react';
-import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import { Input } from '@/components/ui/input';
+import {
+  Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription, DrawerFooter,
+} from '@/components/ui/drawer';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { MotionList } from '@/components/trips/motion-list';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import {
-  cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel
+  cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel,
 } from '@/lib/utils';
+import { DUR, EASE_OUT_QUART } from '@/lib/motion';
 import type {
-  Trip, Waypoint, Attendance, BoardingStatus, DropoffStatus
+  Trip, Waypoint, Attendance, BoardingStatus, DropoffStatus,
 } from '@/lib/types';
 
 type CheckinMode = 'boarding' | 'dropoff';
@@ -32,7 +35,7 @@ export default function CheckinPage() {
   const [attendances, setAttendances] = useState<Attendance[]>([]);
   const [noteDialog, setNoteDialog] = useState<string | null>(null);
   const [noteText, setNoteText] = useState('');
-  const [tick, setTick] = useState(0);
+  const [finishConfirm, setFinishConfirm] = useState(false);
 
   useEffect(() => {
     if (!params.id) return;
@@ -52,22 +55,46 @@ export default function CheckinPage() {
     }
   }, [params.id]);
 
-  // 每秒更新
-  useEffect(() => {
-    const i = setInterval(() => setTick(t => t + 1), 1000);
-    return () => clearInterval(i);
-  }, []);
-
   const currentWaypoint = trip?.waypoints[currentWaypointIdx];
   const mode: CheckinMode = currentWaypoint?.type === 'pickup' ? 'boarding' : 'dropoff';
 
-  // 獲取或創建打卡記錄
-  const getOrCreateAttendance = (studentId: string): Attendance | null => {
-    if (!trip || !currentWaypoint) return null;
-    const existing = attendances.find(
-      a => a.tripId === trip.id && a.studentId === studentId && a.waypointId === currentWaypoint.id
-    );
-    return existing || null;
+  const refreshAttendances = (tripId: string) => {
+    setAttendances(STORAGE.attendances.getByTrip(tripId));
+    window.dispatchEvent(new CustomEvent('cbl-attendance-refresh'));
+  };
+
+  // 打卡寫入雲端 (背景, 不阻擋 UI — bug 3: 只寫 localStorage 會被下次 sync 蓋掉)
+  const pushAttendanceToCloud = (attendance: Attendance) => {
+    void (async () => {
+      try {
+        const { supabaseAttendances } = await import('@/lib/supabase-attendances');
+        const res = await supabaseAttendances.upsert(attendance as unknown as Parameters<typeof supabaseAttendances.upsert>[0]);
+        if (!res.success) console.warn('[Checkin] attendance push failed:', res.error);
+      } catch (e) {
+        console.warn('[Checkin] attendance push failed:', e);
+      }
+    })();
+  };
+
+  // 站點完成 / 班次完成也要推雲端 (否則 waypoint status 只存本機, listing 進度永遠 0)
+  const pushTripToCloud = (tripId: string) => {
+    void (async () => {
+      try {
+        const updated = STORAGE.trips.getById(tripId);
+        if (!updated) return;
+        const { supabaseTrips } = await import('@/lib/supabase-trips');
+        const res = await supabaseTrips.update(tripId, {
+          waypoints: updated.waypoints,
+          completedStops: updated.completedStops,
+          status: updated.status,
+          actualStartTime: updated.actualStartTime,
+          actualEndTime: updated.actualEndTime,
+        } as unknown as Parameters<typeof supabaseTrips.update>[1]);
+        if (!res.success) console.warn('[Checkin] trip push failed:', res.error);
+      } catch (e) {
+        console.warn('[Checkin] trip push failed:', e);
+      }
+    })();
   };
 
   // 標記學生狀態
@@ -112,6 +139,7 @@ export default function CheckinPage() {
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+      if (didBoard) navigator.vibrate?.(10);
     } else {
       // 下車: 沿用上車階段已寫入的欄位, 只補 dropoff 側。
       // 下車站點對應的 attendance 與上車站點不同 (waypointId 不同),
@@ -136,19 +164,31 @@ export default function CheckinPage() {
         createdAt: existing?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+      if (didDrop) navigator.vibrate?.(10);
     }
 
     STORAGE.attendances.upsert(attendance);
-    setAttendances(STORAGE.attendances.getByTrip(trip.id));
-    // 即時通知 Schedule Console 等其他頁面刷新出席資料
-    window.dispatchEvent(new CustomEvent('cbl-attendance-refresh'));
+    pushAttendanceToCloud(attendance);
+    refreshAttendances(trip.id);
+  };
+
+  // 復原單一學生的本站結論 (誤觸時點一下復原)
+  const clearStudentStatus = (studentId: string) => {
+    if (!trip || !currentWaypoint) return;
+    const all = STORAGE.attendances.getAll().filter(
+      a => !(a.tripId === trip.id && a.studentId === studentId && a.waypointId === currentWaypoint.id)
+    );
+    STORAGE.attendances.setAll(all);
+    refreshAttendances(trip.id);
   };
 
   // 全部標記為上車 (快捷)
   const markAllBoarded = () => {
-    if (!currentWaypoint) return;
+    if (!trip || !currentWaypoint) return;
     currentWaypoint.studentIds.forEach(sid => {
-      const existing = getOrCreateAttendance(sid);
+      const existing = attendances.find(
+        a => a.tripId === trip.id && a.studentId === sid && a.waypointId === currentWaypoint.id
+      );
       // 已標記缺席的學生不要再被覆蓋成 on_time
       const alreadyAbsent =
         existing?.boardingStatus === 'no_show' || existing?.boardingStatus === 'absent';
@@ -158,8 +198,28 @@ export default function CheckinPage() {
     });
   };
 
-  // 完成當前站點
+  // 完成當前站點 (非尾站直接完成並跳轉; 尾站先彈中置確認)
   const completeWaypoint = () => {
+    if (!trip || !currentWaypoint) return;
+    if (currentWaypointIdx < trip.waypoints.length - 1) {
+      STORAGE.trips.update(trip.id, {
+        waypoints: trip.waypoints.map((wp, i) =>
+          i === currentWaypointIdx
+            ? { ...wp, status: 'completed', actualTime: currentTimeStamp() }
+            : wp
+        ) as Waypoint[],
+        completedStops: [...trip.completedStops, currentWaypoint.id],
+      });
+      pushTripToCloud(trip.id);
+      const updated = STORAGE.trips.getById(trip.id);
+      if (updated) setTrip(updated);
+      setCurrentWaypointIdx(currentWaypointIdx + 1);
+    } else {
+      setFinishConfirm(true);
+    }
+  };
+
+  const confirmFinishTrip = () => {
     if (!trip || !currentWaypoint) return;
     STORAGE.trips.update(trip.id, {
       waypoints: trip.waypoints.map((wp, i) =>
@@ -168,23 +228,12 @@ export default function CheckinPage() {
           : wp
       ) as Waypoint[],
       completedStops: [...trip.completedStops, currentWaypoint.id],
+      status: 'completed',
+      actualEndTime: currentTimeStamp(),
     });
-    const updated = STORAGE.trips.getById(trip.id);
-    if (updated) setTrip(updated);
-
-    // 自動跳到下一站
-    if (currentWaypointIdx < trip.waypoints.length - 1) {
-      setCurrentWaypointIdx(currentWaypointIdx + 1);
-    } else {
-      // 全部完成
-      if (confirm('所有站點已完成, 是否結束班次?')) {
-        STORAGE.trips.update(trip.id, {
-          status: 'completed',
-          actualEndTime: currentTimeStamp(),
-        });
-        router.push(`/trips/${trip.id}`);
-      }
-    }
+    pushTripToCloud(trip.id);
+    setFinishConfirm(false);
+    router.push(`/trips/${trip.id}`);
   };
 
   const goPrevWaypoint = () => {
@@ -199,6 +248,23 @@ export default function CheckinPage() {
     }
   };
 
+  const stats = useMemo(() => {
+    if (!trip || !currentWaypoint) return { boarded: 0, absent: 0, total: 0, pending: 0 };
+    let boarded = 0;
+    let absent = 0;
+    currentWaypoint.studentIds.forEach(sid => {
+      const att = attendances.find(
+        a => a.tripId === trip.id && a.studentId === sid && a.waypointId === currentWaypoint.id
+      );
+      const done = mode === 'boarding' ? !!att?.boardingTime : !!att?.dropoffTime;
+      const s = mode === 'boarding' ? att?.boardingStatus : att?.dropoffStatus;
+      if (done) boarded++;
+      else if (s === 'no_show' || s === 'absent') absent++;
+    });
+    const total = currentWaypoint.studentIds.length;
+    return { boarded, absent, total, pending: total - boarded - absent };
+  }, [attendances, trip, currentWaypoint, mode]);
+
   if (!trip || !currentWaypoint) {
     return (
       <div className="px-4 py-8 text-center text-muted-foreground">
@@ -207,91 +273,124 @@ export default function CheckinPage() {
     );
   }
 
-  // 只計真正有上/下車時間的學生 (no_show 的 boardingTime 為 null, 自然被排除)
-  const boardedCount = currentWaypoint.studentIds.filter(sid => {
-    const att = attendances.find(a => a.tripId === trip.id && a.studentId === sid && a.waypointId === currentWaypoint.id);
-    return mode === 'boarding' ? !!att?.boardingTime : !!att?.dropoffTime;
-  }).length;
-
-  // 缺席人數, 讓底部按鈕文案不會顯示 0/2 而實際有 2 人缺席
-  const absentCount = currentWaypoint.studentIds.filter(sid => {
-    const att = attendances.find(a => a.tripId === trip.id && a.studentId === sid && a.waypointId === currentWaypoint.id);
-    const s = mode === 'boarding' ? att?.boardingStatus : att?.dropoffStatus;
-    return s === 'no_show' || s === 'absent';
-  }).length;
+  const isLast = currentWaypointIdx === trip.waypoints.length - 1;
+  const progress = stats.total > 0 ? (stats.boarded + stats.absent) / stats.total : 0;
+  const typePill = currentWaypoint.type === 'pickup'
+    ? 'bg-amber-100 text-amber-700'
+    : 'bg-blue-100 text-blue-700';
 
   return (
-    <div className="px-4 pt-4 pb-24">
-      {/* 站點進度 */}
-      <div className="mb-4">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-sm font-semibold">站點進度</p>
-          <p className="text-xs text-muted-foreground">
-            {currentWaypointIdx + 1} / {trip.waypoints.length}
-          </p>
+    <div className="px-3 pt-3 pb-6">
+      {/* 站點進度 — 與班次列表 TripCard 同一語言 */}
+      <motion.div
+        initial={{ opacity: 0, y: -6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: DUR.base, ease: EASE_OUT_QUART }}
+        className="rounded-2xl p-3 bg-card border border-border/50 shadow-sm mb-2"
+      >
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={cn('text-[10px] font-medium px-2 py-0.5 rounded-full', typePill)}>
+              {waypointTypeLabel(currentWaypoint.type)}
+            </span>
+            <span className="text-[10px] text-muted-foreground tabular-nums">
+              站點 {currentWaypointIdx + 1}/{trip.waypoints.length}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 text-xs text-muted-foreground flex-shrink-0">
+            <Users className="w-3 h-3" />
+            <span className="tabular-nums font-semibold text-foreground">
+              {stats.boarded + stats.absent}/{stats.total}
+            </span>
+            {stats.absent > 0 && (
+              <span className="text-[10px] text-destructive">· 缺席 {stats.absent}</span>
+            )}
+          </div>
         </div>
-        <div className="flex gap-1">
-          {trip.waypoints.map((wp, i) => (
-            <div
-              key={wp.id}
-              className={cn(
-                'h-1.5 flex-1 rounded-full',
-                i < currentWaypointIdx ? 'bg-success' :
-                i === currentWaypointIdx ? 'bg-primary animate-pulse-soft' :
-                'bg-muted'
-              )}
-            />
-          ))}
-        </div>
-      </div>
 
-      {/* 當前站點資訊 */}
-      <Card className="mb-4">
-        <CardContent className="p-4">
-          <div className="flex items-start justify-between mb-2">
-            <div>
-              <Badge variant={mode === 'boarding' ? 'default' : 'warning'} className="mb-2">
-                {waypointTypeLabel(currentWaypoint.type)}
-              </Badge>
-              <h2 className="text-lg font-bold">{currentWaypoint.location.name}</h2>
-              {currentWaypoint.location.address && (
-                <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
-                  <MapPin className="w-3 h-3" />
-                  {currentWaypoint.location.address}
-                </p>
-              )}
-            </div>
+        <h1 className="text-xl font-bold tracking-tight truncate">{currentWaypoint.location.name}</h1>
+        {currentWaypoint.location.address && (
+          <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1 truncate">
+            <MapPin className="w-3 h-3 flex-shrink-0" />
+            <span className="truncate">{currentWaypoint.location.address}</span>
+          </p>
+        )}
+
+        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2">
+          <Clock className="w-3 h-3" />
+          <span className="tabular-nums">計劃 {fmtTime(currentWaypoint.scheduledTime)}</span>
+          {currentWaypoint.actualTime && (
+            <span className="tabular-nums text-success">· 實際 {fmtTime(currentWaypoint.actualTime)}</span>
+          )}
+        </div>
+
+        <div className="mt-2">
+          <div className="h-1 rounded-full bg-muted overflow-hidden">
+            <motion.div
+              className={cn('h-full rounded-full', stats.absent > 0 ? 'bg-warning' : 'bg-success')}
+              initial={{ width: 0 }}
+              animate={{ width: `${progress * 100}%` }}
+              transition={{ duration: 0.5, ease: 'easeOut' }}
+            />
           </div>
-          <div className="flex items-center justify-between mt-3 text-sm">
-            <div className="flex items-center gap-1.5">
-              <Clock className="w-3.5 h-3.5 text-muted-foreground" />
-              <span>計劃: {fmtTime(currentWaypoint.scheduledTime)}</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5 text-success" />
-              <span className="font-semibold">
-                {boardedCount} / {currentWaypoint.studentIds.length}
-              </span>
-            </div>
+        </div>
+
+        {/* 站點切換 — 與 DatePillRow 同一手感 */}
+        <div className="flex items-center gap-2 mt-3">
+          <button
+            type="button"
+            onClick={goPrevWaypoint}
+            disabled={currentWaypointIdx === 0}
+            aria-label="上一站"
+            className="h-9 w-9 rounded-full bg-muted/60 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <div className="flex-1 flex gap-1">
+            {trip.waypoints.map((wp, i) => (
+              <button
+                key={wp.id}
+                type="button"
+                onClick={() => setCurrentWaypointIdx(i)}
+                aria-label={`前往站點 ${i + 1}`}
+                className={cn(
+                  'h-1.5 flex-1 rounded-full transition-colors',
+                  i < currentWaypointIdx ? 'bg-success' :
+                  i === currentWaypointIdx ? 'bg-primary' : 'bg-muted'
+                )}
+              />
+            ))}
           </div>
-        </CardContent>
-      </Card>
+          <button
+            type="button"
+            onClick={goNextWaypoint}
+            disabled={isLast}
+            aria-label="下一站"
+            className="h-9 w-9 rounded-full bg-muted/60 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        </div>
+      </motion.div>
 
       {/* 快速操作 */}
-      {mode === 'boarding' && boardedCount + absentCount < currentWaypoint.studentIds.length && (
+      {mode === 'boarding' && stats.pending > 0 && (
         <Button
           onClick={markAllBoarded}
           variant="outline"
-          className="w-full mb-3 h-10"
+          className="w-full mb-2 h-10 rounded-full text-sm active:scale-[0.98]"
         >
           <Check className="w-4 h-4" />
-          全部標記為已上車 ({currentWaypoint.studentIds.length - boardedCount - absentCount} 位)
+          全部標記為已上車 ({stats.pending} 位)
         </Button>
       )}
 
-      {/* 學生列表 */}
-      <div className="space-y-2">
-        {currentWaypoint.studentIds.map(sid => {
+      {/* 學生列表 — MotionList stagger, 與班次列表同一進場 */}
+      <MotionList
+        items={currentWaypoint.studentIds}
+        getKey={(sid) => `${currentWaypoint.id}-${sid}`}
+        className="space-y-2"
+        renderItem={(sid) => {
           const student = STORAGE.students.getById(sid);
           if (!student) return null;
           const att = attendances.find(
@@ -306,8 +405,7 @@ export default function CheckinPage() {
           const handled = !!att && (done || status === 'no_show' || status === 'absent');
 
           return (
-            <StudentCheckinCard
-              key={sid}
+            <StudentCheckinRow
               studentName={student.name}
               classNumber={student.classNumber}
               studentId={student.studentId}
@@ -321,267 +419,268 @@ export default function CheckinPage() {
               onBoarded={() => setStudentStatus(sid, 'on_time')}
               onNoShow={() => setStudentStatus(sid, 'no_show')}
               onLate={() => setStudentStatus(sid, 'late')}
+              onUndo={() => clearStudentStatus(sid)}
               onAddNote={() => {
                 setNoteDialog(sid);
                 setNoteText(att?.notes || '');
               }}
             />
           );
-        })}
-      </div>
+        }}
+      />
 
-      {/* 底部操作按鈕 */}
-      <div className="fixed bottom-20 left-0 right-0 px-4 z-30">
-        <div className="bg-background/80 backdrop-blur-lg rounded-2xl p-3 border shadow-lg">
-          <div className="flex gap-2">
-            <Button
-              onClick={goPrevWaypoint}
-              variant="outline"
-              size="icon"
-              disabled={currentWaypointIdx === 0}
-              className="h-12 w-12 flex-shrink-0"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </Button>
-            <Button
-              onClick={completeWaypoint}
-              className="flex-1 h-12 bg-success"
-            >
-              <Check className="w-4 h-4" />
-              完成 {waypointTypeLabel(currentWaypoint.type)} ({boardedCount}/{currentWaypoint.studentIds.length}
-              {absentCount > 0 ? ` · 缺席 ${absentCount}` : ''})
-            </Button>
-            <Button
-              onClick={goNextWaypoint}
-              variant="outline"
-              size="icon"
-              disabled={currentWaypointIdx === trip.waypoints.length - 1}
-              className="h-12 w-12 flex-shrink-0"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </Button>
-          </div>
+      {/* 底部操作 — sticky 在捲動流內, 不再用 fixed (避免被 transform 綁架錯位) */}
+      <div className="sticky bottom-3 mt-3 z-30">
+        <div className="bg-background/85 backdrop-blur-md border border-border rounded-2xl shadow-lg p-2 flex items-center gap-2 safe-bottom">
+          <Button
+            onClick={goPrevWaypoint}
+            variant="ghost"
+            disabled={currentWaypointIdx === 0}
+            aria-label="上一站"
+            className="h-12 px-4 rounded-xl active:scale-95"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </Button>
+          <Button
+            onClick={completeWaypoint}
+            className="flex-1 h-12 rounded-xl bg-success text-success-foreground text-[15px] font-semibold active:scale-[0.98]"
+          >
+            <Flag className="w-4 h-4" />
+            {isLast
+              ? `完成打卡 (${stats.boarded + stats.absent}/${stats.total})`
+              : `完成${waypointTypeLabel(currentWaypoint.type)} (${stats.boarded + stats.absent}/${stats.total})`}
+          </Button>
+          <Button
+            onClick={goNextWaypoint}
+            variant="ghost"
+            disabled={isLast}
+            aria-label="下一站"
+            className="h-12 px-4 rounded-xl active:scale-95"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </Button>
         </div>
       </div>
 
-      {/* 備註對話框 */}
-      {noteDialog && (
-        <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50"
-          onClick={() => setNoteDialog(null)}
-        >
-          <motion.div
-            initial={{ y: '100%' }}
-            animate={{ y: 0 }}
-            className="w-full max-w-md bg-background rounded-t-3xl p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="w-12 h-1 bg-muted rounded-full mx-auto mb-4" />
-            <h3 className="font-bold mb-3">添加備註</h3>
+      {/* 尾站完成 — 中置確認 (取代原生 confirm) */}
+      <ConfirmDialog
+        open={finishConfirm}
+        onOpenChange={setFinishConfirm}
+        title="所有站點已完成"
+        description={`是否結束本次班次? 已處理 ${stats.boarded + stats.absent}/${stats.total} 位學生。`}
+        confirmLabel="確定結束"
+        tone="success"
+        onConfirm={confirmFinishTrip}
+      />
+
+      {/* 備註 — 用現有 Drawer (手機規範), 取代手寫 bottom-sheet */}
+      <Drawer open={noteDialog !== null} onOpenChange={(open) => { if (!open) setNoteDialog(null); }}>
+        <DrawerContent>
+          <DrawerHeader>
+            <DrawerTitle>添加備註</DrawerTitle>
+            <DrawerDescription>例: 學生請假 / 交通意外改道 / 其他...</DrawerDescription>
+          </DrawerHeader>
+          <div className="px-5">
             <Textarea
               value={noteText}
               onChange={(e) => setNoteText(e.target.value)}
-              placeholder="例: 學生請假 / 交通意外改道 / 其他..."
+              placeholder="輸入備註..."
               className="min-h-[100px]"
             />
-            <div className="flex gap-2 mt-4">
-              <Button
-                variant="outline"
-                onClick={() => setNoteDialog(null)}
-                className="flex-1 h-11"
-              >
-                取消
-              </Button>
-              <Button
-                onClick={() => {
-                  if (!trip || !currentWaypoint || !noteDialog) return;
-                  const existing = attendances.find(
-                    a => a.tripId === trip.id && a.studentId === noteDialog && a.waypointId === currentWaypoint.id
-                  );
-                  const updated: Attendance = existing || {
-                    id: STORAGE.genId('att'),
-                    tripId: trip.id,
-                    studentId: noteDialog,
-                    waypointId: currentWaypoint.id,
-                    boardingTime: null,
-                    boardingStatus: 'on_time',
-                    boardingPhoto: null,
-                    boardedBy: user?.id || '',
-                    dropoffTime: null,
-                    dropoffStatus: null,
-                    dropoffPhoto: null,
-                    dropoffBy: null,
-                    notes: null,
-                    isConfirmed: false,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                  };
-                  STORAGE.attendances.upsert({
-                    ...updated,
-                    notes: noteText || null,
-                  });
-                  setAttendances(STORAGE.attendances.getByTrip(trip.id));
-                  window.dispatchEvent(new CustomEvent('cbl-attendance-refresh'));
-                  setNoteDialog(null);
-                }}
-                className="flex-1 h-11"
-              >
-                保存
-              </Button>
-            </div>
-          </motion.div>
-        </div>
-      )}
+          </div>
+          <DrawerFooter>
+            <Button
+              variant="outline"
+              onClick={() => setNoteDialog(null)}
+              className="flex-1 h-11 rounded-xl active:scale-95"
+            >
+              取消
+            </Button>
+            <Button
+              onClick={() => {
+                if (!trip || !currentWaypoint || !noteDialog) return;
+                const existing = attendances.find(
+                  a => a.tripId === trip.id && a.studentId === noteDialog && a.waypointId === currentWaypoint.id
+                );
+                const updated: Attendance = existing || {
+                  id: STORAGE.genId('att'),
+                  tripId: trip.id,
+                  studentId: noteDialog,
+                  waypointId: currentWaypoint.id,
+                  boardingTime: null,
+                  boardingStatus: 'on_time',
+                  boardingPhoto: null,
+                  boardedBy: user?.id || '',
+                  dropoffTime: null,
+                  dropoffStatus: null,
+                  dropoffPhoto: null,
+                  dropoffBy: null,
+                  notes: null,
+                  isConfirmed: false,
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                };
+                STORAGE.attendances.upsert({
+                  ...updated,
+                  notes: noteText || null,
+                });
+                refreshAttendances(trip.id);
+                setNoteDialog(null);
+              }}
+              className="flex-1 h-11 rounded-xl active:scale-95"
+            >
+              保存
+            </Button>
+          </DrawerFooter>
+        </DrawerContent>
+      </Drawer>
     </div>
   );
 }
 
-function StudentCheckinCard({
+function StudentCheckinRow({
   studentName, classNumber, studentId, parentPhone,
   done, handled, status, time, mode, notes,
-  onBoarded, onNoShow, onLate, onAddNote
-}: any) {
+  onBoarded, onNoShow, onLate, onUndo, onAddNote,
+}: {
+  studentName: string;
+  classNumber: string;
+  studentId: string;
+  parentPhone: string | null | undefined;
+  done: boolean;
+  handled: boolean;
+  status: BoardingStatus | DropoffStatus | null | undefined;
+  time: string | null | undefined;
+  mode: CheckinMode;
+  notes: string | null;
+  onBoarded: () => void;
+  onNoShow: () => void;
+  onLate: () => void;
+  onUndo: () => void;
+  onAddNote: () => void;
+}) {
   // statusLabel / 視覺樣式依結果分流:
   // - done=true  → 綠底綠勾 (準時/遲到的正常上落車)
   // - handled 但未打卡 → 紅底紅叉 (缺席 / 未下車), 讓一眼看出異常
-  const absent = status === 'no_show' || status === 'absent';
   const statusLabel = status === 'late' ? '遲到'
     : status === 'no_show' ? (mode === 'boarding' ? '缺席' : '未下車')
     : status === 'absent' ? '缺席'
     : done ? (mode === 'boarding' ? '已上車' : '已下車')
     : null;
 
+  const actionLabel = mode === 'boarding' ? '已上車' : '已下車';
+  const absentLabel = mode === 'boarding' ? '缺席' : '未下車';
+
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
+    <div
+      className={cn(
+        'w-full text-left rounded-2xl p-3 bg-card border border-border/50 shadow-sm transition-colors',
+        done && 'border-success/40 bg-success/[0.04]',
+        !done && handled && 'border-destructive/40 bg-destructive/[0.04]',
+      )}
     >
-      <Card className={cn(
-        'transition-colors',
-        done && 'border-success/50 bg-success/5',
-        !done && handled && 'border-destructive/50 bg-destructive/5'
-      )}>
-        <CardContent className="p-3">
-          <div className="flex items-center gap-3 mb-2">
-            <div className={cn(
-              'w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold flex-shrink-0',
-              done ? 'bg-success text-success-foreground'
-                : handled ? 'bg-destructive text-destructive-foreground'
-                : 'bg-muted text-muted-foreground'
-            )}>
-              {done ? <Check className="w-4 h-4" />
-                : handled ? <X className="w-4 h-4" />
-                : studentName.slice(0, 1)}
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2">
-                <p className="text-sm font-semibold">{studentName}</p>
-                {done && time && (
-                  <span className="text-[10px] text-muted-foreground">{fmtTime(time)}</span>
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground">{classNumber} · {studentId}</p>
-            </div>
-            {parentPhone && (
-              <a
-                href={`tel:${parentPhone}`}
-                onClick={(e) => e.stopPropagation()}
-                className="p-1.5 rounded-full bg-success/10 text-success"
-              >
-                <Phone className="w-3.5 h-3.5" />
-              </a>
+      <div className="flex items-center gap-3">
+        <div className={cn(
+          'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold flex-shrink-0',
+          done ? 'bg-success text-success-foreground'
+            : handled ? 'bg-destructive text-destructive-foreground'
+            : 'bg-primary/10 text-primary'
+        )}>
+          {done ? <Check className="w-4 h-4" strokeWidth={3} />
+            : handled ? <X className="w-4 h-4" strokeWidth={3} />
+            : studentName.slice(0, 1)}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <p className="text-sm font-semibold truncate">{studentName}</p>
+            {done && time && (
+              <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
+                {fmtTime(time)}
+              </span>
+            )}
+            {handled && !done && statusLabel && (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive flex-shrink-0">
+                {statusLabel}
+              </span>
+            )}
+            {done && status === 'late' && (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-warning/15 text-warning flex-shrink-0">
+                遲到
+              </span>
             )}
           </div>
-
-          {/* 缺席/未下車 提示條 */}
-          {handled && !done && statusLabel && (
-            <div className={cn(
-              'text-xs rounded-lg px-2 py-1.5 flex items-center gap-1',
-              'text-destructive bg-destructive/10'
-            )}>
-              <AlertCircle className="w-3 h-3 flex-shrink-0" />
-              <span>{statusLabel}</span>
-            </div>
-          )}
-
-          {/* 準時/遲到 提示條 */}
-          {done && statusLabel && status === 'late' && (
-            <div className="mt-2 text-xs text-warning bg-warning/10 rounded-lg px-2 py-1.5 flex items-center gap-1">
-              <Clock className="w-3 h-3 flex-shrink-0" />
-              <span>遲到</span>
-            </div>
-          )}
-
-          {!handled && mode === 'boarding' && (
-            <div className="grid grid-cols-3 gap-1.5">
-              <Button
-                onClick={onBoarded}
-                size="sm"
-                className="h-9 bg-success text-xs"
-              >
-                <Check className="w-3.5 h-3.5" />
-                已上車
-              </Button>
-              <Button
-                onClick={onLate}
-                size="sm"
-                variant="outline"
-                className="h-9 text-warning border-warning text-xs"
-              >
-                <Clock className="w-3.5 h-3.5" />
-                遲到
-              </Button>
-              <Button
-                onClick={onNoShow}
-                size="sm"
-                variant="outline"
-                className="h-9 text-destructive border-destructive text-xs"
-              >
-                <X className="w-3.5 h-3.5" />
-                缺席
-              </Button>
-            </div>
-          )}
-
-          {!handled && mode === 'dropoff' && (
-            <div className="grid grid-cols-2 gap-1.5">
-              <Button
-                onClick={onBoarded}
-                size="sm"
-                className="h-9 bg-success text-xs"
-              >
-                <Check className="w-3.5 h-3.5" />
-                已下車
-              </Button>
-              <Button
-                onClick={onNoShow}
-                size="sm"
-                variant="outline"
-                className="h-9 text-destructive border-destructive text-xs"
-              >
-                <X className="w-3.5 h-3.5" />
-                未下車
-              </Button>
-            </div>
-          )}
-
-          {notes && (
-            <div className="mt-2 text-xs text-warning bg-warning/10 rounded-lg px-2 py-1.5 flex items-start gap-1">
-              <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-              <span>{notes}</span>
-            </div>
-          )}
-
-          <button
-            onClick={onAddNote}
-            className="text-[10px] text-muted-foreground mt-2 flex items-center gap-1"
+          <p className="text-xs text-muted-foreground truncate">{classNumber} · {studentId}</p>
+        </div>
+        {parentPhone && (
+          <a
+            href={`tel:${parentPhone}`}
+            onClick={(e) => e.stopPropagation()}
+            aria-label={`致電家長 ${studentName}`}
+            className="p-2 rounded-full bg-success/10 text-success active:scale-95 transition-transform flex-shrink-0"
           >
-            <StickyNote className="w-3 h-3" />
-            {notes ? '編輯備註' : '添加備註'}
-          </button>
-        </CardContent>
-      </Card>
-    </motion.div>
+            <Phone className="w-3.5 h-3.5" />
+          </a>
+        )}
+      </div>
+
+      {!handled && (
+        <div className={cn('grid gap-1.5 mt-2.5', mode === 'boarding' ? 'grid-cols-3' : 'grid-cols-2')}>
+          <Button
+            onClick={onBoarded}
+            size="sm"
+            className="h-11 rounded-xl bg-success text-success-foreground text-[13px] active:scale-95"
+          >
+            <Check className="w-4 h-4" strokeWidth={3} />
+            {actionLabel}
+          </Button>
+          {mode === 'boarding' && (
+            <Button
+              onClick={onLate}
+              size="sm"
+              variant="outline"
+              className="h-11 rounded-xl text-warning border-warning/40 text-[13px] active:scale-95"
+            >
+              <Clock className="w-4 h-4" />
+              遲到
+            </Button>
+          )}
+          <Button
+            onClick={onNoShow}
+            size="sm"
+            variant="outline"
+            className="h-11 rounded-xl text-destructive border-destructive/40 text-[13px] active:scale-95"
+          >
+            <X className="w-4 h-4" />
+            {absentLabel}
+          </Button>
+        </div>
+      )}
+
+      {handled && (
+        <button
+          type="button"
+          onClick={onUndo}
+          className="mt-2 w-full h-8 rounded-full bg-muted/60 text-xs text-muted-foreground flex items-center justify-center gap-1 active:scale-[0.98] transition-transform"
+        >
+          <Undo2 className="w-3 h-3" />
+          {done ? `${statusLabel} · 點一下復原` : `${statusLabel} · 點一下復原`}
+        </button>
+      )}
+
+      {notes && (
+        <div className="mt-2 text-xs text-warning bg-warning/10 rounded-lg px-2 py-1.5 flex items-start gap-1">
+          <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+          <span>{notes}</span>
+        </div>
+      )}
+
+      <button
+        onClick={onAddNote}
+        className="text-[10px] text-muted-foreground mt-2 flex items-center gap-1 active:opacity-60"
+      >
+        <StickyNote className="w-3 h-3" />
+        {notes ? '編輯備註' : '添加備註'}
+      </button>
+    </div>
   );
 }

@@ -231,11 +231,13 @@ export default function ParentsPage() {
       const phone = state.phone.trim();
       // 1) 新增家長 (主要聯繫人標記已移至學生層級, 此處不再儲存)
       const newId = STORAGE.genId('parent');
+      const accountName = (state.accountName || '').trim();
       const newParent = {
         id: newId,
         clientId,
         name,
         phone,
+        accountName: accountName || undefined,
         alternatePhone: null,
         homePhone: state.homePhone.trim() || null,
         officePhone: state.officePhone.trim() || null,
@@ -258,14 +260,15 @@ export default function ParentsPage() {
           toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
         }
       }
-      // 3) 同步建立 user 帳號 (供家長登入)
+      // 3) 同步建立 user 帳號 (供家長登入) — 本機 + 雲端雙寫
       const existingUser = STORAGE.users.findByPhone(phone);
       if (existingUser) {
-        STORAGE.users.update(existingUser.id, { password: state.password, name });
+        STORAGE.users.update(existingUser.id, { password: state.password, name, accountName: accountName || undefined });
       } else {
         STORAGE.users.add({
           id: STORAGE.genId('user'),
           phone,
+          accountName: accountName || undefined,
           password: state.password,
           role: 'parent',
           name,
@@ -275,6 +278,31 @@ export default function ParentsPage() {
           status: 'active',
           createdAt: new Date().toISOString(),
         });
+      }
+      // 4) 雲端 user 帳號也一併寫 (避免 syncToStorage 把本機 user 洗掉 → 前台顯示無帳號)
+      try {
+        const { supabaseUsers } = await import('@/lib/supabase-users');
+        const account = STORAGE.users.findByPhone(phone);
+        if (account) {
+          const sbExisting = await supabaseUsers.findByPhone(phone);
+          if (sbExisting.data) {
+            await supabaseUsers.update(sbExisting.data.id, { password: state.password, name, accountName: accountName || null });
+          } else {
+            await supabaseUsers.add({
+              id: account.id,
+              phone: account.phone,
+              accountName: accountName || null,
+              password: account.password,
+              role: 'parent',
+              name: account.name,
+              clientId: account.clientId,
+              status: account.status,
+              createdAt: account.createdAt,
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('[Parents] user cloud push failed:', e);
       }
       // 4) 重新載入 + 關閉
       setParents(STORAGE.parents.getByClient(clientId));

@@ -43,7 +43,8 @@ import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import { supabaseDrivers } from '@/lib/supabase-drivers';
-import { STORAGE } from '@/lib/storage';
+import { supabaseBuses } from '@/lib/supabase-buses';
+import { STORAGE, resolveClientId } from '@/lib/storage';
 import {
   Pill,
   Dot,
@@ -448,6 +449,7 @@ export function DriversConsoleContent({
   }, []);
 
   const openEdit = React.useCallback((d: Driver) => {
+    const boundBus = buses.find((b) => b.driverId === d.id);
     setFormModal({
       open: true,
       mode: 'edit',
@@ -456,36 +458,31 @@ export function DriversConsoleContent({
         phone: d.phone,
         licenseNumber: d.licenseNumber,
         companyId: d.companyId ?? '',
-        status: d.status,
+        assignedBusId: boundBus?.id ?? '',
+        status: d.status ?? 'available',
       },
       editingId: d.id,
     });
-  }, []);
+  }, [buses]);
 
   const handleSave = React.useCallback(
     async (state: DriverFormState) => {
       setIsSaving(true);
       try {
         // 超管新增時若沒有所屬學校 → 掛到第一間學校 (cbl_drivers.client_id 有 FK 必填)
-        const clientId = (() => {
-          try {
-            const raw = localStorage.getItem('cbl_auth');
-            const u = raw ? JSON.parse(raw) : null;
-            if (u?.clientId) return u.clientId as string;
-            // 超管沒有 clientId: 若有關聯校巴/既有司機, 沿用其學校; 否則第一間
-            if (u?.role === 'super_admin' || u?.role === 'system_admin') {
-              const firstBus = STORAGE.buses.getAll()[0];
-              if (firstBus?.clientId) return firstBus.clientId as string;
-              const firstDriver = STORAGE.drivers.getAll()[0];
-              if (firstDriver?.clientId) return firstDriver.clientId as string;
+        // ⚠️ 用共用的 resolveClientId, 確保與其他頁面 (校巴/學生/保姆) 取到同一個 client id。
+        //    這裡自己刻一份 fallback 順序會與 resolveClientId 不同 → 寫出雲端不存在的 client_id → FK violation。
+        const clientId = resolveClientId(
+          (() => {
+            try {
+              const raw = localStorage.getItem('cbl_auth');
+              const u = raw ? JSON.parse(raw) : null;
+              return u?.clientId ?? null;
+            } catch {
+              return null;
             }
-            const clients = STORAGE.clients.getAll();
-            return clients[0]?.id || '';
-          } catch {
-            const clients = STORAGE.clients.getAll();
-            return clients[0]?.id || '';
-          }
-        })();
+          })(),
+        );
         if (!clientId) {
           console.error('[DriversConsole] 無法取得 clientId, 取消儲存');
           toast.error('無法取得客戶端資訊，請重新登入');
@@ -494,14 +491,15 @@ export function DriversConsoleContent({
         const now = new Date().toISOString();
 
         if (formModal.mode === 'add') {
+          const newId = STORAGE.genId('driver');
           const newDriver: Driver = {
-            id: STORAGE.genId('driver'),
+            id: newId,
             clientId,
             name: state.name,
             phone: state.phone,
             licenseNumber: state.licenseNumber,
             photo: null,
-            status: state.status,
+            status: state.status || 'available',
             createdAt: now,
           };
 
@@ -510,6 +508,19 @@ export function DriversConsoleContent({
 
           // 2. 立即更新內部狀態
           setDrivers((prev) => [...prev, newDriver]);
+
+          // 2.5 同步校巴綁定 (反向寫 Bus.driverId)
+          //     ⚠️ 這裡只寫本機, 雲端寫入留到司機建立成功後 (見下方 step 4)
+          //        — 因為 cbl_buses.driver_id 有 FK 指向 cbl_drivers.id,
+          //          司機還沒上雲就先寫綁定會被清成 null。
+          if (state.assignedBusId) {
+            STORAGE.buses.update(state.assignedBusId, { driverId: newId });
+            setBuses((prev) =>
+              prev.map((b) =>
+                b.id === state.assignedBusId ? { ...b, driverId: newId } : b,
+              ),
+            );
+          }
 
           // 3. 同步到 Supabase (背景執行)
           let supabaseResult: { success: boolean; error?: string };
@@ -522,6 +533,18 @@ export function DriversConsoleContent({
               error: supaErr instanceof Error ? supaErr.message : String(supaErr),
             };
           }
+
+          // 4. 司機上雲後才寫校巴綁定 (FK 順序)
+          if (state.assignedBusId && supabaseResult.success) {
+            try {
+              const res = await supabaseBuses.update(state.assignedBusId, { driverId: newId });
+              if (!res.success) console.warn('[DriversConsole] bus binding cloud sync failed:', res.error);
+            } catch (e) {
+              console.warn('[DriversConsole] bus binding cloud sync error:', e);
+            }
+            window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+          }
+
           if (!supabaseResult.success) {
             console.warn('[DriversConsole] Supabase sync failed:', supabaseResult.error);
             toast.warning(`司機已新增，但 Supabase 同步失敗: ${supabaseResult.error}`);
@@ -529,22 +552,46 @@ export function DriversConsoleContent({
             toast.success(`司機 ${state.name} 新增成功！`);
           }
         } else if (formModal.editingId) {
+          const editingId = formModal.editingId;
           const updates: Partial<Driver> = {
             name: state.name,
             phone: state.phone,
             licenseNumber: state.licenseNumber,
-            status: state.status,
+            // 執勤狀態 (表單選填, 未填則維持原值)
+            ...(state.status ? { status: state.status } : {}),
           };
 
           // 1. 先更新 LocalStorage (即時顯示)
-          STORAGE.drivers.update(formModal.editingId, updates);
+          STORAGE.drivers.update(editingId, updates);
 
           // 2. 立即更新內部狀態
           setDrivers((prev) =>
             prev.map((d) =>
-              d.id === formModal.editingId ? { ...d, ...updates } : d,
+              d.id === editingId ? { ...d, ...updates } : d,
             ),
           );
+
+          // 2.5 同步校巴綁定 (反向寫 Bus.driverId)
+          // 規則: 選中的車 → driverId = editingId; 原本綁此司機但沒被選中的車 → driverId = null (解除)
+          // 若選中的車原本綁別的司機 → 換綁 (原司機自動解除, 因 Bus.driverId 只能指向一人)
+          const prevBoundBusIds = new Set(
+            STORAGE.buses.getAll().filter((b) => b.driverId === editingId).map((b) => b.id),
+          );
+          const nextBoundBusIds = new Set(state.assignedBusId ? [state.assignedBusId] : []);
+          const toBind = [...nextBoundBusIds].filter((id) => !prevBoundBusIds.has(id));
+          const toUnbind = [...prevBoundBusIds].filter((id) => !nextBoundBusIds.has(id));
+          if (toBind.length > 0 || toUnbind.length > 0) {
+            toBind.forEach((bid) => STORAGE.buses.update(bid, { driverId: editingId }));
+            toUnbind.forEach((bid) => STORAGE.buses.update(bid, { driverId: null }));
+            setBuses((prev) =>
+              prev.map((b) => {
+                if (toBind.includes(b.id)) return { ...b, driverId: editingId };
+                if (toUnbind.includes(b.id)) return { ...b, driverId: null };
+                return b;
+              }),
+            );
+            window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+          }
 
           // 3. 同步到 Supabase (背景執行)
           let supabaseResult: { success: boolean; error?: string };
@@ -557,6 +604,26 @@ export function DriversConsoleContent({
               error: supaErr instanceof Error ? supaErr.message : String(supaErr),
             };
           }
+
+          // 4. 司機上雲後, 才寫校巴綁定
+          //    ⚠️ 順序很重要: cbl_buses.driver_id 有 FK 指向 cbl_drivers.id。
+          //       司機還沒在雲端就先寫綁定 → 補建司機失敗 → driverId 被清成 null
+          //       → 雲端的綁定就消失了 → 下次 refresh 顯示「未綁定」。
+          if (toBind.length > 0 || toUnbind.length > 0) {
+            for (const bid of [...toBind, ...toUnbind]) {
+              try {
+                const cur = STORAGE.buses.getById(bid);
+                const res = await supabaseBuses.update(bid, { driverId: cur?.driverId ?? null });
+                if (!res.success) {
+                  console.warn('[DriversConsole] bus binding cloud sync failed:', res.error);
+                }
+              } catch (e) {
+                console.warn('[DriversConsole] bus binding cloud sync error:', e);
+              }
+            }
+            window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+          }
+
           if (!supabaseResult.success) {
             console.warn('[DriversConsole] Supabase sync failed:', supabaseResult.error);
             toast.warning(`司機已更新，但 Supabase 同步失敗: ${supabaseResult.error}`);
@@ -899,6 +966,7 @@ export function DriversConsoleContent({
             ? drivers.find((d) => d.id === formModal.editingId)?.name
             : undefined
         }
+        editingId={formModal.editingId}
         context={{ drivers, buses }}
         isSaving={isSaving}
         onSave={handleSave}

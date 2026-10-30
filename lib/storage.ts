@@ -118,6 +118,39 @@ export const userStorage = {
   findByPhone(phone: string): User | undefined {
     return this.getAll().find(u => u.phone === phone);
   },
+  /**
+   * 依「登入帳號」查找 — 帳號可以是電話號碼, 也可以是自訂的帳戶名稱。
+   *
+   * 為什麼需要這個 (而不是只靠 findByPhone):
+   *   保姆 / 家長現在有「帳戶名稱」欄位, 登入時輸入帳戶名稱也要能找到人。
+   *   電話優先 (維持既有行為: 帳號名稱可以跟別人的電話撞名, 電話比較不會)。
+   */
+  findByAccount(account: string): User | undefined {
+    const trimmed = (account || '').trim();
+    if (!trimmed) return undefined;
+    const all = this.getAll();
+    // 1) 先比電話 (完全相同)
+    const byPhone = all.find(u => u.phone === trimmed);
+    if (byPhone) return byPhone;
+    // 2) 再比帳戶名稱 (不分大小寫)
+    const lower = trimmed.toLowerCase();
+    return all.find(u => (u.accountName || '').trim().toLowerCase() === lower);
+  },
+  /** 帳戶名稱是否已被佔用 (同一 tenant 內唯一) */
+  isAccountNameTaken(
+    accountName: string,
+    opts?: { clientId?: string; exceptUserId?: string },
+  ): boolean {
+    const lower = (accountName || '').trim().toLowerCase();
+    if (!lower) return false;
+    return this.getAll().some((u) => {
+      if (opts?.exceptUserId && u.id === opts.exceptUserId) return false;
+      if ((u.accountName || '').trim().toLowerCase() !== lower) return false;
+      // 不同機構之間的同名帳號可以接受 (登入時會在所有帳號中找)
+      if (opts?.clientId && u.clientId && u.clientId !== opts.clientId) return false;
+      return true;
+    });
+  },
   add(user: User) {
     const all = this.getAll();
     all.push(user);

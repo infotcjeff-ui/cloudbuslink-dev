@@ -5,7 +5,6 @@ import { Plus, Search, Edit2, Trash2, IdCard, Phone } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Badge } from '@/components/ui/badge';
 import {
   DialogAnimated as Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
@@ -133,12 +132,7 @@ export default function DriversPage() {
                     {d.name.slice(0, 1)}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <p className="text-sm font-semibold">{d.name}</p>
-                      <Badge variant={d.status === 'available' ? 'success' : d.status === 'on_trip' ? 'warning' : 'secondary'} className="text-[10px]">
-                        {d.status === 'available' ? '可派' : d.status === 'on_trip' ? '行駛中' : '休假'}
-                      </Badge>
-                    </div>
+                    <p className="text-sm font-semibold">{d.name}</p>
                     <p className="text-xs text-muted-foreground">{d.phone} · 駕照 {d.licenseNumber}</p>
                   </div>
                   <a href={`tel:${d.phone}`} className="p-2 rounded-full bg-success/10 text-success">

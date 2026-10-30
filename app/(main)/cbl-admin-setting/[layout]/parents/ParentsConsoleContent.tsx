@@ -325,7 +325,8 @@ export function ParentsConsoleContent({
       if (!q) return true;
       return (
         p.name.toLowerCase().includes(q) ||
-        p.phone.includes(q)
+        p.phone.includes(q) ||
+        (p.accountName ?? '').toLowerCase().includes(q)
       );
     });
   }, [parents, tab, debouncedSearch]);
@@ -377,6 +378,7 @@ export function ParentsConsoleContent({
       name: p.name,
       relationship: p.relationship,
       phone: p.phone,
+      accountName: p.accountName ?? '',
       password: '', // 留空 = 保留現有密碼
       homePhone: p.homePhone ?? '',
       officePhone: p.officePhone ?? '',
@@ -416,11 +418,80 @@ export function ParentsConsoleContent({
       setIsSaving(true);
       try {
         const { STORAGE } = await import('@/lib/storage');
+        const { supabaseUsers } = await import('@/lib/supabase-users');
         const phone = state.phone.trim();
         const name = state.name.trim();
+        const accountName = (state.accountName || '').trim();
         const password = state.password; // 編輯模式下可能為空字串
         const editingId = formModal.editingId;
         const isEdit = formModal.mode === 'edit' && !!editingId;
+
+        /**
+         * 建立 / 更新登入帳號 (cbl_users) — 本機 + 雲端雙寫。
+         *
+         * ⚠️ 這一段是「電話有輸入但顯示無帳號」的根因所在 (跟保姆頁一樣):
+         *   只寫 localStorage、不推 Supabase → 下次 syncToStorage() 會把帳號洗掉。
+         */
+        const upsertLoginAccount = async (opts: {
+          userId: string;
+          phone: string;
+          name: string;
+          accountName: string;
+          password: string;
+          clientId: string;
+          status: 'active' | 'inactive';
+        }): Promise<void> => {
+          const existingLocal = STORAGE.users.findByPhone(opts.phone);
+          const localUser = existingLocal ?? {
+            id: opts.userId,
+            phone: opts.phone,
+            accountName: opts.accountName || undefined,
+            password: opts.password,
+            role: 'parent' as const,
+            name: opts.name,
+            clientId: opts.clientId,
+            status: opts.status,
+            createdAt: new Date().toISOString(),
+          };
+          if (existingLocal) {
+            STORAGE.users.update(existingLocal.id, {
+              name: opts.name,
+              password: opts.password,
+              accountName: opts.accountName || undefined,
+            });
+          } else {
+            STORAGE.users.add(localUser);
+          }
+
+          const sbExisting = await supabaseUsers.findByPhone(opts.phone);
+          if (sbExisting.data) {
+            const res = await supabaseUsers.update(sbExisting.data.id, {
+              name: opts.name,
+              password: opts.password,
+              accountName: opts.accountName || null,
+            });
+            if (!res.success) {
+              console.warn('[ParentsConsole] Supabase user update failed:', res.error);
+              warning?.(`家長資料已更新，但登入帳號雲端同步失敗：${res.error}`);
+            }
+          } else {
+            const res = await supabaseUsers.add({
+              id: localUser.id,
+              phone: localUser.phone,
+              accountName: opts.accountName || null,
+              password: localUser.password,
+              role: 'parent',
+              name: opts.name,
+              clientId: opts.clientId,
+              status: opts.status,
+              createdAt: localUser.createdAt,
+            });
+            if (!res.success) {
+              console.warn('[ParentsConsole] Supabase user add failed:', res.error);
+              warning?.(`家長已新增，但登入帳號雲端同步失敗：${res.error}`);
+            }
+          }
+        };
 
         if (isEdit) {
           // 編輯模式 — 透過 editingId 精準定位 (避免 phone race)
@@ -434,6 +505,7 @@ export function ParentsConsoleContent({
           const parentUpdates = {
             name,
             relationship: state.relationship,
+            accountName: accountName || undefined,
             homePhone: state.homePhone.trim() || null,
             officePhone: state.officePhone.trim() || null,
             address: state.address.trim() || null,
@@ -451,27 +523,16 @@ export function ParentsConsoleContent({
           }
 
           // 同步對應 user 帳號 (用 target.phone 找 — 電話不會被編輯)
-          const linkedUser = STORAGE.users.findByPhone(target.phone);
-          if (linkedUser) {
-            const userPatch: Partial<typeof linkedUser> = { name };
-            if (password) {
-              userPatch.password = password;
-            }
-            STORAGE.users.update(linkedUser.id, userPatch);
-          } else {
-            // 對應 user 不存在 (罕見, 例: 手動刪除 / 資料漂移) → 自動補回
-            STORAGE.users.add({
-              id: STORAGE.genId('user'),
-              phone: target.phone,
-              password: password || target.password || target.phone, // fallback
-              role: 'parent',
-              name,
-              clientId: target.clientId,
-              status: target.status === 'inactive' ? 'inactive' : 'active',
-              createdAt: new Date().toISOString(),
-            });
-            warning?.('對應登入帳號已自動補建, 請通知家長重設密碼');
-          }
+          // 密碼: 有填新密碼 → 更新; 留空 = 保留現有
+          await upsertLoginAccount({
+            userId: STORAGE.genId('user'),
+            phone: target.phone,
+            name,
+            accountName,
+            password: password || target.password || target.phone,
+            clientId: target.clientId,
+            status: target.status === 'inactive' ? 'inactive' : 'active',
+          });
 
           // 同步此家長的學生關聯: 對比 state.studentIds vs 目前 parentIds, 增/刪
           const currentStudentIds = (STORAGE.students.getAll().filter((s) => s.parentIds.includes(editingId!)))
@@ -504,20 +565,20 @@ export function ParentsConsoleContent({
           const existingUser = STORAGE.users.findByPhone(phone);
           if (existingUser) {
             // 電話已被使用: 視情況更新 (若姓名變了也同步, 密碼強制更新)
-            STORAGE.users.update(existingUser.id, { password, name });
+            STORAGE.users.update(existingUser.id, { password, name, accountName: accountName || undefined });
             toastError?.(`電話 ${phone} 已被使用, 已將此筆家長資料併入現有帳號`);
-          } else {
-            STORAGE.users.add({
-              id: STORAGE.genId('user'),
-              phone,
-              password,
-              role: 'parent',
-              name,
-              clientId: authClientId,
-              status: 'active',
-              createdAt: new Date().toISOString(),
-            });
           }
+
+          // 登入帳號 (本機 + 雲端) — 這是「無帳號」bug 的正確修法
+          await upsertLoginAccount({
+            userId: existingUser?.id ?? STORAGE.genId('user'),
+            phone,
+            name,
+            accountName,
+            password,
+            clientId: authClientId,
+            status: 'active',
+          });
 
           // 建立 / 更新 parent
           const existingParent = STORAGE.parents.getAll().find(
@@ -527,6 +588,7 @@ export function ParentsConsoleContent({
           const parentUpdates = {
             name,
             relationship: state.relationship,
+            accountName: accountName || undefined,
             homePhone: state.homePhone.trim() || null,
             officePhone: state.officePhone.trim() || null,
             address: state.address.trim() || null,
@@ -549,6 +611,7 @@ export function ParentsConsoleContent({
               clientId: authClientId,
               name,
               phone,
+              accountName: accountName || undefined,
               alternatePhone: null,
               homePhone: state.homePhone.trim() || null,
               officePhone: state.officePhone.trim() || null,
@@ -626,9 +689,20 @@ export function ParentsConsoleContent({
       });
 
       // 2) 刪除對應 user 登入帳號 (若存在)
+      //    ⚠️ 也要刪雲端 — 否則下次 syncToStorage() 會把這筆帳號「復活」回來。
       const linkedUser = STORAGE.users.findByPhone(phone);
       if (linkedUser && linkedUser.role === 'parent') {
         STORAGE.users.remove(linkedUser.id);
+        try {
+          const { supabaseUsers } = await import('@/lib/supabase-users');
+          const sbRes = await supabaseUsers.remove(linkedUser.id);
+          if (!sbRes.success) {
+            console.warn('[ParentsConsole] Supabase user delete failed:', sbRes.error);
+            warning?.(`家長已從本機刪除，但登入帳號雲端刪除失敗：${sbRes.error}`);
+          }
+        } catch (e) {
+          console.warn('[ParentsConsole] Supabase user delete error:', e);
+        }
       }
 
       // 3) 刪除 parent 本身
@@ -1063,6 +1137,9 @@ function DataTable({
             家長
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
+            帳戶名稱
+          </th>
+          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             電話 (登入帳號)
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
@@ -1106,6 +1183,17 @@ function DataTable({
                     </p>
                   </div>
                 </div>
+              </td>
+
+              {/* 帳戶名稱 (與電話都可登入) */}
+              <td className="px-3 py-2.5 text-[12px] text-slate-700 dark:text-slate-200">
+                {p.accountName ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200/70 dark:bg-blue-950/40 dark:text-blue-300 dark:ring-blue-800/50">
+                    {p.accountName}
+                  </span>
+                ) : (
+                  <span className="text-slate-400 dark:text-slate-500 text-[11px]">—</span>
+                )}
               </td>
 
               {/* 電話 (登入帳號) (copyable chip + 登入狀態 icon) */}

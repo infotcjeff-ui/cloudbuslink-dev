@@ -6,7 +6,6 @@
  * 規格來源: md/organizations-page-style-reference.md
  *   §14 Modal Chrome (Hand-Coded, Not HeroUI)
  *   §16 Form Field Primitives
- *   §17 Toggle Cards (Status)
  *   §21 Modal Footer
  *
  * 範圍: 僅 /cbl-admin-setting/bus/drivers/ 使用。
@@ -15,8 +14,7 @@
  *   - 姓名 (Name)             - 必填
  *   - 電話 (Phone)            - 必填, 8 碼
  *   - 駕照號碼 (License)      - 必填
- *   - 狀態 (Status)           - 必填, toggle cards
- *     - available / on_trip / off_duty
+ *   - 綁定校巴 (Assigned Bus) - 選填, dropdown (反向寫 Bus.driverId)
  *
  * - 與 BusFormModal 風格一致: 不引入 HeroUI, 全用 primitives + Tailwind
  * - 用 framer-motion 進出場 (modalfade=0.14, modalslide=6)
@@ -33,10 +31,9 @@ import {
   Phone,
   Hash,
   UserCog,
-  CheckCircle2,
-  Clock,
-  PowerOff,
   Info,
+  Bus as BusIcon,
+  Activity,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
@@ -47,7 +44,6 @@ import {
   type DriverFormState,
   type DriversPageContext,
 } from './types';
-import type { Driver } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
 /*  LabeledInput — 2-欄 grid 表單欄位                                            */
@@ -115,118 +111,52 @@ function LabeledInput({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  StatusCard — 司機狀態選擇 (3 種 toggle cards)                                 */
+/*  NativeSelect — 包裝 native <select> (與 BusFormModal 一致)                    */
 /* -------------------------------------------------------------------------- */
 
-const STATUS_OPTIONS: {
-  value: Driver['status'];
-  label: string;
-  hint: string;
-  icon: React.ReactNode;
-  ring: string;
-  activeRing: string;
-}[] = [
-  {
-    value: 'available',
-    label: '可派',
-    hint: '尚未指派班次',
-    icon: <CheckCircle2 width={14} height={14} />,
-    ring: 'border-slate-200 bg-white hover:bg-slate-50 dark:bg-slate-900 dark:border-slate-700 dark:hover:bg-slate-800/60',
-    activeRing: 'border-emerald-500 bg-emerald-50/60 ring-1 ring-inset ring-emerald-300 dark:border-emerald-400 dark:bg-emerald-950/40 dark:ring-emerald-700/50',
-  },
-  {
-    value: 'on_trip',
-    label: '行駛中',
-    hint: '正在執行班次',
-    icon: <Clock width={14} height={14} />,
-    ring: 'border-slate-200 bg-white hover:bg-slate-50 dark:bg-slate-900 dark:border-slate-700 dark:hover:bg-slate-800/60',
-    activeRing: 'border-blue-500 bg-blue-50/60 ring-1 ring-inset ring-blue-300 dark:border-blue-400 dark:bg-blue-950/40 dark:ring-blue-700/50',
-  },
-  {
-    value: 'off_duty',
-    label: '休假',
-    hint: '暫停服務',
-    icon: <PowerOff width={14} height={14} />,
-    ring: 'border-slate-200 bg-white hover:bg-slate-50 dark:bg-slate-900 dark:border-slate-700 dark:hover:bg-slate-800/60',
-    activeRing: 'border-slate-500 bg-slate-50 ring-1 ring-inset ring-slate-300 dark:border-slate-400 dark:bg-slate-800 dark:ring-slate-600',
-  },
-];
-
-function StatusCard({
+function NativeSelect({
+  id,
+  label,
   value,
   onChange,
+  required,
+  children,
+  icon,
 }: {
-  value: Driver['status'];
-  onChange: (next: Driver['status']) => void;
+  id: string;
+  label: string;
+  value: string;
+  onChange: (next: string) => void;
+  required?: boolean;
+  children: React.ReactNode;
+  icon?: React.ReactNode;
 }) {
   return (
     <div>
-      <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1.5 dark:text-slate-400">
-        司機狀態 <span className="text-rose-500">*</span>
+      <label
+        htmlFor={id}
+        className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
+      >
+        {label}
+        {required && <span className="text-rose-500 ml-0.5">*</span>}
       </label>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        {STATUS_OPTIONS.map((opt) => {
-          const active = value === opt.value;
-          const activeColor =
-            opt.value === 'available'
-              ? {
-                  dot: 'border-emerald-600 bg-emerald-600',
-                  label: 'text-emerald-900 dark:text-emerald-200',
-                  hint: 'text-emerald-700/80 dark:text-emerald-300/80',
-                }
-              : opt.value === 'on_trip'
-              ? {
-                  dot: 'border-blue-600 bg-blue-600',
-                  label: 'text-blue-900 dark:text-blue-200',
-                  hint: 'text-blue-700/80 dark:text-blue-300/80',
-                }
-              : {
-                  dot: 'border-slate-600 bg-slate-600',
-                  label: 'text-slate-900 dark:text-slate-100',
-                  hint: 'text-slate-700/80 dark:text-slate-300/80',
-                };
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              role="radio"
-              aria-checked={active}
-              onClick={() => onChange(opt.value)}
-              className={cn(
-                'text-left rounded-lg border p-2.5 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
-                active ? opt.activeRing : opt.ring,
-              )}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    'inline-flex h-4 w-4 items-center justify-center rounded-full border-2 shrink-0',
-                    active ? activeColor.dot : 'border-slate-300 dark:border-slate-600',
-                  )}
-                >
-                  {active && <span className="h-1.5 w-1.5 rounded-full bg-white" />}
-                </span>
-                <span
-                  className={cn(
-                    'text-[12.5px] font-semibold inline-flex items-center gap-1',
-                    active ? activeColor.label : 'text-slate-700 dark:text-slate-200',
-                  )}
-                >
-                  {opt.icon}
-                  {opt.label}
-                </span>
-              </div>
-              <p
-                className={cn(
-                  'mt-0.5 text-[10.5px] pl-6',
-                  active ? activeColor.hint : 'text-slate-500 dark:text-slate-400',
-                )}
-              >
-                {opt.hint}
-              </p>
-            </button>
-          );
-        })}
+      <div className="relative">
+        {icon && (
+          <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+            {icon}
+          </span>
+        )}
+        <select
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={cn(
+            'w-full h-9 rounded-md border border-slate-200 bg-white text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors cursor-pointer dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200',
+            icon ? 'pl-8 pr-2.5' : 'px-2.5',
+          )}
+        >
+          {children}
+        </select>
       </div>
     </div>
   );
@@ -271,6 +201,8 @@ export interface DriverFormModalProps {
   initial?: DriverFormState;
   /** 編輯模式時, 顯示姓名作為標識 */
   editingName?: string;
+  /** 編輯中的司機 id — 用來判斷校巴是否已被其他司機綁定 */
+  editingId?: string;
   context: DriversPageContext;
   isSaving: boolean;
   onSave: (state: DriverFormState) => void;
@@ -282,6 +214,7 @@ export function DriverFormModal({
   mode,
   initial,
   editingName,
+  editingId,
   context,
   isSaving,
   onSave,
@@ -364,8 +297,28 @@ export function DriverFormModal({
   const title = mode === 'add' ? '新增司機' : '編輯司機';
   const subtitle =
     mode === 'add'
-      ? '建立司機資料, 含姓名、聯絡電話、駕照號碼與執勤狀態。'
-      : '更新司機資料 — 姓名、電話、駕照號碼或執勤狀態。';
+      ? '建立司機資料, 含姓名、聯絡電話、駕照號碼與綁定校巴。'
+      : '更新司機資料 — 姓名、電話、駕照號碼或綁定校巴。';
+
+  // 校巴選項: 已被其他司機綁定的車要標示 (仍可選 = 換綁, 會解除原司機綁定)
+  const busBoundDriverName = React.useMemo(() => {
+    const m = new Map<string, string>();
+    context.drivers.forEach((d) => {
+      const b = context.buses.find((bus) => bus.driverId === d.id);
+      if (b) m.set(b.id, d.name);
+    });
+    // 編輯中的司機自己的綁定不算佔用
+    if (editingId) {
+      const own = context.buses.find((bus) => bus.driverId === editingId);
+      if (own) m.delete(own.id);
+    }
+    return m;
+  }, [context.buses, context.drivers, editingId]);
+
+  const currentBinding = React.useMemo(
+    () => context.buses.find((b) => b.id === form.assignedBusId) ?? null,
+    [context.buses, form.assignedBusId],
+  );
 
   return (
     <AnimatePresence>
@@ -425,7 +378,7 @@ export function DriverFormModal({
 
             {/* Body */}
             <div className="px-5 py-5 overflow-y-auto flex-1 min-h-0">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 {/* 姓名 */}
                 <div>
                   <LabeledInput
@@ -469,8 +422,25 @@ export function DriverFormModal({
                   />
                 </div>
 
+                {/* 執勤狀態 (選填) */}
+                <div>
+                  <NativeSelect
+                    id="driver-form-status"
+                    label="執勤狀態 (選填)"
+                    value={form.status}
+                    onChange={(v) =>
+                      setForm((p) => ({ ...p, status: v as DriverFormState['status'] }))
+                    }
+                    icon={<Activity width={12} height={12} />}
+                  >
+                    <option value="available">可派</option>
+                    <option value="on_trip">行駛中</option>
+                    <option value="off_duty">休假</option>
+                  </NativeSelect>
+                </div>
+
                 {/* 駕照號碼 (全寬) */}
-                <div className="md:col-span-2">
+                <div className="md:col-span-3">
                   <LabeledInput
                     id="driver-form-license"
                     label="駕照號碼"
@@ -493,12 +463,32 @@ export function DriverFormModal({
                   </p>
                 </div>
 
-                {/* 狀態 (全寬) */}
-                <div className="md:col-span-2">
-                  <StatusCard
-                    value={form.status}
-                    onChange={(v) => setForm((p) => ({ ...p, status: v }))}
-                  />
+                {/* 綁定校巴 (全寬, 選填) */}
+                <div className="md:col-span-3">
+                  <NativeSelect
+                    id="driver-form-bus"
+                    label="綁定校巴 (選填)"
+                    value={form.assignedBusId}
+                    onChange={(v) => setForm((p) => ({ ...p, assignedBusId: v }))}
+                    icon={<BusIcon width={12} height={12} />}
+                  >
+                    <option value="">— 暫不綁定 —</option>
+                    {context.buses.map((b) => {
+                      const occupant = busBoundDriverName.get(b.id);
+                      return (
+                        <option key={b.id} value={b.id}>
+                          {b.plateNumber} · {b.model}
+                          {occupant ? ` (已綁: ${occupant})` : ''}
+                        </option>
+                      );
+                    })}
+                  </NativeSelect>
+                  {context.buses.length === 0 ? (
+                    <p className="mt-1 text-[10.5px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
+                      <Info width={10} height={10} />
+                      尚未建立任何校巴, 請先到校巴頁新增
+                    </p>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -513,6 +503,12 @@ export function DriverFormModal({
                 {form.phone.replace(/\D/g, '') && (
                   <Pill tone="info" size="sm">
                     {form.phone.replace(/\D/g, '')}
+                  </Pill>
+                )}
+                {currentBinding && (
+                  <Pill tone="warning" size="sm">
+                    <BusIcon width={9} height={9} />
+                    {currentBinding.plateNumber}
                   </Pill>
                 )}
               </span>

@@ -191,7 +191,7 @@ function DrawerBody({
       {/* § 1. 基本 */}
       <DrawerSection icon={<Calendar width={14} height={14} />} title="基本">
         <DetailRow label="日期">{row.trip.date}</DetailRow>
-        <DetailRow label="班次類型">{tripTypeZh(row.trip.type)}</DetailRow>
+        <DetailRow label="班次類型">{tripTypeZh(row.trip.type, row.trip.customTypeLabel)}</DetailRow>
         <DetailRow label="計畫時間">
           {fmtHhMm(row.trip.plannedStartTime)} → {fmtHhMm(row.trip.plannedEndTime)}
         </DetailRow>
@@ -351,6 +351,8 @@ function ProgressLine({
   );
 }
 
-function tripTypeZh(t: 'morning' | 'afternoon' | 'custom'): string {
-  return t === 'morning' ? '早班' : t === 'afternoon' ? '午班' : '自訂';
+function tripTypeZh(t: 'morning' | 'afternoon' | 'custom', customLabel?: string | null): string {
+  if (t === 'morning') return '早班';
+  if (t === 'afternoon') return '午班';
+  return customLabel?.trim() || '自訂';
 }

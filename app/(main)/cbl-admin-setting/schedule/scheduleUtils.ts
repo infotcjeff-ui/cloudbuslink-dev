@@ -49,6 +49,8 @@ export interface TripLookupMaps {
   busById: Map<string, Bus>;
   driverById: Map<string, Driver>;
   nannyById: Map<string, Nanny>;
+  /** 校巴 → 已綁定該車的 active 保姆 (trip.nannyId 缺失時的 fallback) */
+  nanniesByBusId: Map<string, Nanny[]>;
   studentById: Map<string, Student>;
   studentsByTripId: Map<string, Student[]>;
   attendancesByTripId: Map<string, AttendanceRow[]>;
@@ -68,6 +70,16 @@ export function buildLookupMaps(
   const busById = new Map(buses.map((b) => [b.id, b]));
   const driverById = new Map(drivers.map((d) => [d.id, d]));
   const nannyById = new Map(nannies.map((n) => [n.id, n]));
+  // 校巴 → 已綁定該車的 active 保姆 (trip.nannyId 缺失/雲端被洗掉時的 fallback)
+  const nanniesByBusId = new Map<string, Nanny[]>();
+  nannies.forEach((n) => {
+    if (n.status !== 'active') return;
+    (n.assignedBusIds ?? []).forEach((busId) => {
+      const arr = nanniesByBusId.get(busId) ?? [];
+      arr.push(n);
+      nanniesByBusId.set(busId, arr);
+    });
+  });
   const studentById = new Map(students.map((s) => [s.id, s]));
   const routeById = new Map(routes.map((r) => [r.id, r]));
 
@@ -98,6 +110,7 @@ export function buildLookupMaps(
     busById,
     driverById,
     nannyById,
+    nanniesByBusId,
     studentById,
     studentsByTripId,
     attendancesByTripId,
@@ -113,7 +126,11 @@ export function joinTripRelationsWithMaps(
 ): TripWithRelations {
   const bus = maps.busById.get(trip.busId);
   const driver = bus?.driverId ? maps.driverById.get(bus.driverId) : undefined;
-  const nanny = trip.nannyId ? maps.nannyById.get(trip.nannyId) : undefined;
+  // 保姆三級解析: 1) trip.nannyId 精確匹配 → 2) 該校巴已綁定的保姆 fallback
+  // (雲端 trips 同步時 nanny 可能被洗掉/不同步, 或舊班次 nannyId 為空)
+  const nanny =
+    (trip.nannyId ? maps.nannyById.get(trip.nannyId) : undefined) ??
+    (trip.busId ? maps.nanniesByBusId.get(trip.busId)?.[0] : undefined);
   const myStudents =
     maps.studentsByTripId.get(trip.id) ??
     (trip.studentIds ?? [])
@@ -195,17 +212,47 @@ export function summarizeProgress(
   });
 
   const totalStops = trip.waypoints.length;
+  // Fallback (bug 3): 打卡已做但進度仍 0 的兩種情況 —
+  //  1) trip 沒有 pickup 站點 (expectedPickups=0) → 用全車學生數做分母
+  //  2) waypoint id 漂移 (班次被編輯/重建站點後, 舊打卡的 waypointId 對不上新站點)
+  //     → 直接按 (tripId + studentId) 去重計算, 不依賴 waypointId 匹配
+  let finalExpected = expectedPickups;
+  let finalBoarded = boardedCount;
+  if (finalExpected === 0 || (finalBoarded === 0 && attendances.length > 0)) {
+    const boardedStudents = new Set<string>();
+    const lateStudents = new Set<string>();
+    const noShowStudents = new Set<string>();
+    attendances.forEach((a) => {
+      if (a.boardingTime || a.dropoffTime) boardedStudents.add(a.studentId);
+      if (a.boardingStatus === 'late') lateStudents.add(a.studentId);
+      if (a.boardingStatus === 'no_show' || a.boardingStatus === 'absent') noShowStudents.add(a.studentId);
+    });
+    const inTrip = (sid: string) =>
+      trip.studentIds.length === 0 || trip.studentIds.includes(sid);
+    const distinctBoarded = [...boardedStudents].filter(inTrip).length;
+    if (finalExpected === 0) {
+      finalExpected = trip.studentIds.length > 0 ? trip.studentIds.length : boardedStudents.size;
+      finalBoarded = distinctBoarded;
+    } else if (finalBoarded === 0 && distinctBoarded > 0) {
+      // waypoint 漂移: 有打卡但對不上站點 → 用去重人數, 避免顯示 0/2 誤導
+      finalBoarded = Math.min(distinctBoarded, finalExpected);
+    }
+    if (lateCount === 0 && lateStudents.size > 0) lateCount = [...lateStudents].filter(inTrip).length;
+    if (noShowCount === 0 && noShowStudents.size > 0) {
+      noShowCount = [...noShowStudents].filter(inTrip).length;
+    }
+  }
   return {
     totalStops,
     completedStops,
-    expectedPickups,
-    boardedCount,
+    expectedPickups: finalExpected,
+    boardedCount: finalBoarded,
     lateCount,
     noShowCount,
     expectedDropoffs,
     droppedCount,
     boardingRate:
-      expectedPickups === 0 ? 0 : Math.min(1, boardedCount / expectedPickups),
+      finalExpected === 0 ? (finalBoarded > 0 ? 1 : 0) : Math.min(1, finalBoarded / finalExpected),
   };
 }
 
@@ -225,10 +272,18 @@ export function applyScheduleFilter(
     if (tab !== 'all' && trip.type !== tab) return false;
     if (filter.dateRange === 'today' && trip.date !== todayIso()) return false;
     if (filter.dateRange === 'tomorrow' && trip.date !== tomorrowIso()) return false;
-    if (
+    if (filter.dateRange === 'yesterday' && trip.date !== yesterdayIso()) return false;
+    // 過去 7 天 (含今日): trip.date 落在 [today-6, today]
+    if (filter.dateRange === 'past7') {
+      const from = addDaysIso(todayIso(), -6);
+      const to = todayIso();
+      if (trip.date < from || trip.date > to) return false;
+    } else if (
       filter.dateRange &&
       filter.dateRange !== 'today' &&
       filter.dateRange !== 'tomorrow' &&
+      filter.dateRange !== 'yesterday' &&
+      filter.dateRange !== 'past7' &&
       filter.dateRange !== 'all' &&
       trip.date !== filter.dateRange
     ) return false;
@@ -283,13 +338,20 @@ export function findConflicts(
   nannies: Nanny[] = [],
   /** P0-1: 只算此窗口內的衝突 (避免 all 模式下歷史全量 O(n²))。傳 undefined = 全量 */
   window?: { from: string; to: string } | null,
+  /** 只保留涉及這些 trip id 的衝突 (listing 為空時不彈紅色 alert) */
+  opts?: { onlyIds?: Set<string> },
 ): TripConflict[] {
   const conflicts: TripConflict[] = [];
 
   // P0-1: 視窗過濾 — 先縮小 n 再分桶比對
-  const inWindow = window
+  let inWindow = window
     ? trips.filter((t) => t.date >= window.from && t.date <= window.to)
     : trips;
+  // 只保留可見清單的班次 (解決: 清單空但紅色 alert 依然顯示)
+  if (opts?.onlyIds) {
+    const only = opts.onlyIds;
+    inWindow = inWindow.filter((t) => only.has(t.id));
+  }
 
   const busById = new Map(buses.map((b) => [b.id, b]));
   const studentById = new Map(students.map((s) => [s.id, s]));
@@ -504,6 +566,24 @@ export function tomorrowIso(): string {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   return localIsoDate(d);
+}
+
+export function yesterdayIso(): string {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return localIsoDate(d);
+}
+
+/** YYYY-MM-DD 加減天 (scheduleUtils 共用版，供 filter/hook 使用, 本地時區中午定錨避 DST) */
+export function addDaysIso(iso: string, days: number): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  const dt = new Date(y, m - 1, d, 12, 0, 0);
+  dt.setDate(dt.getDate() + days);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
 }
 
 export function fmtHhMm(isoOrTime: string | null | undefined): string {

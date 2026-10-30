@@ -94,11 +94,20 @@ async function ensureDriverExists(driverId: string | null | undefined): Promise<
     const driver = STORAGE.drivers.getById(driverId);
     if (!driver) return false;
     const { clientId, id, ...rest } = driver as Record<string, any>;
+    // ⚠️ client_id 有 FK → 本機的 clientId 可能跟雲端不同步,
+    //    直接用會撞 cbl_drivers_client_id_fkey, 導致「補建失敗」→
+    //    呼叫端把 driverId 清成 null → 綁定在雲端就消失了。
+    //    所以先對齊到雲端真的存在的 client id 再寫。
+    const { resolveCloudClientId } = await import('./supabase-drivers');
+    const safeClientId = await resolveCloudClientId(clientId);
     const res = await insertWithColumnFallback('cbl_drivers', {
       ...snakify(rest),
       id,
-      client_id: clientId,
+      client_id: safeClientId,
     });
+    if (!res.success) {
+      console.warn('[Supabase] ensureDriverExists 補建失敗:', driverId, res.error);
+    }
     return res.success;
   } catch {
     return false;
@@ -155,8 +164,50 @@ export const supabaseBuses = {
     const res = await updateWithColumnFallback('cbl_buses', id, snakify(patch));
     if (!res.success) {
       console.error('[Supabase] Failed to update bus:', res.error);
+      return res;
     }
-    return res;
+
+    // 二次驗證: update 對不存在的 id 會回傳 0 row (與 RLS 過濾的表象相同)。
+    // 這裡確實寫入, 但雲端可能根本沒有這輛車 (只在本機建立的資料) — 補建它。
+    try {
+      const { supabase } = await import('./supabase');
+      const { data, error } = await supabase
+        .from('cbl_buses')
+        .select('id')
+        .eq('id', id)
+        .maybeSingle();
+      if (error) return { success: true }; // 驗證失敗不影響已完成的寫入
+      if (!data) {
+        console.warn('[Supabase] bus update: 雲端無此筆, 嘗試補建', id);
+        const { STORAGE } = await import('./storage');
+        const local = STORAGE.buses.getById(id);
+        if (!local) {
+          return { success: false, error: '雲端與本機都找不到這輛校巴' };
+        }
+        // client_id 有 FK → 必須指向雲端 cbl_clients 真的存在的 row
+        const { resolveCloudClientId } = await import('./supabase-drivers');
+        const clientId = await resolveCloudClientId(local.clientId);
+        const rebuilt = await this.add({
+          id: local.id,
+          clientId,
+          companyId: local.companyId ?? null,
+          plateNumber: patch.plateNumber ?? local.plateNumber,
+          model: patch.model ?? local.model,
+          capacity: patch.capacity ?? local.capacity,
+          driverId: patch.driverId ?? local.driverId ?? null,
+          gpsDeviceId: patch.gpsDeviceId ?? local.gpsDeviceId ?? null,
+          status: patch.status ?? local.status,
+          createdAt: local.createdAt,
+        });
+        if (!rebuilt.success) {
+          return { success: false, error: rebuilt.error ?? '雲端補建校巴失敗' };
+        }
+      }
+    } catch (e) {
+      console.warn('[Supabase] bus update verify error:', e);
+    }
+
+    return { success: true };
   },
 
   // 刪除校巴

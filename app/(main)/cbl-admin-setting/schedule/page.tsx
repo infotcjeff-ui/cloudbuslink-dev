@@ -29,6 +29,7 @@ import { useScheduleTrips } from './hooks/useScheduleTrips';
 import { ScheduleConsoleContent } from './ScheduleConsoleContent';
 import { TripFormModal } from './TripFormModal';
 import { TripDetailDrawer } from './TripDetailDrawer';
+import { tomorrowIso, yesterdayIso } from './scheduleUtils';
 import type {
   ScheduleFilter,
   ScheduleTab,
@@ -95,10 +96,28 @@ export default function CblAdminSchedulePage() {
   const data = useScheduleTrips(clientId, filter, tab, isSuperAdmin);
 
   /* ---- Drawer / Modal 動作 ---- */
+  /**
+   * 開啟「新增班次」。
+   *
+   * 帶入篩選中的日期 (2026-10):
+   *   使用者常在「今日」或某指定日期的檢視下按新增, 預設日期應該跟住該上下文,
+   *   否則新增後又要手動改一次日期 (而班次清單預設只顯示「今日」)。
+   *   filter.dateRange 為 'today' / 'tomorrow' / 'all' 等非 ISO 值時 → 退回今日。
+   */
   const openAdd = useCallback(() => {
     setDetailDrawer({ open: false, row: null });
-    setFormModal({ open: true, mode: 'add', initial: null });
-  }, []);
+    const dr = filter.dateRange;
+    const isoDate =
+      /^\d{4}-\d{2}-\d{2}$/.test(dr) ? dr
+      : dr === 'tomorrow' ? tomorrowIso()
+      : dr === 'yesterday' ? yesterdayIso()
+      : undefined;
+    setFormModal({
+      open: true,
+      mode: 'add',
+      initial: isoDate ? { date: isoDate } : null,
+    });
+  }, [filter.dateRange]);
 
   const openEdit = useCallback((row: TripWithRelations) => {
     setDetailDrawer({ open: false, row: null });
@@ -108,12 +127,15 @@ export default function CblAdminSchedulePage() {
       initial: {
         id: row.trip.id,
         type: row.trip.type,
+        customTypeLabel: row.trip.customTypeLabel ?? null,
         date: row.trip.date,
         plannedStartTime: row.trip.plannedStartTime?.slice(0, 5) ?? '07:30',
         plannedEndTime: row.trip.plannedEndTime?.slice(0, 5) ?? '08:30',
         busId: row.trip.busId,
         driverId: row.bus?.driverId ?? '',
-        nannyId: row.trip.nannyId,
+        // 保姆三級解析的寫入側: listing 已用 bound 保姆 fallback 顯示,
+        // 編輯時也要帶入同樣的值, 否則表單 nannyId 為空會被 validate 擋下或存成未指派
+        nannyId: row.trip.nannyId || row.nanny?.id || '',
         studentIds: row.trip.studentIds,
         waypoints: row.trip.waypoints,
         routeId: row.trip.routeId ?? null,
@@ -184,6 +206,7 @@ export default function CblAdminSchedulePage() {
         nannyId: trip.nannyId,
         date: trip.date,
         type: trip.type,
+        customTypeLabel: trip.customTypeLabel ?? null,
         status: trip.status,
         plannedStartTime: trip.plannedStartTime,
         plannedEndTime: trip.plannedEndTime,
@@ -219,13 +242,46 @@ export default function CblAdminSchedulePage() {
       if (route?.clientId) return route.clientId;
       return STORAGE.clients.getAll()[0]?.id || '';
     };
+    // 同一校巴 × 同一日 × 時段重疊 → 硬擋 (bug 2: 新增兩個一樣時段不應成功)
+    // 注意: 時間以 HH:mm 字串比較, 與 findConflicts 的 overlap 語意一致
+    const toMin = (t: string | null | undefined): number => {
+      if (!t) return -1;
+      const m = t.match(/^(\d{2}):(\d{2})/);
+      if (!m) return -1;
+      return Number(m[1]) * 60 + Number(m[2]);
+    };
+    const checkBusOverlap = (ignoreId?: string): string | null => {
+      if (!values.busId || !values.date) return null;
+      const s = toMin(values.plannedStartTime);
+      const e = toMin(values.plannedEndTime);
+      if (s < 0 || e < 0 || !(s < e)) return null;
+      const clash = STORAGE.trips.getAll().find((t) => {
+        if (t.status === 'cancelled') return false;
+        if (ignoreId && t.id === ignoreId) return false;
+        if (t.busId !== values.busId) return false;
+        if (t.date !== values.date) return false;
+        const ts = toMin(t.plannedStartTime);
+        const te = toMin(t.plannedEndTime);
+        if (ts < 0 || te < 0) return false;
+        return s < te && ts < e;
+      });
+      if (!clash) return null;
+      const bus = STORAGE.buses.getById(values.busId);
+      return `校巴 ${bus?.plateNumber ?? ''} 在 ${values.date} ${clash.plannedStartTime}-${clash.plannedEndTime} 已有班次, 時段重疊不可新增`;
+    };
     try {
       if (formModal.mode === 'add' || !values.id) {
+        const clashMsg = checkBusOverlap();
+        if (clashMsg) {
+          toast('error', clashMsg);
+          return;
+        }
         const newId = STORAGE.genId('trip');
         const trip: Trip = {
           id: newId,
           clientId: resolveClientId(),
           type: values.type,
+          customTypeLabel: values.type === 'custom' ? (values.customTypeLabel?.trim() || null) : null,
           date: values.date,
           busId: values.busId,
           nannyId: values.nannyId,
@@ -244,6 +300,8 @@ export default function CblAdminSchedulePage() {
         };
         STORAGE.trips.add(trip);
         window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        // 新增成功後跳到該班次日期 (解決: 選了 10-15 新增成功, 清單仍是今日 → 顯示空白)
+        setFilter((prev) => ({ ...prev, dateRange: trip.date }));
         toast('success', `已建立新班次 ${newId.slice(-6)}`);
 
         // 背景推雲端 (不阻擋 UI)
@@ -257,8 +315,15 @@ export default function CblAdminSchedulePage() {
           toast('error', '找不到原班次');
           return;
         }
+        // 編輯模式同樣硬擋 (排除自己)
+        const clashMsg = checkBusOverlap(values.id);
+        if (clashMsg) {
+          toast('error', clashMsg);
+          return;
+        }
         STORAGE.trips.update(values.id, {
           type: values.type,
+          customTypeLabel: values.type === 'custom' ? (values.customTypeLabel?.trim() || null) : null,
           date: values.date,
           busId: values.busId,
           nannyId: values.nannyId,
@@ -269,6 +334,7 @@ export default function CblAdminSchedulePage() {
           routeId: values.routeId ?? null,
         });
         window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        setFilter((prev) => ({ ...prev, dateRange: values.date }));
         toast('success', `班次 ${values.id.slice(-6)} 已儲存`);
 
         // 背景推雲端 (用 update 後的最新資料)
@@ -285,7 +351,7 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `儲存失敗：${msg}`);
     }
-  }, [clientId, formModal.mode, toast, pushTripToCloud]);
+  }, [clientId, formModal.mode, toast, pushTripToCloud, setFilter]);
 
   const onDelete = useCallback(async (row: TripWithRelations) => {
     if (!confirm(`刪除班次 ${row.trip.id.slice(-6)}？此操作無法撤銷。`)) return;
@@ -429,7 +495,7 @@ export default function CblAdminSchedulePage() {
         if (ready.length > 0) {
           const rows = ready.map((c) => ({
             id: c.id, clientId: c.clientId, busId: c.busId, nannyId: c.nannyId,
-            date: c.date, type: c.type, status: c.status,
+            date: c.date, type: c.type, customTypeLabel: c.customTypeLabel ?? null, status: c.status,
             plannedStartTime: c.plannedStartTime, plannedEndTime: c.plannedEndTime,
             actualStartTime: c.actualStartTime, actualEndTime: c.actualEndTime,
             waypoints: c.waypoints, studentIds: c.studentIds,

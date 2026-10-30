@@ -769,6 +769,7 @@ export function StudentFormModal({
           clientId: effectiveClientId,
           name: parentState.name.trim(),
           phone: parentState.phone.trim(),
+          accountName: (parentState.accountName || '').trim() || undefined,
           alternatePhone: null,
           homePhone: parentState.homePhone.trim() || null,
           officePhone: parentState.officePhone.trim() || null,
@@ -792,6 +793,32 @@ export function StudentFormModal({
             console.warn('[StudentFormModal] Supabase add parent failed:', sbRes.error);
             toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
           }
+        }
+
+        // 同步建立 user 帳號 (本機 + 雲端) — 否則家長頁會顯示「無帳號」
+        {
+          const newAccount = {
+            id: STORAGE.genId('user'),
+            phone: newParent.phone,
+            accountName: newParent.accountName,
+            password: newParent.password,
+            role: 'parent' as const,
+            name: newParent.name,
+            clientId: newParent.clientId,
+            status: 'active' as const,
+            createdAt: new Date().toISOString(),
+          };
+          STORAGE.users.add(newAccount);
+          try {
+            const { supabaseUsers } = await import('@/lib/supabase-users');
+            const res = await supabaseUsers.add(newAccount);
+            if (!res.success) {
+              console.warn('[StudentFormModal] Supabase add user failed:', res.error);
+            }
+          } catch (e) {
+            console.warn('[StudentFormModal] Supabase add user failed:', e);
+          }
+          window.dispatchEvent(new CustomEvent('cbl-users-refresh'));
         }
 
         // 1) 寫入到 inlineParents (讓本次 modal 立即可見)

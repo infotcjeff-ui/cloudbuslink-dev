@@ -21,7 +21,6 @@ import {
   sortTripsByStart,
   applyScheduleFilter,
   findConflicts,
-  todayIso,
 } from '../scheduleUtils';
 import type {
   ScheduleFilter,
@@ -228,19 +227,20 @@ export function useScheduleTrips(
     return m;
   }, [filtered]);
 
-  // P0-1: conflict 只算「篩選日期 ±7 天」窗口
-  const conflictWindow = useMemo(() => {
-    // 簡單做法：以 filter.dateRange 為中心 ±7 天；all/today/tomorrow 用 today 為中心
-    const center =
-      filter.dateRange && filter.dateRange !== 'today' && filter.dateRange !== 'tomorrow' && filter.dateRange !== 'all'
-        ? filter.dateRange
-        : todayIso();
-    return { from: addDaysIso(center, -7), to: addDaysIso(center, 7) };
-  }, [filter.dateRange]);
-
+  // 衝突只按「目前可見清單」計算 — 清單為空時不彈紅色 alert。
+  // 舊版用全部 trips ± 7 天窗口, 今日無班仍顯示其他日期的衝突, 誤導。
+  // 新版直接用 filtered 的 trips, 所見即所得。
   const conflicts: TripConflict[] = useMemo(
-    () => findConflicts(trips, buses, students, drivers, nannies, conflictWindow),
-    [trips, buses, students, drivers, nannies, conflictWindow],
+    () =>
+      findConflicts(
+        filtered.map((r) => r.trip),
+        buses,
+        students,
+        drivers,
+        nannies,
+        null,
+      ),
+    [filtered, buses, students, drivers, nannies],
   );
 
   return {
@@ -255,16 +255,4 @@ export function useScheduleTrips(
     students,
     routes,
   };
-}
-
-/** YYYY-MM-DD 加減天 (本地時區、中午定錨避 DST 問題) */
-function addDaysIso(iso: string, days: number): string {
-  const [y, m, d] = iso.split('-').map(Number);
-  if (!y || !m || !d) return iso;
-  const dt = new Date(y, m - 1, d, 12, 0, 0);
-  dt.setDate(dt.getDate() + days);
-  const yy = dt.getFullYear();
-  const mm = String(dt.getMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
 }

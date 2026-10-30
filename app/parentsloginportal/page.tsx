@@ -8,12 +8,12 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/hooks';
-import { isValidPhone } from '@/lib/utils';
+import { isValidLoginAccount } from '@/lib/auth-lookup';
 
 export default function ParentsLoginPage() {
   const router = useRouter();
   const { login, user, loading } = useAuth();
-  const [phone, setPhone] = useState('');
+  const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState('');
@@ -34,16 +34,16 @@ export default function ParentsLoginPage() {
     e.preventDefault();
     setError('');
 
-    if (!phone.trim()) {
-      setError('請輸入手機號碼');
+    if (!account.trim()) {
+      setError('請輸入帳號名稱或手機號碼');
       return;
     }
     if (!password) {
       setError('請輸入密碼');
       return;
     }
-    if (!isValidPhone(phone)) {
-      setError('請輸入有效的手機號碼 (8位數字)');
+    if (!isValidLoginAccount(account)) {
+      setError('請輸入有效的帳號名稱或手機號碼 (8位數字)');
       return;
     }
     if (password.length < 6) {
@@ -53,7 +53,7 @@ export default function ParentsLoginPage() {
 
     setSubmitting(true);
     // 只允許 parent 角色登入
-    const result = login(phone, password, ['parent']);
+    const result = login(account, password, ['parent']);
     setSubmitting(false);
 
     if (!result.ok) {
@@ -99,19 +99,25 @@ export default function ParentsLoginPage() {
           <CardContent className="p-6">
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium">手機號碼</label>
+                <label className="text-sm font-medium">帳號名稱 / 手機號碼</label>
                 <div className="relative">
                   <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                   <Input
-                    type="tel"
-                    inputMode="numeric"
-                    placeholder="請輸入 8 位手機號碼"
+                    type="text"
+                    inputMode="text"
+                    placeholder="請輸入帳號名稱或 8 位手機號碼"
                     className="pl-10"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                    autoComplete="tel"
+                    value={account}
+                    onChange={(e) => setAccount(e.target.value.trim())}
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  可使用「帳號名稱」或「8 位手機號碼」登入
+                </p>
               </div>
 
               <div className="space-y-2">

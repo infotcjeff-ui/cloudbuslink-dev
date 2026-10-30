@@ -1,6 +1,41 @@
 // Supabase 司機 CRUD 操作
 import { camelize, snakify } from './supabase-case';
 
+/**
+ * 解析一個「雲端真的存在的」client id。
+ *
+ * 背景: cbl_drivers.client_id 有 FK → cbl_clients(id)。
+ *   本機 localStorage 的 clientId 可能是舊的 / 不同步的 id,
+ *   直接拿去 insert 會撞 FK violation (cbl_drivers_client_id_fkey)。
+ *
+ * 處置順序:
+ *   1. 傳進來的 id 若雲端存在 → 用它
+ *   2. 否則 → 用雲端第一間 cbl_clients (只有一間時就是它)
+ *   3. 雲端連一間都沒有 → 回傳原值, 讓呼叫端自己處理錯誤
+ */
+export async function resolveCloudClientId(preferred?: string | null): Promise<string> {
+  try {
+    const { supabase } = await import('./supabase');
+    if (preferred) {
+      const { data } = await supabase
+        .from('cbl_clients')
+        .select('id')
+        .eq('id', preferred)
+        .maybeSingle();
+      if (data) return preferred;
+    }
+    const { data: first } = await supabase
+      .from('cbl_clients')
+      .select('id')
+      .limit(1)
+      .maybeSingle();
+    if (first?.id) return first.id;
+  } catch (e) {
+    console.warn('[Supabase] resolveCloudClientId failed:', e);
+  }
+  return preferred || '';
+}
+
 // 司機 CRUD 操作
 export const supabaseDrivers = {
   /**
@@ -135,7 +170,43 @@ export const supabaseDrivers = {
     }
 
     if (!data) {
-      console.warn('[Supabase] update driver was silently rejected by RLS', id, patch);
+      // ⚠️ 這裡不一定是 RLS 拒絕 —— 更常見的是「雲端根本沒有這筆資料」。
+      // update 對不存在的 id 回傳 0 row, 跟 RLS 過濾掉的效果一模一樣,
+      // 所以原本一律回報「RLS 政策拒絕」是誤導 (真正的 RLS 錯誤會走上面的 error 分支)。
+      //
+      // 處置: 確認雲端有沒有這筆 → 沒有就用 localStorage 的完整資料補建,
+      // 再套用 patch。這讓「只在本機建立的司機」也能推上雲端。
+      const exists = await this.exists(id);
+      if (!exists) {
+        console.warn('[Supabase] update driver: 雲端無此筆, 嘗試補建', id);
+        const { STORAGE } = await import('./storage');
+        const local = STORAGE.drivers.getById(id);
+        if (!local) {
+          return { success: false, error: '雲端與本機都找不到這位司機' };
+        }
+        // ⚠️ client_id 有 FK → 必須指向雲端 cbl_clients 真的存在的 row。
+        //    本機的 clientId 可能跟雲端不同步 (例如本機還在用舊的 demo client id),
+        //    直接用本機值會撞 FK violation (cbl_drivers_client_id_fkey)。
+        //    所以先確認, 對不上就改用雲端第一間學校。
+        const clientId = await resolveCloudClientId(local.clientId);
+        const rebuilt = await this.add({
+          id: local.id,
+          clientId,
+          companyId: local.companyId ?? null,
+          name: patch.name ?? local.name,
+          phone: patch.phone ?? local.phone,
+          licenseNumber: patch.licenseNumber ?? local.licenseNumber,
+          photo: patch.photo ?? local.photo ?? null,
+          status: patch.status ?? local.status,
+          createdAt: local.createdAt,
+        });
+        if (!rebuilt.success) {
+          return { success: false, error: rebuilt.error ?? '雲端補建司機失敗' };
+        }
+        return { success: true };
+      }
+
+      console.warn('[Supabase] update driver returned 0 rows (RLS 可能過濾)', id, patch);
       return {
         success: false,
         error: 'RLS 政策拒絕 (無更新權限)',

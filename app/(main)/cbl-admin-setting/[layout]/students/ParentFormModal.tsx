@@ -23,6 +23,7 @@ import {
   X,
   Save,
   User,
+  UserCog,
   Phone as PhoneIcon,
   Home as HomeIcon,
   Briefcase,
@@ -66,6 +67,7 @@ export const EMPTY_PARENT_FORM: ParentFormState = {
   name: '',
   relationship: 'father',
   phone: '',
+  accountName: '',
   password: '',
   homePhone: '',
   officePhone: '',
@@ -81,6 +83,11 @@ export interface ParentFormState {
   name: string;
   relationship: ParentRelationship;
   phone: string;
+  /**
+   * 帳戶名稱 (選填) — 與「行動電話」都可作為登入帳號。
+   * 規則: 3-32 位英數字元 / _ . - ; 同一機構內不可重複。
+   */
+  accountName: string;
   password: string;
   homePhone: string;
   officePhone: string;
@@ -631,6 +638,17 @@ export function ParentFormModal({
     ) ?? null;
   }, [form.phone, existingParents, editingId]);
 
+  // 檢查帳戶名稱是否已被其他家長使用 (同一機構內唯一)
+  const accountNameTakenByOther = React.useMemo(() => {
+    const v = form.accountName.trim().toLowerCase();
+    if (!v) return null;
+    return existingParents.find(
+      (p) =>
+        (p.accountName || '').trim().toLowerCase() === v &&
+        p.id !== editingId,
+    ) ?? null;
+  }, [form.accountName, existingParents, editingId]);
+
   // 校驗 (家長層級不再檢查「主要聯繫人」標記; 主要聯繫人已改為「學生視角」)
   // - 編輯模式: 密碼改為選填 (留空 = 保留現有密碼), 但若有填則至少 4 字元
   // - 電話在編輯模式由 UI 鎖住, 不需重複校驗
@@ -643,6 +661,11 @@ export function ParentFormModal({
     ? '行動電話需要 8 碼'
     : phoneTakenByOther
     ? `此電話已被「${phoneTakenByOther.name}」使用`
+    : form.accountName.trim() &&
+      !/^[a-zA-Z0-9_.-]{3,32}$/.test(form.accountName.trim())
+    ? '帳戶名稱為 3-32 位英數字元'
+    : accountNameTakenByOther
+    ? `此帳戶名稱已被「${accountNameTakenByOther.name}」使用`
     : !isEdit && !form.password
     ? '請設定「家長登入密碼」'
     : isEdit && form.password && form.password.length < 4
@@ -791,6 +814,25 @@ export function ParentFormModal({
                       ) : undefined
                     }
                   />
+                </div>
+
+                {/* Row 2b: 帳戶名稱 (選填, 跨整列) */}
+                <div>
+                  <LabeledInput
+                    id="parent-form-account-name"
+                    label="帳戶名稱"
+                    value={form.accountName}
+                    onChange={(v) =>
+                      setForm((p) => ({ ...p, accountName: v.trim().slice(0, 32) }))
+                    }
+                    placeholder="例如 chan-tai-man (選填, 與電話皆可登入)"
+                    maxLength={32}
+                    icon={<UserCog width={12} height={12} />}
+                    rightHint={<span>選填</span>}
+                  />
+                  <p className="text-[10.5px] text-slate-500 dark:text-slate-400 -mt-0.5">
+                    設定後, 家長可用「帳戶名稱」或「電話號碼」登入 (3-32 位英數字元, 同一機構內不可重複)。
+                  </p>
                 </div>
 
                 {/* Row 3: 住家電話 / 公司電話 (選填) */}

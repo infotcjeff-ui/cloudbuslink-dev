@@ -91,6 +91,12 @@ const TRIP_TYPE_LABEL: Record<TripType, string> = {
   custom: '自訂',
 };
 
+/** 班次類型顯示 — 自訂且有自訂名稱時顯示該名稱 (e.g. 課外活動), 否則退回預設 */
+function tripTypeDisplay(t: { type: TripType; customTypeLabel?: string | null }): string {
+  if (t.type === 'custom' && t.customTypeLabel?.trim()) return t.customTypeLabel.trim();
+  return TRIP_TYPE_LABEL[t.type];
+}
+
 const PAGE_SIZE = 8;
 
 const STATUS_TONE: Record<TripStatus, 'primary' | 'warning' | 'success' | 'danger'> = {
@@ -295,7 +301,7 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
       const prog = data.progress[trip.id];
       rows.push({
         日期: trip.date,
-        班次類型: TRIP_TYPE_LABEL[trip.type],
+        班次類型: tripTypeDisplay(trip),
         開始: trip.plannedStartTime,
         結束: trip.plannedEndTime,
         校巴: bus?.plateNumber || '未指派',
@@ -459,21 +465,51 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
             layoutId="schedule-tab-pill"
           />
 
+          {(() => {
+            // 指定 ISO 日期 (非 today/tomorrow/yesterday/past7/all) → 顯示 date input
+            const DR = filter.dateRange;
+            const isCustomDate =
+              !!DR && !['today', 'tomorrow', 'yesterday', 'past7', 'all'].includes(DR);
+            return (
           <div className="ml-auto flex items-center gap-2">
             {/* 日期快速切換 */}
             <select
               aria-label="日期快速切換"
-              value={filter.dateRange}
+              value={isCustomDate ? '__custom__' : filter.dateRange}
               onChange={(e) => {
-                onFilterChange({ ...filter, dateRange: e.target.value });
+                const v = e.target.value;
+                if (v === '__custom__') {
+                  // 切到日期 input 時預設帶今日, 讓用戶可直接改
+                  onFilterChange({ ...filter, dateRange: todayIso() });
+                } else {
+                  onFilterChange({ ...filter, dateRange: v });
+                }
                 setPage(1);
               }}
               className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
             >
               <option value="today">今日</option>
               <option value="tomorrow">明日</option>
+              <option value="yesterday">昨日</option>
+              <option value="past7">過去 7 天</option>
               <option value="all">全部日期</option>
+              <option value="__custom__">指定日期…</option>
             </select>
+            {/* 指定日期 input — 選「指定日期」或目前已是某 ISO 日期時顯示 */}
+            {isCustomDate && (
+              <input
+                type="date"
+                aria-label="指定日期"
+                value={filter.dateRange}
+                onChange={(e) => {
+                  if (e.target.value) {
+                    onFilterChange({ ...filter, dateRange: e.target.value });
+                    setPage(1);
+                  }
+                }}
+                className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+              />
+            )}
 
             {/* 排序 */}
             <select
@@ -516,15 +552,17 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
               )}
             </div>
           </div>
+            );
+          })()}
         </div>
 
-        {/* Conflict Banner (P0-1: 只算 ±7 天窗口) */}
-        {data.conflicts.length > 0 && (
+        {/* Conflict Banner (所見即所得: 只顯示目前可見清單的衝突, 清單空時不顯示) */}
+        {sorted.length > 0 && data.conflicts.length > 0 && (
           <div className="mx-5 mb-3 rounded-md border border-rose-200 bg-rose-50 dark:border-rose-800/60 dark:bg-rose-950/30">
             <div className="flex items-center gap-2 px-3 py-2 text-rose-700 dark:text-rose-300">
               <AlertTriangle width={14} height={14} />
               <span className="text-[12px] font-semibold">
-                近 7 天偵測到 {data.conflicts.length} 項衝突 (以學生優先)
+                目前清單偵測到 {data.conflicts.length} 項衝突 (以學生優先)
               </span>
             </div>
             <ul className="px-3 pb-2 space-y-1">
@@ -719,9 +757,7 @@ function DataTable({
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             出席進度
           </th>
-          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
-            狀態
-          </th>
+          {/* 狀態欄暫時隱藏 (需求 #4) — 保留 onChangeStatus / DetailDrawer 邏輯, 只藏 listing */}
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-right dark:bg-slate-800/95">
             操作
           </th>
@@ -771,7 +807,7 @@ function DataTable({
               {/* 班次類型 */}
               <td className="px-3 py-2.5">
                 <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-medium', tripTypePillClass(trip.type))}>
-                  {TRIP_TYPE_LABEL[trip.type]}
+                  {tripTypeDisplay(trip)}
                 </span>
               </td>
               {/* 校巴 / 司機 */}
@@ -821,49 +857,7 @@ function DataTable({
               <td className="px-3 py-2.5">
                 <AttendanceProgressBar prog={prog} />
               </td>
-              {/* 狀態 (點擊切換) */}
-              <td className="px-3 py-2.5 relative">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setStatusMenuFor(statusMenuFor === trip.id ? null : trip.id)
-                  }
-                  className={cn(
-                    'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium cursor-pointer',
-                    statusPillClass(trip.status),
-                  )}
-                >
-                  {STATUS_LABEL[trip.status]}
-                </button>
-                <AnimatePresence>
-                  {statusMenuFor === trip.id && (
-                    <motion.div
-                      initial={{ opacity: 0, y: -4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ duration: 0.12, ease: 'easeOut' }}
-                      className="absolute z-30 mt-1 right-0 rounded-md border border-slate-200 bg-white shadow-md overflow-hidden dark:bg-slate-900 dark:border-slate-700"
-                      onMouseLeave={() => setStatusMenuFor(null)}
-                    >
-                      {(['scheduled', 'in_progress', 'completed', 'cancelled'] as TripStatus[]).map((s) => (
-                        <button
-                          key={s}
-                          type="button"
-                          onClick={() => {
-                            onChangeStatus(row, s);
-                            setStatusMenuFor(null);
-                          }}
-                          className={cn(
-                            'block w-full px-3 py-1.5 text-left text-[11px] hover:bg-slate-50 dark:hover:bg-slate-800',
-                            trip.status === s ? 'text-violet-600 font-semibold' : 'text-slate-700 dark:text-slate-200',
-                          )}
-                        >
-                          {STATUS_LABEL[s]}
-                        </button>
-                      ))}
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </td>
+              {/* 狀態欄暫時隱藏 (需求 #4) — 保留 onChangeStatus / DetailDrawer 邏輯, 只藏 listing */}
               {/* 操作 */}
               <td className="px-3 py-2.5">
                 <div className="flex items-center justify-end gap-1 opacity-80">
@@ -972,6 +966,8 @@ function EmptyState({
   const dateLabel =
     dateRange === 'today' ? '今日'
     : dateRange === 'tomorrow' ? '明日'
+    : dateRange === 'yesterday' ? '昨日'
+    : dateRange === 'past7' ? '過去 7 天'
     : dateRange === 'all' ? '' : dateRange;
   return (
     <motion.div

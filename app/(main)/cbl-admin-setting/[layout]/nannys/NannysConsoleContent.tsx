@@ -284,6 +284,7 @@ export function NannysConsoleContent({
       return (
         n.name.toLowerCase().includes(q) ||
         n.phone.includes(q) ||
+        (n.accountName ?? '').toLowerCase().includes(q) ||
         (n.employeeId ?? '').toLowerCase().includes(q)
       );
     });
@@ -376,6 +377,10 @@ export function NannysConsoleContent({
       initial: {
         name: n.name,
         phone: n.phone,
+        accountName: n.accountName ?? '',
+        // 編輯模式: 密碼留空 = 保留現有密碼, 不回填明文
+        password: '',
+        photo: n.photo ?? null,
         employeeId: n.employeeId,
         employeeIdLocked: true,
         assignedBusIds: [...n.assignedBusIds],
@@ -391,8 +396,10 @@ export function NannysConsoleContent({
       setIsSaving(true);
       try {
         const { STORAGE } = await import('@/lib/storage');
+        const { supabaseUsers } = await import('@/lib/supabase-users');
         const phone = state.phone.trim();
         const name = state.name.trim();
+        const accountName = state.accountName.trim();
         const editingId = formModal.editingId;
         const isEdit = formModal.mode === 'edit' && !!editingId;
 
@@ -403,6 +410,85 @@ export function NannysConsoleContent({
           ? formModal.editingEmployeeId || ''
           : STORAGE.nannies.generateEmployeeId(authClientId);
 
+        /**
+         * 建立 / 更新登入帳號 (cbl_users)。
+         *
+         * ⚠️ 這一段是「電話有輸入但顯示無帳號」的根因所在:
+         *   舊版只在 localStorage 建 user, 沒有 push 到 Supabase。
+         *   而 useSyncUsers() → supabaseUsers.syncToStorage() → STORAGE.users.setAll(db)
+         *   會用雲端資料「整批覆蓋」localStorage → 剛建立的帳號憑空消失
+         *   → 表格的 usersByPhone.get(n.phone) 找不到 → 顯示「無帳號」。
+         *
+         *   現在: 本機寫完 → 立刻 push 到 cbl_users → 同步成功才視為完成。
+         *   帳戶名稱一併寫入, 讓「帳戶名稱」也能當登入帳號。
+         *   密碼: 新增模式必填 (表單已校驗); 編輯模式有填才更新, 留空保留現有。
+         */
+        const upsertLoginAccount = async (opts: {
+          userId: string;
+          phone: string;
+          name: string;
+          accountName: string;
+          /** 明文密碼; 空字串 = 不更新密碼 (僅編輯模式) */
+          password: string;
+          clientId: string;
+        }): Promise<void> => {
+          const existingUser = STORAGE.users.findByPhone(opts.phone);
+          const trimmedPwd = opts.password.trim();
+          const localUser = existingUser ?? {
+            id: opts.userId,
+            phone: opts.phone,
+            accountName: opts.accountName || undefined,
+            password: trimmedPwd,
+            role: 'nanny' as const,
+            name: opts.name,
+            clientId: opts.clientId,
+            status: 'active' as const,
+            createdAt: new Date().toISOString(),
+          };
+          // 本機先寫 (含帳戶名稱; 有填密碼才更新密碼)
+          if (existingUser) {
+            STORAGE.users.update(existingUser.id, {
+              name: opts.name,
+              accountName: opts.accountName || undefined,
+              ...(trimmedPwd ? { password: trimmedPwd } : {}),
+            });
+          } else {
+            STORAGE.users.add(localUser);
+          }
+
+          // 再推雲端
+          const sbExisting = await supabaseUsers.findByPhone(opts.phone);
+          if (sbExisting.data) {
+            const res = await supabaseUsers.update(sbExisting.data.id, {
+              name: opts.name,
+              accountName: opts.accountName || null,
+              role: 'nanny',
+              clientId: opts.clientId,
+              ...(trimmedPwd ? { password: trimmedPwd } : {}),
+            });
+            if (!res.success) {
+              console.warn('[NannysConsole] Supabase user update failed:', res.error);
+              toast.warning(`保姆資料已更新，但登入帳號雲端同步失敗：${res.error}`);
+            }
+          } else {
+            const res = await supabaseUsers.add({
+              id: localUser.id,
+              phone: localUser.phone,
+              accountName: opts.accountName || null,
+              password: localUser.password,
+              role: 'nanny',
+              name: opts.name,
+              clientId: opts.clientId,
+              status: 'active',
+              createdAt: localUser.createdAt,
+            });
+            if (!res.success) {
+              console.warn('[NannysConsole] Supabase user add failed:', res.error);
+              toast.warning(`保姆已新增但登入帳號雲端同步失敗：${res.error}`);
+            }
+          }
+        };
+
         if (isEdit) {
           const target = STORAGE.nannies.getById(editingId!);
           if (!target) return;
@@ -410,6 +496,8 @@ export function NannysConsoleContent({
           const updates = {
             name,
             // 電話不允許修改 (是登入帳號) — 沿用既有電話
+            accountName: accountName || undefined,
+            photo: state.photo,
             assignedBusIds: state.assignedBusIds,
             // Nanny 介面本身沒有 description 欄位 — 透過 cast 強行寫入 (供將來擴充 / 顯示用)
             ...({ description: state.description } as any),
@@ -417,62 +505,50 @@ export function NannysConsoleContent({
 
           STORAGE.nannies.update(target.id, updates);
 
-          // 同步對應 user 帳號 (用 target.phone 找)
-          const linkedUser = STORAGE.users.findByPhone(target.phone);
-          if (linkedUser) {
-            STORAGE.users.update(linkedUser.id, { name });
-          } else {
-            // 對應 user 不存在 → 自動補回 (預設密碼與電話相同)
-            STORAGE.users.add({
-              id: STORAGE.genId('user'),
-              phone: target.phone,
-              password: target.phone,
-              role: 'nanny',
-              name,
-              clientId: target.clientId,
-              status: 'active',
-              createdAt: new Date().toISOString(),
-            });
-          }
+          // 同步對應 user 帳號 (用 target.phone 找) — 同時推回雲端
+          // 密碼留空 = 保留現有, 有填才更新
+          await upsertLoginAccount({
+            userId: STORAGE.genId('user'),
+            phone: target.phone,
+            name,
+            accountName,
+            password: state.password,
+            clientId: target.clientId,
+          });
 
           // 推回雲端 (背景)
           const { supabaseNannies } = await import('@/lib/supabase-entities');
           const sbRes = await supabaseNannies.update(target.id, updates);
           if (!sbRes.success) {
             console.warn('[NannysConsole] Supabase update failed:', sbRes.error);
-            toast.warning(`保姆資料已更新，但雲端同步失敗：${sbRes.error}`);
+            toast.warning(`保姆資料已更新但雲端同步失敗：${sbRes.error}`);
           }
         } else {
           // Add mode
-          const existingUser = STORAGE.users.findByPhone(phone);
-          if (existingUser) {
-            STORAGE.users.update(existingUser.id, { name });
-          } else {
-            STORAGE.users.add({
-              id: STORAGE.genId('user'),
-              phone,
-              password: phone,
-              role: 'nanny',
-              name,
-              clientId: authClientId,
-              status: 'active',
-              createdAt: new Date().toISOString(),
-            });
-          }
-
           const newNannyId = STORAGE.genId('nanny');
           const newNanny = {
             id: newNannyId,
             clientId: authClientId,
             name,
             phone,
+            accountName: accountName || undefined,
             employeeId,
-            photo: null,
+            photo: state.photo,
             assignedBusIds: state.assignedBusIds,
             status: 'active' as const,
             createdAt: new Date().toISOString(),
           };
           STORAGE.nannies.add(newNanny);
+
+          // 建立登入帳號 (本機 + 雲端) — 這是「無帳號」bug 的正確修法
+          await upsertLoginAccount({
+            userId: STORAGE.genId('user'),
+            phone,
+            name,
+            accountName,
+            password: state.password,
+            clientId: authClientId,
+          });
 
           // 推回雲端 (背景)
           const { supabaseNannies } = await import('@/lib/supabase-entities');
@@ -483,14 +559,25 @@ export function NannysConsoleContent({
           }
         }
 
+        // 帳號清單有變動 → 通知所有監聽端重載 (表格的「可登入 / 無帳號」標記)
+        window.dispatchEvent(new CustomEvent('cbl-users-refresh'));
+
         setFormModal((p) => ({
           ...p,
           open: false,
         }));
         if (isEdit) {
-          toast.success(`保姆「${name}」資料已更新`);
+          toast.success(
+            state.password.trim()
+              ? `保姆「${name}」資料已更新 (含新密碼)`
+              : `保姆「${name}」資料已更新`,
+          );
         } else {
-          toast.success(`保姆「${name}」新增成功！登入帳號已建立 (密碼預設為電話)`);
+          toast.success(
+            accountName
+              ? `保姆「${name}」新增成功！登入帳號已建立 (帳戶名稱: ${accountName})`
+              : `保姆「${name}」新增成功！登入帳號已建立`,
+          );
         }
         // 保姆事件有兩種拼法並存 → 用共用 helper 同時送兩種 (相容所有監聽端)
         dispatchNannyRefresh();
@@ -537,9 +624,21 @@ export function NannysConsoleContent({
       });
 
       // 2) 刪除對應 user 登入帳號 (若存在)
+      //    ⚠️ 也要刪雲端 — 否則下次 syncToStorage() 會把這筆帳號「復活」回來,
+      //    保姆已不存在但帳號還能登入。
       const linkedUser = STORAGE.users.findByPhone(phone);
       if (linkedUser && linkedUser.role === 'nanny') {
         STORAGE.users.remove(linkedUser.id);
+        try {
+          const { supabaseUsers } = await import('@/lib/supabase-users');
+          const sbRes = await supabaseUsers.remove(linkedUser.id);
+          if (!sbRes.success) {
+            console.warn('[NannysConsole] Supabase user delete failed:', sbRes.error);
+            toast.warning(`保姆已從本機刪除，但登入帳號雲端刪除失敗：${sbRes.error}`);
+          }
+        } catch (e) {
+          console.warn('[NannysConsole] Supabase user delete error:', e);
+        }
       }
 
       // 3) 刪除 nanny 本身
@@ -735,7 +834,7 @@ export function NannysConsoleContent({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜尋姓名、電話或員工編號…"
+              placeholder="搜尋姓名、電話、帳戶名稱或員工編號…"
               className="h-8 w-full rounded-md border border-slate-200 bg-white pl-7 pr-7 text-[12px] text-slate-700 placeholder:text-slate-400 cursor-text focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-300 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
             />
             {search && (
@@ -904,9 +1003,18 @@ function NannyDetailPopup({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-3 dark:border-slate-700/80">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-100 shrink-0 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800/50">
-                <Heart width={18} height={18} />
-              </div>
+              {nanny.photo ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={nanny.photo}
+                  alt={nanny.name}
+                  className="h-9 w-9 rounded-lg object-cover ring-1 ring-inset ring-slate-200 shrink-0 dark:ring-slate-700"
+                />
+              ) : (
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-100 shrink-0 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800/50">
+                  <Heart width={18} height={18} />
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <h2 className="text-[14px] font-semibold text-slate-900 dark:text-slate-100">
                   {nanny.name}
@@ -936,6 +1044,14 @@ function NannyDetailPopup({
                   </p>
                 </div>
                 <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 dark:bg-slate-800/60 dark:border-slate-700">
+                  <p className="text-[10px] uppercase tracking-[0.06em] font-semibold text-slate-500 dark:text-slate-400">
+                    帳戶名稱
+                  </p>
+                  <p className="text-[14px] font-semibold font-mono text-slate-900 dark:text-slate-100 mt-0.5 tabular-nums">
+                    {nanny.accountName || '—'}
+                  </p>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 dark:bg-slate-800/60 dark:border-slate-700 col-span-2">
                   <p className="text-[10px] uppercase tracking-[0.06em] font-semibold text-slate-500 dark:text-slate-400">
                     登入密碼
                   </p>
@@ -1113,6 +1229,9 @@ function DataTable({
             員工編號
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
+            帳戶名稱
+          </th>
+          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             電話 (登入帳號)
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
@@ -1143,9 +1262,18 @@ function DataTable({
               {/* 保姆 (avatar + name) — 規範 §12 */}
               <td className="px-5 py-2.5">
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex-shrink-0 w-8 h-8 rounded-md bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-100 flex items-center justify-center text-[12px] font-semibold dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800/50">
-                    {n.name.slice(0, 1)}
-                  </div>
+                  {n.photo ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={n.photo}
+                      alt={n.name}
+                      className="flex-shrink-0 w-8 h-8 rounded-md object-cover ring-1 ring-inset ring-slate-200 dark:ring-slate-700"
+                    />
+                  ) : (
+                    <div className="flex-shrink-0 w-8 h-8 rounded-md bg-rose-50 text-rose-600 ring-1 ring-inset ring-rose-100 flex items-center justify-center text-[12px] font-semibold dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800/50">
+                      {n.name.slice(0, 1)}
+                    </div>
+                  )}
                   <div className="min-w-0">
                     <p
                       className="text-[12px] font-medium text-slate-900 truncate max-w-[180px] dark:text-slate-100"
@@ -1176,6 +1304,17 @@ function DataTable({
                   {n.employeeId}
                   <Copy width={9} height={9} />
                 </button>
+              </td>
+
+              {/* 帳戶名稱 (與電話都可登入) */}
+              <td className="px-3 py-2.5 text-[12px] text-slate-700 dark:text-slate-200">
+                {n.accountName ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-200/70 dark:bg-blue-950/40 dark:text-blue-300 dark:ring-blue-800/50">
+                    {n.accountName}
+                  </span>
+                ) : (
+                  <span className="text-slate-400 dark:text-slate-500 text-[11px]">—</span>
+                )}
               </td>
 
               {/* 電話 (登入帳號) */}

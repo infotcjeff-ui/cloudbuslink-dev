@@ -10,6 +10,7 @@ import {
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import { cn, fmtTime, currentTimeStamp, tripStatusLabel, tripTypeLabel, waypointTypeLabel } from '@/lib/utils';
@@ -21,6 +22,7 @@ export default function TripDetailPage() {
   const { user } = useAuth();
   const [trip, setTrip] = useState<Trip | null>(null);
   const [tick, setTick] = useState(0);
+  const [confirmAction, setConfirmAction] = useState<'complete' | 'cancel' | null>(null);
 
   useEffect(() => {
     if (!params.id) return;
@@ -56,18 +58,20 @@ export default function TripDetailPage() {
   };
 
   const completeTrip = () => {
-    if (!confirm('確定完成此班次?')) return;
+    if (!trip) return;
     STORAGE.trips.update(trip.id, {
       status: 'completed',
       actualEndTime: currentTimeStamp(),
     });
     setTrip({ ...trip, status: 'completed', actualEndTime: currentTimeStamp() });
+    setConfirmAction(null);
   };
 
   const cancelTrip = () => {
-    if (!confirm('確定取消此班次?')) return;
+    if (!trip) return;
     STORAGE.trips.update(trip.id, { status: 'cancelled' });
     setTrip({ ...trip, status: 'cancelled' });
+    setConfirmAction(null);
   };
 
   const status = tripStatusLabel(trip.status);
@@ -235,12 +239,12 @@ export default function TripDetailPage() {
                 <CheckCircle2 className="w-4 h-4" />
                 開始點名打卡
               </Button>
-              <Button onClick={completeTrip} variant="outline" className="w-full h-12">
+              <Button onClick={() => setConfirmAction('complete')} variant="outline" className="w-full h-12">
                 <CheckCircle2 className="w-4 h-4" />
                 完成班次
               </Button>
               <Button
-                onClick={cancelTrip}
+                onClick={() => setConfirmAction('cancel')}
                 variant="ghost"
                 className="w-full h-10 text-destructive"
               >
@@ -251,6 +255,23 @@ export default function TripDetailPage() {
           )}
         </div>
       )}
+      {/* 中置確認：完成 / 取消班次 */}
+      <ConfirmDialog
+        open={confirmAction !== null}
+        onOpenChange={(open) => { if (!open) setConfirmAction(null); }}
+        title={confirmAction === 'cancel' ? '取消此班次?' : '完成此班次?'}
+        description={
+          confirmAction === 'cancel'
+            ? '取消後班次狀態將變更, 需要時可重新安排。'
+            : '確認將班次標記為已完成?'
+        }
+        confirmLabel={confirmAction === 'cancel' ? '確定取消' : '確定完成'}
+        tone={confirmAction === 'cancel' ? 'destructive' : 'success'}
+        onConfirm={() => {
+          if (confirmAction === 'cancel') cancelTrip();
+          else if (confirmAction === 'complete') completeTrip();
+        }}
+      />
     </div>
   );
 }

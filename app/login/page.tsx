@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { PageLoader } from '@/components/PageLoader';
 import { useAuth } from '@/lib/hooks';
-import { isValidPhone } from '@/lib/utils';
+import { isValidLoginAccount } from '@/lib/auth-lookup';
 import { initWithSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 import type { UserRole } from '@/lib/types';
 
@@ -73,7 +73,6 @@ export default function LoginPage() {
   const router = useRouter();
   const { login, user, loading } = useAuth();
   const [tab, setTab] = useState<PortalTab>('admin');
-  const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
   const [showPwd, setShowPwd] = useState(false);
   const [error, setError] = useState('');
@@ -123,7 +122,6 @@ export default function LoginPage() {
 
   // 切換 tab 時清空表單與錯誤
   useEffect(() => {
-    setPhone('');
     setPassword('');
     setError('');
     if (phoneInputRef.current) phoneInputRef.current.value = '';
@@ -135,11 +133,11 @@ export default function LoginPage() {
     setError('');
 
     // 從 uncontrolled input 的 ref 讀取即時值
-    const phoneVal = phoneInputRef.current?.value ?? '';
+    const accountVal = phoneInputRef.current?.value ?? '';
     const pwdVal = password;
 
-    if (!phoneVal.trim()) {
-      setError('請輸入手機號碼或帳號');
+    if (!accountVal.trim()) {
+      setError('請輸入手機號碼或帳號名稱');
       return;
     }
     if (!pwdVal) {
@@ -147,18 +145,10 @@ export default function LoginPage() {
       return;
     }
 
-    // 管理員入口的帳號可以是 8 位手機號碼, 也可以是英數字的帳號名稱
-    // (例如 super_admin 的自訂登入帳號)。其他入口只接受 8 位手機號碼。
-    const isAdminLogin = tab === 'admin';
-    const isValidAccount = isAdminLogin
-      ? isValidPhone(phoneVal) || /^[a-zA-Z0-9_.-]{3,32}$/.test(phoneVal)
-      : isValidPhone(phoneVal);
-    if (!isValidAccount) {
-      setError(
-        isAdminLogin
-          ? '請輸入 8 位手機號碼或有效的帳號名稱'
-          : '請輸入有效的手機號碼 (8位數字)',
-      );
+    // 所有入口 (管理員 / 家長 / 保姆) 都接受「8 位手機號碼」或「帳戶名稱」。
+    // 帳戶名稱: 3-32 位英數字元 / _ . -  (例如 `siu-ming`, `nanny01`)
+    if (!isValidLoginAccount(accountVal)) {
+      setError('請輸入有效的 8 位手機號碼或帳號名稱');
       return;
     }
     if (pwdVal.length < 6) {
@@ -167,7 +157,7 @@ export default function LoginPage() {
     }
 
     setSubmitting(true);
-    const result = login(phoneVal, pwdVal, config.allowedRoles);
+    const result = login(accountVal, pwdVal, config.allowedRoles);
 
     if (!result.ok) {
       setSubmitting(false);
@@ -327,7 +317,7 @@ export default function LoginPage() {
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
                 <label className="text-sm font-medium">
-                  {tab === 'admin' ? '帳號 / 手機號碼' : '手機號碼'}
+                  {tab === 'admin' ? '帳號 / 手機號碼' : '帳號名稱 / 手機號碼'}
                 </label>
                 <div className="relative">
                   <Phone className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -335,25 +325,22 @@ export default function LoginPage() {
                     ref={phoneInputRef}
                     id="phone-input"
                     type="text"
-                    inputMode={tab === 'admin' ? 'text' : 'numeric'}
+                    inputMode="text"
                     autoComplete="off"
                     autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
-                    placeholder={tab === 'admin' ? '請輸入帳號或 8 位手機號碼' : '請輸入 8 位手機號碼'}
+                    placeholder="請輸入帳號名稱或 8 位手機號碼"
                     className="flex h-11 w-full rounded-xl border border-input bg-background pl-10 pr-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-50"
                     defaultValue=""
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') e.preventDefault();
                     }}
-                    onBeforeInput={(e) => {
-                      // 管理員 tab 允許輸入所有字元；其他 tab 只限數字
-                      if (tab !== 'admin' && !/^\d$/.test(e.data ?? '')) {
-                        e.preventDefault();
-                      }
-                    }}
                   />
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  可使用「帳號名稱」或「8 位手機號碼」登入
+                </p>
               </div>
 
               <div className="space-y-2">

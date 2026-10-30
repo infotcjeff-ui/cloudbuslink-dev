@@ -27,6 +27,9 @@ import {
   AlertCircle,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Info,
   Save,
   Plus,
   Pencil,
@@ -92,6 +95,7 @@ export function TripFormModal({
   const toast = useToast();
   /* ---- 表單狀態 ---- */
   const [type, setType] = React.useState<TripType>(initial?.type ?? 'morning');
+  const [customTypeLabel, setCustomTypeLabel] = React.useState<string>(initial?.customTypeLabel ?? '');
   const [date, setDate] = React.useState<string>(initial?.date ?? localIsoDate());
   const [plannedStartTime, setPlannedStartTime] = React.useState(initial?.plannedStartTime ?? '07:30');
   const [plannedEndTime, setPlannedEndTime] = React.useState(initial?.plannedEndTime ?? '08:30');
@@ -105,6 +109,17 @@ export function TripFormModal({
   const [errors, setErrors] = React.useState<Record<string, string>>({});
   const [saving, setSaving] = React.useState(false);
   const [success, setSuccess] = React.useState(false);
+
+  /**
+   * Wizard 步驟 (2026-10 重排):
+   *   'template' — 第 1 步: 只顯示「選擇路線模板」(全屏卡片列表)
+   *   'form'     — 第 2 步: 顯示 基本 / 指派人員 / 乘客 (學生) / 上落車地點與時間 / 預覽
+   *
+   * 編輯模式一律 'form' (既有班次可能 routeId=null, 不能強制要求模板)。
+   */
+  const [step, setStep] = React.useState<'template' | 'form'>('template');
+  /** 新增模式且仍在第 1 步 → 顯示模板選擇頁 */
+  const isTemplateStep = mode === 'add' && step === 'template';
 
   /**
    * waypoints 的「來源」— 決定要不要自動重算站點。
@@ -127,6 +142,7 @@ export function TripFormModal({
    */
   const templateSnapshotRef = React.useRef<{
     type: TripType;
+    customTypeLabel: string;
     plannedStartTime: string;
     plannedEndTime: string;
     busId: string;
@@ -142,6 +158,25 @@ export function TripFormModal({
    */
   const skipNextBusEffectRef = React.useRef(false);
 
+  /**
+   * 路線模板 baseline — 記住「套用模板當下」模板帶入咗咩值。
+   *
+   * 用嚟偵測使用者有冇改動模板帶入嘅欄位:
+   *   busId / driverId / nannyId / studentIds / waypoints / plannedStartTime / plannedEndTime
+   * 偏離 baseline = 使用者改過 → 顯示「以下改動只適用於今次新增的班次」提示。
+   *
+   * ⚠️ baseline 只喺「套用模板」嗰刻寫入, 唔會隨住使用者改動而更新,
+   *    所以比較嘅係「模板原始值 vs 而家嘅值」。
+   * 用 state (唔係 ref) 係因為 UI 要隨住 baseline 改變即時重繪。
+   */
+  const [routeBaseline, setRouteBaseline] = React.useState<{
+    busId: string;
+    driverId: string;
+    nannyId: string;
+    studentIds: string[];
+    waypointSig: string;
+  } | null>(null);
+
   // 「在表單內新增校巴」inline mini form
   const [inlineBuses, setInlineBuses] = React.useState<BusType[]>([]);
   const [busMiniOpen, setBusyMiniOpen] = React.useState(false);
@@ -151,6 +186,8 @@ export function TripFormModal({
   // 「在表單內新增司機」inline mini form（中央彈出，與校巴 / 保姆同款）
   const [inlineDrivers, setInlineDrivers] = React.useState<Driver[]>([]);
   const [driverMiniOpen, setDriverMiniOpen] = React.useState(false);
+  // 「乘客 (學生)」popup — 學生名單可能好長 (30+), 主表單只顯示摘要, 點擊開 popup 勾選
+  const [studentsPopupOpen, setStudentsPopupOpen] = React.useState(false);
 
   /** 直接從 STORAGE 讀取全部校巴 (繞過 clientId 過濾) */
   const [storageBuses, setStorageBuses] = React.useState<BusType[]>([]);
@@ -166,6 +203,7 @@ export function TripFormModal({
   React.useEffect(() => {
     if (!open) return;
     setType((initial?.type as TripType) ?? 'morning');
+    setCustomTypeLabel(initial?.customTypeLabel ?? '');
     setDate(initial?.date ?? localIsoDate());
     setPlannedStartTime(initial?.plannedStartTime ?? '07:30');
     setPlannedEndTime(initial?.plannedEndTime ?? '08:30');
@@ -183,6 +221,7 @@ export function TripFormModal({
     // B0 / C0: 清掉模板快照與 bus-effect 跳過旗標，避免上一次開啟的狀態污染
     templateSnapshotRef.current = null;
     skipNextBusEffectRef.current = false;
+    setRouteBaseline(null);
     setErrors({});
     setSuccess(false);
     setInlineBuses([]);
@@ -191,7 +230,42 @@ export function TripFormModal({
     setNannyMiniOpen(false);
     setInlineDrivers([]);
     setDriverMiniOpen(false);
+    // 新增模式 → 停在第 1 步 (選路線模板); 編輯模式 → 直接顯示表單
+    setStep(mode === 'add' ? 'template' : 'form');
   }, [open, initial, mode]);
+
+  /**
+   * 編輯模式: 由「路線模板本身」計 baseline。
+   *
+   * 新增模式 baseline 係套用模板嗰刻寫入 (見 applyRouteTemplate)。
+   * 編輯模式冇「套用模板」呢個動作, 所以要由 template + routeStudentIds
+   * 即場計出模板原始值, 再同班次現況比較。
+   */
+  React.useEffect(() => {
+    if (!open || mode !== 'edit') return;
+    const r = (context.routes ?? []).find((rr) => rr.id === initial?.routeId);
+    if (!r) {
+      setRouteBaseline(null);
+      return;
+    }
+    const { start, end } = routeTimeRange(r);
+    const rIds = routeStudentIds(r);
+    const wps = routeStopsToWaypoints(r, {
+      studentIds: rIds,
+      genId: () => 'wp',
+      pickupTime: start,
+      dropoffTime: end,
+    });
+    setRouteBaseline({
+      busId: r.busId ?? '',
+      driverId: r.driverId ?? '',
+      nannyId: r.nannyId ?? '',
+      studentIds: [...rIds],
+      waypointSig: wps
+        .map((w) => `${w.type}:${w.location.name}:${w.scheduledTime}:${[...w.studentIds].sort().join(',')}`)
+        .join('|'),
+    });
+  }, [open, mode, initial?.routeId, context.routes]);
 
   /* ---- 衍生 ---- */
   // bus 查找要包含 inline 新增的校巴（否則剛新增完預覽顯示「—」）
@@ -254,10 +328,59 @@ export function TripFormModal({
   }, [routeId, selectedRoute, busStudents, context.students]);
 
   /**
+   * 單行摘要用的已選學生名單 — 太多只顯示頭幾個 + 「…等 N 位」,
+   * 避免單行欄位被長名單撐爆 (truncate 會處理, 但呢度直接控字數更乾淨)。
+   */
+  const selectedStudentNames = React.useMemo(() => {
+    const names = displayStudents
+      .filter((s) => studentIds.includes(s.id))
+      .map((s) => s.name);
+    if (names.length === 0) return '';
+    if (names.length <= 3) return names.join('、');
+    return `${names.slice(0, 3).join('、')}…等 ${names.length} 位`;
+  }, [displayStudents, studentIds]);
+
+  /**
+   * 偏離模板 baseline 嘅欄位清單。
+   *
+   * 用途: 只有當使用者真係改動咗模板帶入嘅欄位時, 才需要提示
+   *       「以下改動只適用於今次新增的班次」。冇改過就唔好騷擾用戶。
+   *
+   * 比較項目 (全部都係模板帶入嘅 field):
+   *   - 校巴 / 司機 / 保姆
+   *   - 學生名單
+   *   - 站點 (位置 + 類型 + 預定時間)
+   *   - 開始 / 結束時間
+   */
+  const routeDeviations = React.useMemo(() => {
+    if (!routeBaseline) return [] as string[];
+    const out: string[] = [];
+
+    if (busId !== routeBaseline.busId) out.push('綁定校巴');
+    // 司機欄顯示值會 fallback 到 bus.driverId, 所以比較實際 state
+    if (driverId !== routeBaseline.driverId) out.push('指派司機');
+    if (nannyId !== routeBaseline.nannyId) out.push('跟車保姆');
+
+    // 學生名單 (比較 id 集合, 唔理順序)
+    const baseSet = new Set(routeBaseline.studentIds);
+    const nowSet = new Set(studentIds);
+    const studentsChanged =
+      baseSet.size !== nowSet.size || [...baseSet].some((id) => !nowSet.has(id));
+    if (studentsChanged) out.push('乘客 (學生)');
+
+    // 站點 (位置 + 類型 + 時間 + 學生 的簽名)
+    const nowSig = waypoints
+      .map((w) => `${w.type}:${w.location.name}:${w.scheduledTime}:${[...w.studentIds].sort().join(',')}`)
+      .join('|');
+    if (nowSig !== routeBaseline.waypointSig) out.push('上落車地點與時間');
+
+    return out;
+  }, [routeBaseline, busId, driverId, nannyId, studentIds, waypoints]);
+
+  /**
    * 此校巴已綁定的保姆 (busId 在 nannies.assignedBusIds 內)
    * 這只是「綁了這台車的保姆候選」, 用於自動帶入與下拉選單。
-   */
-  const boundNannies = React.useMemo(
+   */  const boundNannies = React.useMemo(
     () => context.nannies.filter(
       (n) => n.status === 'active' && (n.assignedBusIds ?? []).includes(busId),
     ),
@@ -323,6 +446,7 @@ export function TripFormModal({
     if (!templateSnapshotRef.current) {
       templateSnapshotRef.current = {
         type,
+        customTypeLabel,
         plannedStartTime,
         plannedEndTime,
         busId,
@@ -341,6 +465,8 @@ export function TripFormModal({
 
     // 班次類型 + 起訖時間 (跟模板一致, 避免顯示 07:30-08:30 但模板是 07:15-08:40)
     setType(routeShiftToTripType(r.shiftType));
+    // 套用模板時清空自訂名稱 — 模板類型由 shiftType 決定, 避免舊自訂字串殘留誤導
+    setCustomTypeLabel('');
     const { start, end } = routeTimeRange(r);
     if (start) setPlannedStartTime(start);
     if (end) setPlannedEndTime(end);
@@ -364,7 +490,20 @@ export function TripFormModal({
     });
     setWaypoints(wps);
     waypointSourceRef.current = 'route';
-  }, [routes, type, plannedStartTime, plannedEndTime, busId, driverId, nannyId, studentIds, waypoints]);
+
+    // 記住模板帶入嘅原始值 → 之後可以偵測使用者改咗邊啲欄位
+    setRouteBaseline({
+      busId: r.busId ?? '',
+      driverId: r.driverId ?? '',
+      nannyId: r.nannyId ?? '',
+      studentIds: [...rIds],
+      waypointSig: wps
+        .map((w) => `${w.type}:${w.location.name}:${w.scheduledTime}:${[...w.studentIds].sort().join(',')}`)
+        .join('|'),
+    });
+    // Wizard: 套用模板後自動跳到第 2 步 (表單)
+    setStep('form');
+  }, [routes, type, customTypeLabel, plannedStartTime, plannedEndTime, busId, driverId, nannyId, studentIds, waypoints]);
 
   /**
    * B2: 取消套用路線模板 → 還原套用前的快照（人員＋學生＋時間＋站點）。
@@ -373,8 +512,11 @@ export function TripFormModal({
   const revertRouteTemplate = React.useCallback(() => {
     const snap = templateSnapshotRef.current;
     setRouteId('');
+    // 清 baseline — 冇模板就唔應該再有「偏離模板」嘅提示
+    setRouteBaseline(null);
     if (snap) {
       setType(snap.type);
+      setCustomTypeLabel(snap.customTypeLabel);
       setPlannedStartTime(snap.plannedStartTime);
       setPlannedEndTime(snap.plannedEndTime);
       // 還原 busId 同一拍也會觸發 bus-effect，同樣要跳過一次
@@ -529,12 +671,24 @@ export function TripFormModal({
     if (plannedStartTime && plannedEndTime && plannedStartTime >= plannedEndTime) {
       e.end = '結束時間需晚於開始時間';
     }
-    if (!busId) e.busId = '請選擇校巴';
-    if (!nannyId) e.nannyId = '請選擇保姆';
-    if (studentIds.length === 0) e.students = '請選擇至少一位學生';
-    if (waypoints.length === 0) e.waypoints = '請安排至少一個站點';
-    if (bus && studentIds.length > bus.capacity) {
-      e.capacity = `人數 ${studentIds.length} 已超出校巴容量 ${bus.capacity}`;
+    if (type === 'custom' && !customTypeLabel.trim()) e.customTypeLabel = '請輸入自訂班次名稱';
+
+    /**
+     * 人員 / 學生 / 站點 三區只喺「已套用路線模板」時顯示（新增模式）。
+     * 所以新增模式冇模板 → 唔應該用隱藏欄位嘅校驗擋住用戶，
+     * 而係明確要求先揀模板（否則用戶只見到「請檢查表單」但搵唔到錯）。
+     * 編輯模式則照常校驗（既有班次可能有 routeId=null, 但欄位仍然顯示）。
+     */
+    if (mode === 'add' && !routeId) {
+      e.routeId = '請先套用路線模板, 再調整人員、學生與站點';
+    } else {
+      if (!busId) e.busId = '請選擇校巴';
+      if (!nannyId) e.nannyId = '請選擇保姆';
+      if (studentIds.length === 0) e.students = '請選擇至少一位學生';
+      if (waypoints.length === 0) e.waypoints = '請安排至少一個站點';
+      if (bus && studentIds.length > bus.capacity) {
+        e.capacity = `人數 ${studentIds.length} 已超出校巴容量 ${bus.capacity}`;
+      }
     }
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -542,7 +696,11 @@ export function TripFormModal({
 
   const handleSubmit = async () => {
     if (!validate()) {
-      toast.error('請檢查並修正表單欄位');
+      toast.error(
+        mode === 'add' && !routeId
+          ? '請先套用路線模板, 再調整人員、學生與站點'
+          : '請檢查並修正表單欄位',
+      );
       return;
     }
     setSaving(true);
@@ -550,6 +708,7 @@ export function TripFormModal({
       await onSave({
         id: initial?.id,
         type,
+        customTypeLabel: type === 'custom' ? (customTypeLabel.trim() || null) : null,
         date,
         plannedStartTime,
         plannedEndTime,
@@ -617,7 +776,9 @@ export function TripFormModal({
                 </h2>
                 <p className="text-[11px] text-slate-500 truncate dark:text-slate-400">
                   {mode === 'add'
-                    ? '建立班次, 含基本資料、指派人員、學生與站點。'
+                    ? isTemplateStep
+                      ? '第 1 步 — 選擇路線模板'
+                      : '第 2 步 — 確認基本資料、指派人員、學生與站點。'
                     : '更新班次基本資料、指派人員、學生或站點。'}
                 </p>
               </div>
@@ -633,26 +794,79 @@ export function TripFormModal({
 
             {/* Body — scrollable */}
             <div className="flex-1 min-h-0 overflow-y-auto">
+              {isTemplateStep ? (
+                /* ============ 第 1 步: 選擇路線模板 (全屏) ============ */
+                <RouteTemplateStep
+                  routes={routes}
+                  selectedId={routeId}
+                  buses={[...context.buses, ...inlineBuses, ...storageBuses]}
+                  students={context.students}
+                  onSelect={(id) => {
+                    applyRouteTemplate(id);
+                    const applied = routes.find((r) => r.id === id);
+                    toast.info(
+                      `已套用路線模板「${applied?.name ?? ''}」— 下方改動只影響今次班次, 不會改動模板本身`,
+                      6000,
+                    );
+                  }}
+                />
+              ) : (
               <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-5">
                 {/* 左欄 */}
                 <div className="px-5 lg:px-5 py-5 space-y-5 min-w-0">
+                {/* 已選路線模板 (第 1 步的結果摘要, 可按「更換模板」回去重選) */}
+                {mode === 'add' && (
+                <Section icon={<RouteIcon width={14} height={14} />} title="路線模板">
+                  {selectedRoute ? (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="min-w-0 flex-1 rounded-md border border-blue-200 bg-blue-50/60 px-3 py-2 dark:border-blue-800/50 dark:bg-blue-950/30">
+                        <p className="text-[12.5px] font-semibold text-blue-900 truncate dark:text-blue-200">
+                          {selectedRoute.code} · {selectedRoute.name}
+                        </p>
+                        <p className="text-[11px] text-blue-700/80 dark:text-blue-300/80 truncate">
+                          {shiftTypeLabel(selectedRoute.shiftType)} · {fmtRouteTime(selectedRoute)} · {selectedRoute.stops?.length ?? 0} 站
+                        </p>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setStep('template')}
+                      >
+                        更換模板
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-[12px] text-slate-500 inline-flex items-center gap-1 dark:text-slate-400">
+                        <AlertCircle width={12} height={12} />
+                        尚未選擇路線模板 — 請返回第 1 步選擇
+                      </p>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => setStep('template')}
+                      >
+                        返回選擇模板
+                      </Button>
+                    </div>
+                  )}
+                </Section>
+                )}
                 {/* 基本 */}
                 <Section icon={<Calendar width={14} height={14} />} title="基本" n="1">
                   <div className="grid grid-cols-2 gap-3">
-                    <Field label="日期" error={errors.date}>
-                      <input
-                        type="date"
-                        value={date}
-                        onChange={(e) => setDate(e.target.value)}
-                        className={cn(
-                          'w-full h-9 rounded-md border bg-white text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:text-slate-200',
-                          errors.date
-                            ? 'border-rose-300 dark:border-rose-700'
-                            : 'border-slate-200 dark:border-slate-700',
-                        )}
+                    <Field label="日期及時間" error={errors.date || errors.start || errors.end}>
+                      <SameWidthDateTimeField
+                        date={date}
+                        startTime={plannedStartTime}
+                        endTime={plannedEndTime}
+                        onDateChange={setDate}
+                        onStartChange={setPlannedStartTime}
+                        onEndChange={setPlannedEndTime}
+                        hasError={!!(errors.date || errors.start || errors.end)}
                       />
                     </Field>
-                    <Field label="班次類型">
+                    <Field label="班次類型" error={errors.customTypeLabel}>
                       <div className="flex items-center gap-1">
                         {(['morning', 'afternoon', 'custom'] as TripType[]).map((t) => (
                           <button
@@ -671,32 +885,17 @@ export function TripFormModal({
                           </button>
                         ))}
                       </div>
-                    </Field>
-                    <Field label="開始時間" error={errors.start}>
-                      <input
-                        type="time"
-                        value={plannedStartTime}
-                        onChange={(e) => setPlannedStartTime(e.target.value)}
-                        className={cn(
-                          'w-full h-9 rounded-md border bg-white px-2.5 text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:text-slate-200',
-                          errors.start
-                            ? 'border-rose-300 dark:border-rose-700'
-                            : 'border-slate-200 dark:border-slate-700',
-                        )}
-                      />
-                    </Field>
-                    <Field label="結束時間" error={errors.end}>
-                      <input
-                        type="time"
-                        value={plannedEndTime}
-                        onChange={(e) => setPlannedEndTime(e.target.value)}
-                        className={cn(
-                          'w-full h-9 rounded-md border bg-white px-2.5 text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:text-slate-200',
-                          errors.end
-                            ? 'border-rose-300 dark:border-rose-700'
-                            : 'border-slate-200 dark:border-slate-700',
-                        )}
-                      />
+                      {/* 自訂班次名稱 — 選「自訂」時出現, 右邊預覽即時跟著變 */}
+                      {type === 'custom' && (
+                        <input
+                          type="text"
+                          value={customTypeLabel}
+                          onChange={(e) => setCustomTypeLabel(e.target.value)}
+                          placeholder="請輸入自訂班次名稱 (e.g. 課外活動、補習班…)"
+                          maxLength={20}
+                          className="mt-2 w-full h-9 rounded-md border border-slate-200 bg-white px-2.5 text-[13px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                        />
+                      )}
                     </Field>
                   </div>
                   <Field label="備註 (選填)">
@@ -710,67 +909,62 @@ export function TripFormModal({
                   </Field>
                 </Section>
 
-                {/* 路線模板 (Phase 2-A) */}
-                <Section icon={<RouteIcon width={14} height={14} />} title="路線模板" n="2">
+                {/* 路線模板 — 編輯模式沿用既有模板選單 (可更換 / 取消套用) */}
+                {mode === 'edit' && (
+                <Section icon={<RouteIcon width={14} height={14} />} title="路線模板">
                   {routes.length === 0 ? (
                     <p className="text-[12px] text-slate-500 inline-flex items-center gap-1">
                       <AlertCircle width={12} height={12} />
-                      尚未建立路線模板 — 可到「校巴 › 路線」建立, 或直接手動填寫下方班次資料
+                      尚未建立路線模板 — 請到「校巴 › 路線」建立路線模板後, 回到這裡套用
                     </p>
                   ) : (
                     <>
                       <div>
                         <EntitySelectWithCreate<Route>
                           id="trip-form-route"
-                          label="套用路線模板 (選填)"
+                          label="套用路線模板"
                           value={routeId}
                           options={routes}
                           onChange={(v) => {
                             if (!v) {
                               // B2: 取消模板 → 還原套用前的快照（人員＋學生＋時間＋站點）
                               revertRouteTemplate();
+                              toast.info('已取消套用路線模板, 人員 / 學生 / 站點已還原');
                               return;
                             }
                             applyRouteTemplate(v);
+                            const applied = routes.find((r) => r.id === v);
+                            toast.info(
+                              `已套用路線模板「${applied?.name ?? ''}」— 下方改動只影響今次班次, 不會改動模板本身`,
+                              6000,
+                            );
                           }}
                           onAddNew={() => {
                             toast.info('請到「校巴 › 路線」建立路線模板, 完成後回到這裡選擇');
                           }}
-                          placeholder="— 不套用模板 (手動填寫) —"
+                          placeholder="— 請選擇路線模板 —"
                           emptyHint="尚未建立任何路線模板, 可到「校巴 › 路線」建立第一條"
                           renderLabel={(r) => `${r.code} · ${r.name} (${r.stops?.length ?? 0} 站)`}
                         />
+                        {errors.routeId && (
+                          <p className="mt-1 text-[10.5px] text-rose-600 dark:text-rose-400 inline-flex items-center gap-1">
+                            <AlertCircle width={10} height={10} />
+                            {errors.routeId}
+                          </p>
+                        )}
                       </div>
-                      {selectedRoute && (
-                        <div className="rounded-md border border-blue-200/70 bg-blue-50/60 px-3 py-2 space-y-1.5 dark:border-blue-800/40 dark:bg-blue-950/30">
-                          <p className="text-[12px] font-medium text-blue-800 dark:text-blue-200 inline-flex items-center gap-1">
-                            <CheckCircle2 width={12} height={12} />
-                            已套用「{selectedRoute.name}」
-                          </p>
-                          <p className="text-[11px] text-blue-700/80 dark:text-blue-300/80">
-                            {/* C4: 站點數用實際 waypoints（方向展開後），不用 stops.length，避免數字誤導 */}
-                            已帶入校巴 / 司機 / 保姆 / {routeStudentIds(selectedRoute).length} 位學生 / {waypoints.length} 個站點
-                          </p>
-                          <p className="text-[11px] text-blue-700/80 dark:text-blue-300/80">
-                            行車方向: {shiftTypeLabel(selectedRoute.shiftType)} · 班次類型已設為{' '}
-                            {type === 'morning' ? '早班' : type === 'afternoon' ? '午班' : '自訂'} ·{' '}
-                            {fmtRouteTime(selectedRoute)}
-                          </p>
-                          {selectedRoute.stops && selectedRoute.stops.length > 0 && (
-                            <ol className="text-[11px] text-slate-600 dark:text-slate-300 space-y-0.5 list-decimal list-inside">
-                              {[...selectedRoute.stops].sort((a, b) => a.seq - b.seq).map((s) => (
-                                <li key={s.id}>{s.name} · {s.eta} · {s.studentIds?.length ?? 0} 生</li>
-                              ))}
-                            </ol>
-                          )}
-                        </div>
+                      {!selectedRoute && (
+                        <p className="text-[11px] text-slate-500 inline-flex items-center gap-1 dark:text-slate-400">
+                          <Info width={12} height={12} />
+                          套用路線模板後, 下方「指派人員 / 乘客 (學生) / 上落車地點與時間」三區會自動展開並帶入模板資料
+                        </p>
                       )}
                     </>
                   )}
                 </Section>
-
-                {/* 人員 */}
-                <Section icon={<BusIcon width={14} height={14} />} title="指派人員" n="3">
+                )}
+                {/* 人員 — 新增模式需先套用路線模板；編輯模式沿用既有班次資料（可能無模板） */}                {(mode !== 'add' || routeId) && (
+                <Section icon={<BusIcon width={14} height={14} />} title="指派人員" n="2">
                   <div>
                     <EntitySelectWithCreate<BusType>
                       id="trip-form-bus"
@@ -829,13 +1023,13 @@ export function TripFormModal({
                     </div>
                   </div>
                 </Section>
+                )}
 
-                {/* 學生 */}
-                <Section icon={<Users width={14} height={14} />} title="乘客 (學生)" n="4">
+                {/* 學生 — 新增模式需先套用路線模板；編輯模式沿用既有班次資料（可能無模板） */}
+                {(mode !== 'add' || routeId) && (
+                <Section icon={<Users width={14} height={14} />} title="乘客 (學生)" n="3">
                   {!busId ? (
-                    <p className="text-[12px] text-amber-600 dark:text-amber-300 inline-flex items-center gap-1">
-                      <AlertCircle width={12} height={12} /> 請先選擇校巴以載入學生
-                    </p>
+                    <p className="text-[12px] text-slate-500">請先選擇校巴以載入學生</p>
                   ) : (busStudents.length === 0 && routeOnlyStudents.length === 0) ? (
                     <p className="text-[12px] text-slate-500">此校巴目前沒有指派學生</p>
                   ) : (
@@ -845,87 +1039,43 @@ export function TripFormModal({
                           <CheckCircle2 width={11} height={11} /> 已自動帶入此校巴全部 {busStudents.length} 位學生 (可手動增刪)
                         </p>
                       )}
-                      <div className="flex items-center gap-2 mb-2">
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => {
-                            markWaypointsManual();
-                            // C2: 有模板時全選 = 顯示聯集全部
-                            setStudentIds(displayStudents.map((s) => s.id));
-                          }}
-                        >
-                          全選
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => {
-                            markWaypointsManual();
-                            setStudentIds([]);
-                          }}
-                        >
-                          清除
-                        </Button>
-                        <span className="ml-auto text-[10px] text-slate-400 tabular-nums">
+                      {/* 單行摘要 + 點擊開 popup — 避免 30+ 學生令 form 變成 15 行 */}
+                      <button
+                        type="button"
+                        onClick={() => setStudentsPopupOpen(true)}
+                        className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-left flex items-center gap-2 cursor-pointer transition-colors hover:border-blue-400 hover:bg-blue-50/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:hover:bg-slate-800/60"
+                      >
+                        <span className="text-[13px] font-medium text-slate-700 dark:text-slate-200 shrink-0 tabular-nums">
                           已選 {studentIds.length} / {displayStudents.length}
                         </span>
-                        {errors.capacity && (
-                          <span className="text-[10.5px] text-rose-600 inline-flex items-center gap-1">
-                            <AlertCircle width={11} height={11} /> {errors.capacity}
-                          </span>
-                        )}
-                      </div>
+                        <span className="text-[11px] text-slate-400 truncate flex-1">
+                          {studentIds.length === 0
+                            ? '未選擇學生 — 點擊選取'
+                            : selectedStudentNames}
+                        </span>
+                        <Users width={13} height={13} className="shrink-0 text-slate-400" />
+                        <ChevronRight width={13} height={13} className="shrink-0 text-slate-400" />
+                      </button>
+                      {errors.capacity && (
+                        <p className="mt-1 text-[10.5px] text-rose-600 inline-flex items-center gap-1">
+                          <AlertCircle width={11} height={11} /> {errors.capacity}
+                        </p>
+                      )}
                       {routeOnlyStudents.length > 0 && (
-                        <p className="text-[10.5px] text-blue-600 dark:text-blue-300 inline-flex items-center gap-1 mb-2 flex-wrap">
+                        <p className="mt-1 text-[10.5px] text-blue-600 dark:text-blue-300 inline-flex items-center gap-1 flex-wrap">
                           <RouteIcon width={11} height={11} />
                           路線學生 (未綁此車): {routeOnlyStudents.map((s) => s.name).join('、')} — 一併隨行
                         </p>
                       )}
-                      <ul className="grid grid-cols-2 gap-1 max-h-48 overflow-y-auto -mx-1 px-1">
-                        {/* C2: 模板模式顯示聯集（綁車學生＋路線獨有學生），兩種都可勾選 */}
-                        {displayStudents.map((s) => {
-                          const selected = studentIds.includes(s.id);
-                          const isRouteOnly = routeId && !busStudents.some((b) => b.id === s.id);
-                          return (
-                            <li key={s.id}>
-                              <button
-                                type="button"
-                                onClick={() => toggleStudent(s.id)}
-                                className={cn(
-                                  'w-full text-left px-2.5 py-1.5 rounded-md text-[12px] flex items-center gap-2 transition-colors cursor-pointer',
-                                  selected
-                                    ? isRouteOnly
-                                      ? 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200 ring-1 ring-blue-300 dark:ring-blue-700/50'
-                                      : 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200'
-                                    : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/60',
-                                )}
-                              >
-                                <span className={cn(
-                                  'inline-flex h-4 w-4 items-center justify-center rounded border-2 shrink-0',
-                                  selected
-                                    ? 'border-blue-600 bg-blue-600'
-                                    : 'border-slate-300 dark:border-slate-600',
-                                )}>
-                                  {selected && <Check width={10} height={10} className="text-white" strokeWidth={3.5} />}
-                                </span>
-                                <span className="truncate flex-1 font-medium">
-                                  {s.name}
-                                  {isRouteOnly && <span className="ml-1 text-[10px] text-blue-500">(路線)</span>}
-                                </span>
-                                <span className="text-[10px] text-slate-400 tabular-nums">{s.classNumber}</span>
-                              </button>
-                            </li>
-                          );
-                        })}
-                      </ul>
                     </>
                   )}
                   <FieldError msg={errors.students} />
                 </Section>
+                )}
 
-                {/* 站點 (自動 + 可手動加/刪) */}
-                <Section icon={<MapPin width={14} height={14} />} title="上落車地點與時間" n="5">
+                {/* 站點 (自動 + 可手動加/刪) — 新增模式需先套用路線模板；編輯模式沿用既有班次資料 */}
+                {(mode !== 'add' || routeId) && (
+                <Section icon={<MapPin width={14} height={14} />} title="上落車地點與時間" n="4">
                   <FieldError msg={errors.waypoints} />
                   {waypoints.length === 0 ? (
                     <p className="text-[12px] text-slate-500">選擇校巴與學生後, 系統會自動從接送地點聚合站點。</p>
@@ -1002,6 +1152,30 @@ export function TripFormModal({
                     </ul>
                   )}
                 </Section>
+                )}
+
+                {/* ⚠️ 提示: 只喺使用者真係改動咗模板帶入嘅欄位時, 先喺最底顯示 */}
+                {routeId && routeDeviations.length > 0 && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1.5 dark:border-amber-800/50 dark:bg-amber-950/30"
+                  >
+                    <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-200 inline-flex items-center gap-1">
+                      <AlertCircle width={12} height={12} />
+                      以下改動只適用於今次班次
+                    </p>
+                    <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
+                      你已改動：<strong className="font-semibold">{routeDeviations.join('、')}</strong>。
+                      這些改動<strong className="font-semibold">不會改動路線模板內的原有資料</strong>，
+                      儲存後只會寫入今次的班次紀錄；模板本身維持原狀，日後其他班次套用同一路線時唔會受影響。
+                    </p>
+                    <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
+                      如需把改動永久更新到路線模板，請到{' '}
+                      <span className="font-semibold">校巴 › 路線</span>{' '}
+                      頁面編輯該路線模板（改動該模板則會影響所有套用它的班次）。
+                    </p>
+                  </div>
+                )}
                 </div>
                 {/* /左欄 */}
 
@@ -1013,7 +1187,7 @@ export function TripFormModal({
                         <PreviewRow label="日期" value={date || '—'} />
                         <PreviewRow label="時段" value={`${plannedStartTime || '—'} → ${plannedEndTime || '—'}`} />
                         <PreviewRow label="類型" value={
-                          type === 'morning' ? '早班' : type === 'afternoon' ? '午班' : '自訂'
+                          type === 'morning' ? '早班' : type === 'afternoon' ? '午班' : (customTypeLabel.trim() || '自訂')
                         } />
                         <PreviewRow label="校巴" value={bus ? `${bus.plateNumber} · ${bus.capacity}座` : '—'} />
                         <PreviewRow label="司機" value={driver?.name ?? (bus?.driverId ? '(沿用校巴司機)' : '未指派')} />
@@ -1036,6 +1210,13 @@ export function TripFormModal({
                             ? `${selectedRoute.code} · ${selectedRoute.name}`
                             : '—'}
                         />
+                        {selectedRoute && (
+                          <p className="text-[11px] text-slate-500 leading-relaxed pt-0.5">
+                            {shiftTypeLabel(selectedRoute.shiftType)}
+                            {' · '}
+                            {fmtRouteTime(selectedRoute)}
+                          </p>
+                        )}
                         {waypoints.length > 0 && (
                           <p className="text-[11px] text-slate-500 leading-relaxed pt-0.5">
                             {waypoints[0].location.name}
@@ -1065,6 +1246,9 @@ export function TripFormModal({
                         <span className="text-slate-500">·</span> {plannedStartTime} → {plannedEndTime}
                       </p>
                       <p className="text-slate-700 dark:text-slate-200">
+                        <span className="text-slate-500">類型:</span> {type === 'morning' ? '早班' : type === 'afternoon' ? '午班' : (customTypeLabel.trim() || '自訂')}
+                      </p>
+                      <p className="text-slate-700 dark:text-slate-200">
                         <span className="text-slate-500">校巴:</span> {bus?.plateNumber ?? '—'}{' '}
                         <span className="text-slate-500">·</span> 司機 {driver?.name ?? (bus?.driverId ? '(沿用)' : '未指派')}
                         {' '}· 保姆 {nanny?.name ?? '未指派'}
@@ -1082,14 +1266,41 @@ export function TripFormModal({
                           </span>
                         )}
                       </p>
+                      {selectedRoute && (
+                        <p className="text-slate-700 dark:text-slate-200">
+                          <span className="text-slate-500">模板:</span> {selectedRoute.name}
+                          <span className="text-slate-500">
+                            {' '}({shiftTypeLabel(selectedRoute.shiftType)})
+                          </span>
+                        </p>
+                      )}
                     </div>
                   </Section>
                 </div>
               </div>
+              )}
             </div>
 
             {/* Footer — 與 TripRouteFormModal 同款 */}
             <div className="px-5 py-3 bg-slate-50/40 border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/40 dark:border-slate-700/80 shrink-0">
+              {isTemplateStep ? (
+                <>
+                  <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
+                    <Info width={12} height={12} />
+                    第 1 步 — 選擇路線模板後, 將自動帶入班次類型、時間、司機、保姆、學生與站點
+                  </span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-md border border-transparent text-[12px] font-medium text-slate-700 hover:bg-slate-100 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:text-slate-200 dark:hover:bg-slate-800"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
               <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
                 <Pill tone="primary" size="sm">
                   {studentIds.length} 生
@@ -1105,6 +1316,16 @@ export function TripFormModal({
                 )}
               </span>
               <div className="flex items-center gap-2 shrink-0">
+                {mode === 'add' && (
+                  <button
+                    type="button"
+                    onClick={() => setStep('template')}
+                    className="inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-md border border-slate-200 text-[12px] font-medium text-slate-700 hover:bg-slate-100 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                  >
+                    <ChevronLeft width={12} height={12} />
+                    上一步
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={onClose}
@@ -1123,6 +1344,8 @@ export function TripFormModal({
                   {success ? '已儲存' : mode === 'add' ? '新增班次' : '儲存變更'}
                 </Button>
               </div>
+                </>
+              )}
             </div>
           </motion.div>
           </motion.div>
@@ -1166,6 +1389,21 @@ export function TripFormModal({
         setDriverMiniOpen(false);
       }}
     />
+
+    {/* 「乘客 (學生)」popup — 主表單只顯示單行摘要, 點擊開呢度勾選 / 取消 */}
+    <StudentsPickerPopup
+      open={studentsPopupOpen}
+      students={displayStudents}
+      selectedIds={studentIds}
+      busStudents={busStudents}
+      hasRoute={!!routeId}
+      onToggle={(id) => toggleStudent(id)}
+      onSelectAll={(ids) => {
+        markWaypointsManual();
+        setStudentIds(ids);
+      }}
+      onClose={() => setStudentsPopupOpen(false)}
+    />
     </>
   );
 }
@@ -1173,6 +1411,137 @@ export function TripFormModal({
 /* -------------------------------------------------------------------------- */
 /*  Building blocks                                                            */
 /* -------------------------------------------------------------------------- */
+
+/**
+ * RouteTemplateStep — 第 1 步: 選擇路線模板 (全屏卡片列表)
+ *
+ * 設計:
+ *   - 由下拉選單改成卡片列表, 因為路線模板有多個關鍵屬性 (方向 / 起訖時間 /
+ *     站點數 / 隨車人數 / 校巴), 下拉選單放唔晒, 使用者只能靠文字猜。
+ *   - 撳卡片即套用模板 → 自動跳到第 2 步 (表單)。
+ *   - 沒有模板時顯示明確指引 + 「前往建立路線模板」連結。
+ */
+function RouteTemplateStep({
+  routes,
+  selectedId,
+  buses,
+  students,
+  onSelect,
+}: {
+  routes: Route[];
+  selectedId: string;
+  buses: BusType[];
+  students: Student[];
+  onSelect: (routeId: string) => void;
+}) {
+  if (routes.length === 0) {
+    return (
+      <div className="px-5 py-10 flex flex-col items-center gap-2 text-center">
+        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500">
+          <RouteIcon width={20} height={20} />
+        </div>
+        <p className="text-[13px] font-medium text-slate-700 dark:text-slate-200">
+          尚未建立路線模板
+        </p>
+        <p className="text-[11.5px] text-slate-500 max-w-sm dark:text-slate-400 leading-relaxed">
+          新增班次需要先選擇一條路線模板 — 模板會帶入班次類型、起訖時間、
+          司機、保姆、隨車學生與上落車站點。
+        </p>
+        <a
+          href="/cbl-admin-setting/bus/trips"
+          className="mt-1 inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-md bg-blue-600 text-[12px] font-semibold text-white hover:bg-blue-700 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+        >
+          <RouteIcon width={12} height={12} />
+          前往建立路線模板
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-5 py-5">
+      <div className="flex items-center gap-2 mb-3">
+        <span className="text-[10.5px] font-bold tracking-[0.06em] text-slate-400 dark:text-slate-500 uppercase">
+          1.
+        </span>
+        <span className="text-[12.5px] font-bold text-slate-900 dark:text-slate-100">
+          選擇路線模板
+        </span>
+        <span className="ml-auto text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
+          {routes.length} 條路線
+        </span>
+      </div>
+
+      <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
+        {routes.map((r) => {
+          const { start, end } = routeTimeRange(r);
+          const rIds = routeStudentIds(r);
+          const bus = buses.find((b) => b.id === r.busId);
+          const isSel = selectedId === r.id;
+          return (
+            <li key={r.id}>
+              <button
+                type="button"
+                onClick={() => onSelect(r.id)}
+                aria-pressed={isSel}
+                className={cn(
+                  'w-full text-left rounded-lg border px-3 py-2.5 transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
+                  isSel
+                    ? 'border-blue-500 bg-blue-50/70 ring-1 ring-blue-300 dark:border-blue-500 dark:bg-blue-950/40 dark:ring-blue-700'
+                    : 'border-slate-200 bg-white hover:border-blue-300 hover:bg-blue-50/40 dark:border-slate-700 dark:bg-slate-900 dark:hover:border-blue-700 dark:hover:bg-blue-950/20',
+                )}
+              >
+                <div className="flex items-center gap-1.5 mb-1">
+                  <span className="text-[12.5px] font-bold text-slate-900 truncate dark:text-slate-100">
+                    {r.name}
+                  </span>
+                </div>
+                <p className="text-[10.5px] text-slate-500 dark:text-slate-400 truncate mb-2">
+                  {r.code}
+                </p>
+
+                <div className="flex flex-wrap items-center gap-1 mb-2">
+                  <Pill
+                    tone={r.shiftType === 'morning' ? 'primary' : r.shiftType === 'afternoon' ? 'info' : 'warning'}
+                    size="sm"
+                  >
+                    {r.shiftType === 'morning' ? '早班' : r.shiftType === 'afternoon' ? '午班' : '課外'}
+                  </Pill>
+                  <Pill tone="neutral" size="sm">
+                    {start} → {end}
+                  </Pill>
+                  <Pill tone="neutral" size="sm">
+                    {r.stops?.length ?? 0} 站
+                  </Pill>
+                  <Pill tone="neutral" size="sm">
+                    {rIds.length} 生
+                  </Pill>
+                </div>
+
+                <div className="flex items-center gap-2 text-[10.5px] text-slate-500 dark:text-slate-400 truncate">
+                  <span className="inline-flex items-center gap-1 min-w-0">
+                    <BusIcon width={9} height={9} className="shrink-0" />
+                    <span className="truncate">{bus?.plateNumber ?? '未綁校巴'}</span>
+                  </span>
+                  {rIds.length > 0 && (
+                    <span className="truncate ml-auto shrink-0">
+                      {students.filter((s) => rIds.includes(s.id)).length} 位在學生名單
+                    </span>
+                  )}
+                </div>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      <p className="mt-4 text-[11px] text-slate-500 inline-flex items-center gap-1 dark:text-slate-400">
+        <Info width={12} height={12} />
+        選擇模板後會自動帶入班次類型、時間、司機、保姆、學生與站點 — 隨後仍可逐項調整。
+      </p>
+    </div>
+  );
+}
 
 /** Route.shiftType → 中文行車方向 */
 function shiftTypeLabel(shiftType: Route['shiftType']): string {
@@ -1199,6 +1568,169 @@ function fmtRouteTime(route: Route): string {
 function ModalPortal({ children }: { children: React.ReactNode }) {
   if (typeof document === 'undefined') return null;
   return createPortal(children, document.body);
+}
+
+/**
+ * StudentsPickerPopup — 學生選取 popup。
+ *
+ * 為什麼需要: 乘客名單可以好長 (30+ 位 → 主表單會變成 15 行, 令整個 form 極長)。
+ * 所以主表單只顯示單行摘要, 點擊先開呢個 popup 喺入面勾選 / 取消 / 全選。
+ *
+ * 勾選結果即時寫回上層 studentIds (受控), 唔使「套用」按鈕。
+ */
+function StudentsPickerPopup({
+  open,
+  students,
+  selectedIds,
+  busStudents,
+  hasRoute,
+  onToggle,
+  onSelectAll,
+  onClose,
+}: {
+  open: boolean;
+  students: Student[];
+  selectedIds: string[];
+  busStudents: Student[];
+  hasRoute: boolean;
+  onToggle: (id: string) => void;
+  onSelectAll: (ids: string[]) => void;
+  onClose: () => void;
+}) {
+  return (
+    <AnimatePresence>
+      {open && (
+        <ModalPortal>
+          <motion.div
+            key="students-picker-backdrop"
+            role="presentation"
+            className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: MODAL_FADE, ease: EASE }}
+            onClick={onClose}
+          >
+            <motion.div
+              className="relative w-full max-w-[560px] mx-4 bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col dark:bg-slate-900 dark:border-slate-700 max-h-[80vh]"
+              initial={{ opacity: 0, y: MODAL_SLIDE }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: MODAL_SLIDE }}
+              transition={{ duration: MODAL_FADE, ease: EASE }}
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="students-picker-title"
+            >
+              {/* Header */}
+              <div className="px-5 py-4 border-b border-slate-100 flex items-center gap-3 dark:border-slate-700/80 shrink-0">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600 ring-1 ring-inset ring-blue-100 shrink-0 dark:bg-blue-950/40 dark:text-blue-300 dark:ring-blue-800/50">
+                  <Users width={18} height={18} />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <h2
+                    id="students-picker-title"
+                    className="text-[14px] font-semibold text-slate-900 dark:text-slate-100"
+                  >
+                    選擇乘客 (學生)
+                  </h2>
+                  <p className="text-[11px] text-slate-500 truncate dark:text-slate-400">
+                    勾選要同行的學生 — 改動只影響今次班次
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="關閉"
+                  onClick={onClose}
+                  className="inline-flex h-7 w-7 items-center justify-center rounded-md cursor-pointer transition-colors hover:bg-slate-100 text-slate-500 hover:text-slate-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:hover:bg-slate-800 dark:text-slate-400 dark:hover:text-slate-200"
+                >
+                  <X width={14} height={14} />
+                </button>
+              </div>
+
+              {/* Toolbar */}
+              <div className="px-5 py-2.5 border-b border-slate-100 flex items-center gap-2 dark:border-slate-700/80 shrink-0">
+                <Button variant="secondary" size="sm" onClick={() => onSelectAll(students.map((s) => s.id))}>
+                  全選
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => onSelectAll([])}>
+                  清除
+                </Button>
+                <span className="ml-auto text-[11px] text-slate-400 tabular-nums">
+                  已選 {selectedIds.length} / {students.length}
+                </span>
+              </div>
+
+              {/* 名單 */}
+              <div className="flex-1 min-h-0 overflow-y-auto px-5 py-3">
+                {students.length === 0 ? (
+                  <p className="text-[12px] text-slate-500 py-4 text-center">
+                    沒有可選的學生
+                  </p>
+                ) : (
+                  <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+                    {students.map((s) => {
+                      const selected = selectedIds.includes(s.id);
+                      const isRouteOnly = hasRoute && !busStudents.some((b) => b.id === s.id);
+                      return (
+                        <li key={s.id}>
+                          <button
+                            type="button"
+                            onClick={() => onToggle(s.id)}
+                            aria-pressed={selected}
+                            className={cn(
+                              'w-full text-left px-2.5 py-1.5 rounded-md text-[12px] flex items-center gap-2 transition-colors cursor-pointer',
+                              selected
+                                ? isRouteOnly
+                                  ? 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200 ring-1 ring-blue-300 dark:ring-blue-700/50'
+                                  : 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200'
+                                : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/60',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'inline-flex h-4 w-4 items-center justify-center rounded border-2 shrink-0',
+                                selected
+                                  ? 'border-blue-600 bg-blue-600'
+                                  : 'border-slate-300 dark:border-slate-600',
+                              )}
+                            >
+                              {selected && (
+                                <Check width={10} height={10} className="text-white" strokeWidth={3.5} />
+                              )}
+                            </span>
+                            <span className="truncate flex-1 font-medium">
+                              {s.name}
+                              {isRouteOnly && (
+                                <span className="ml-1 text-[10px] text-blue-500">(路線)</span>
+                              )}
+                            </span>
+                            <span className="text-[10px] text-slate-400 tabular-nums shrink-0">
+                              {s.classNumber}
+                            </span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+
+              {/* Footer */}
+              <div className="px-5 py-3 bg-slate-50/40 border-t border-slate-100 flex items-center justify-between gap-3 rounded-b-xl dark:bg-slate-900/40 dark:border-slate-700/80 shrink-0">
+                <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400">
+                  已選 {selectedIds.length} 位學生
+                </span>
+                <Button variant="primary" size="sm" onClick={onClose}>
+                  完成
+                </Button>
+              </div>
+            </motion.div>
+          </motion.div>
+        </ModalPortal>
+      )}
+    </AnimatePresence>
+  );
 }
 
 function Section({
@@ -1274,5 +1806,375 @@ function FieldError({ msg }: { msg?: string }) {
       </svg>
       {msg}
     </p>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  SameWidthDateField — 自訂日期選擇                                          */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 為什麼不用原生 <input type="date">:
+ *   原生日曆彈窗 (calendar picker) 的寬度由 browser / OS 控制 (Chrome 係 ~280px),
+ *   CSS (width / ::-webkit-calendar-picker-indicator) 改唔到佢闊度,
+ *   喺窄 field (grid-cols-2 一半) 會出現「彈窗闊過 field」。
+ *
+ * 做法: 自繪彈窗, 外層 relative + 彈窗 absolute left-0 right-0 top-full,
+ *       強制同 field 一樣闊 (w-full), 唔受 browser 預設闊度影響。
+ */
+
+const WEEKDAY_ZH = ['一', '二', '三', '四', '五', '六', '日'];
+
+function isoToParts(iso: string): { y: number; m: number; d: number } {
+  const [y, m, d] = iso.split('-').map(Number);
+  const now = new Date();
+  return {
+    y: y || now.getFullYear(),
+    m: m || now.getMonth() + 1,
+    d: d || now.getDate(),
+  };
+}
+
+function toIso(y: number, m: number, d: number): string {
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+function fmtDateZh(iso: string): string {
+  if (!iso) return '';
+  const { y, m, d } = isoToParts(iso);
+  return `${y}/${String(m).padStart(2, '0')}/${String(d).padStart(2, '0')}`;
+}
+
+function SameWidthDateField({
+  value,
+  onChange,
+  hasError,
+}: {
+  value: string;
+  onChange: (iso: string) => void;
+  hasError?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+
+  // 撳出面 / Esc 閂彈窗
+  React.useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open ]);
+
+  return (
+    <div ref={rootRef} className="relative w-full">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        className={cn(
+          'w-full h-9 rounded-md border bg-white px-2.5 text-[13px] font-medium text-slate-700 transition-colors cursor-pointer focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:text-slate-200',
+          'flex items-center justify-between gap-2',
+          hasError
+            ? 'border-rose-300 dark:border-rose-700'
+            : open
+              ? 'border-blue-400'
+              : 'border-slate-200 dark:border-slate-700',
+        )}
+      >
+        <span className={cn('tabular-nums truncate', !value && 'text-slate-400 font-normal')}>
+          {value ? fmtDateZh(value) : '請選擇日期'}
+        </span>
+        <Calendar width={14} height={14} className="shrink-0 text-slate-400" />
+      </button>
+
+      {open && (
+        <div
+          role="dialog"
+          aria-label="選擇日期"
+          className="absolute left-0 right-0 top-full z-30 mt-1 w-full rounded-md border border-slate-200 bg-white shadow-lg dark:bg-slate-900 dark:border-slate-700"
+        >
+          <CalendarBody value={value} onPick={(iso) => { onChange(iso); setOpen(false); }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * CalendarBody — 日曆本體 (無外框彈窗), 日期欄＋綜合欄共用。
+ * 揀日子只 onPick, 閂唔閂由外層決定 (日期欄即閂 / 綜合欄留低揀時間)。
+ */
+function CalendarBody({
+  value,
+  onPick,
+}: {
+  value: string;
+  onPick: (iso: string) => void;
+}) {
+  // 彈窗當前睇緊邊個月 (切月唔即時改 value, 撳到日子先 onPick)
+  const [viewY, setViewY] = React.useState(() => isoToParts(value).y);
+  const [viewM, setViewM] = React.useState(() => isoToParts(value).m);
+
+  // value 喺出面變 (e.g. 模板帶入 / reset) → 彈窗月份跟住跳
+  React.useEffect(() => {
+    const p = isoToParts(value);
+    setViewY(p.y);
+    setViewM(p.m);
+  }, [value ]);
+
+  const sel = isoToParts(value);
+  const today = new Date();
+  const todayIso = toIso(today.getFullYear(), today.getMonth() + 1, today.getDate());
+
+  // 本月格: (星期一為首欄) 前導空格 + 1..月底
+  const firstWeekdayMon0 = (new Date(viewY, viewM - 1, 1).getDay() + 6) % 7;
+  const daysInMonth = new Date(viewY, viewM, 0).getDate();
+  const cells: (number | null)[] = [
+    ...Array<null>(firstWeekdayMon0).fill(null),
+    ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
+  ];
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  const moveMonth = (delta: number) => {
+    let y = viewY;
+    let m = viewM + delta;
+    while (m < 1) { m += 12; y -= 1; }
+    while (m > 12) { m -= 12; y += 1; }
+    setViewY(y);
+    setViewM(m);
+  };
+
+  return (
+    <>
+      {/* 月份頭 — 左右箭頭 h-8 w-8 正方形, 唔會拉扁; 標題置中 */}
+      <div className="flex items-center justify-between px-2 pt-2">
+        <button
+          type="button"
+          aria-label="上個月"
+          onClick={() => moveMonth(-1)}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:text-slate-400"
+        >
+          <ChevronLeft width={14} height={14} />
+        </button>
+        <span className="text-[13px] font-semibold text-slate-700 tabular-nums dark:text-slate-200">
+          {viewY} 年 {viewM} 月
+        </span>
+        <button
+          type="button"
+          aria-label="下個月"
+          onClick={() => moveMonth(1)}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:text-slate-400"
+        >
+          <ChevronRight width={14} height={14} />
+        </button>
+      </div>
+      {/* 星期頭 — 7 欄等寬, 每格正方形對齊日期格 */}
+      <div className="grid grid-cols-7 gap-px px-2 pt-1.5 text-center text-[10px] font-medium text-slate-400">
+        {WEEKDAY_ZH.map((w) => (
+          <span key={w} className="flex h-6 items-center justify-center">{w}</span>
+        ))}
+      </div>
+      {/* 日期格 — 固定 320px 寬, 每格 h-10 w-10 正方形, 唔跟 field 闊收窄 */}
+      <div className="grid grid-cols-7 gap-0.5 px-2 pb-2">
+        {cells.map((day, i) => {
+          if (day === null) return <span key={`e-${i}`} className="h-10 w-10" />;
+          const iso = toIso(viewY, viewM, day);
+          const isSel = sel.y === viewY && sel.m === viewM && sel.d === day;
+          const isToday = iso === todayIso;
+          return (
+            <button
+              key={iso}
+              type="button"
+              onClick={() => onPick(iso)}
+              aria-pressed={isSel}
+              className={cn(
+                'flex h-10 w-10 items-center justify-center rounded-md text-[12px] tabular-nums cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
+                isSel
+                  ? 'bg-blue-600 font-semibold text-white'
+                  : isToday
+                    ? 'font-semibold text-blue-600 ring-1 ring-inset ring-blue-300 dark:text-blue-300 dark:ring-blue-700'
+                    : 'text-slate-700 dark:text-slate-200',
+              )}
+            >
+              {day}
+            </button>
+          );
+        })}
+      </div>
+      {/* 今日捷徑 */}
+      <div className="border-t border-slate-100 px-2 py-1 dark:border-slate-700/60">
+        <button
+          type="button"
+          onClick={() => {
+            onPick(todayIso);
+            setViewY(today.getFullYear());
+            setViewM(today.getMonth() + 1);
+          }}
+          className="w-full rounded px-1 py-1 text-center text-[11px] font-medium text-blue-600 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:text-blue-300"
+        >
+          今日 ({fmtDateZh(todayIso)})
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
+ * SameWidthDateTimeField — 「日期及時間」綜合欄。
+ *
+ * 版面: 一個欄 (label「日期及時間」), 撳開一個同闊彈窗,
+ *       上半日曆 (SameWidthDateField) + 下半開始/結束兩個 time input,
+ *       一次過揀晒日期＋時段, 唔使跳三格。
+ * state 照舊寫返 date / plannedStartTime / plannedEndTime, 儲存＋校驗唔變。
+ */
+function SameWidthDateTimeField({
+  date,
+  startTime,
+  endTime,
+  onDateChange,
+  onStartChange,
+  onEndChange,
+  hasError,
+}: {
+  date: string;
+  startTime: string;
+  endTime: string;
+  onDateChange: (iso: string) => void;
+  onStartChange: (v: string) => void;
+  onEndChange: (v: string) => void;
+  hasError?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  const btnRef = React.useRef<HTMLButtonElement>(null);
+  const popRef = React.useRef<HTMLDivElement>(null);
+  const [popPos, setPopPos] = React.useState<{ left: number; top: number } | null>(null);
+
+  // 計算彈窗 fixed 位置 (portal 到 body, 唔受 modal overflow / grid 半欄寬度影響)
+  const placePopup = React.useCallback(() => {
+    const el = btnRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // 固定 320px 正方形日曆: 7 欄 × ~40px, cells 用 aspect-square 即正方形
+    const W = 320;
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - W - 8));
+    // 下面唔夠位就彈上面
+    const H = 420;
+    const below = window.innerHeight - r.bottom - 8;
+    const top = below >= H ? r.bottom + 4 : Math.max(8, r.top - H - 4);
+    setPopPos({ left, top });
+  }, []);
+
+  const setOpenPlaced = React.useCallback((v: boolean) => {
+    if (v) placePopup();
+    setOpen(v);
+  }, [placePopup]);
+
+  // 撳出面 / Esc 閂彈窗 (popup 已 portal 到 body, 要同時檢查兩個 ref)
+  React.useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    // modal 捲動 / resize 時重算位置, 算唔到就閂 (避免錯位)
+    const onReposition = () => placePopup();
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    window.addEventListener('resize', onReposition);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener('resize', onReposition);
+    };
+  }, [open, placePopup]);
+
+  const summary = date
+    ? `${fmtDateZh(date)} · ${startTime || '—'} → ${endTime || '—'}`
+    : '請選擇日期及時間';
+
+  return (
+    <div ref={rootRef} className="relative w-full">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpenPlaced(!open)}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        className={cn(
+          'w-full h-9 rounded-md border bg-white px-2.5 text-[13px] font-medium text-slate-700 transition-colors cursor-pointer focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:text-slate-200',
+          'flex items-center justify-between gap-2',
+          hasError
+            ? 'border-rose-300 dark:border-rose-700'
+            : open
+              ? 'border-blue-400'
+              : 'border-slate-200 dark:border-slate-700',
+        )}
+      >
+        <span className={cn('tabular-nums truncate', !date && 'text-slate-400 font-normal')}>
+          {summary}
+        </span>
+        <Calendar width={14} height={14} className="shrink-0 text-slate-400" />
+      </button>
+
+      {open && popPos && createPortal(
+        <div
+          ref={popRef}
+          role="dialog"
+          aria-label="選擇日期及時間"
+          style={{ position: 'fixed', left: popPos.left, top: popPos.top, width: 320, zIndex: 80 }}
+          className="rounded-md border border-slate-200 bg-white shadow-xl dark:bg-slate-900 dark:border-slate-700"
+        >
+          {/* 上半: 日曆 (揀完唔閂, 留低繼續揀時間) */}
+          <CalendarBody value={date} onPick={onDateChange} />
+          {/* 下半: 開始＋結束時間 — 同一個彈窗一次過填 */}
+          <div className="border-t border-slate-100 px-2 py-1.5 dark:border-slate-700/60">
+            <div className="grid grid-cols-2 gap-1.5">
+              <label className="block">
+                <span className="text-[10px] font-medium text-slate-400 block mb-0.5">開始時間</span>
+                <input
+                  type="time"
+                  value={startTime}
+                  onChange={(e) => onStartChange(e.target.value)}
+                  className="w-full h-8 rounded-md border border-slate-200 bg-white px-1.5 text-[12px] font-medium tabular-nums text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-800 dark:border-slate-600 dark:text-slate-200"
+                />
+              </label>
+              <label className="block">
+                <span className="text-[10px] font-medium text-slate-400 block mb-0.5">結束時間</span>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => onEndChange(e.target.value)}
+                  className="w-full h-8 rounded-md border border-slate-200 bg-white px-1.5 text-[12px] font-medium tabular-nums text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-800 dark:border-slate-600 dark:text-slate-200"
+                />
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              className="mt-1.5 w-full rounded-md bg-blue-600 py-1.5 text-center text-[12px] font-semibold text-white cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
+            >
+              完成
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
   );
 }

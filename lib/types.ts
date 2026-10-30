@@ -5,6 +5,19 @@ export type UserRole = 'system_admin' | 'super_admin' | 'client' | 'parent' | 'n
 export interface User {
   id: string;
   phone: string;
+  /**
+   * 帳戶名稱 — 與 phone 皆可作為登入帳號。
+   *
+   * 為什麼需要: 有些使用者 (例如保姆 / 家長) 未必想用電話號碼登入,
+   * 而且電話號碼會外洩給家長 / 校方。給一個自訂的帳戶名稱 (例如 `siu-ming`)
+   * 讓對方可以用自己記得的名字登入。
+   *
+   * 規則:
+   *   - 登入時 `phone` 或 `accountName` 都可以 (兩者擇一)
+   *   - `accountName` 在同一個 tenant 內唯一 (建立時會擋重複)
+   *   - 選填 — 沒填就只能用電話登入 (維持既有行為)
+   */
+  accountName?: string;
   password: string;
   role: UserRole;
   name: string;
@@ -126,6 +139,11 @@ export interface Parent {
   clientId: string;
   name: string;
   phone: string;
+  /**
+   * 帳戶名稱 — 與 phone 皆可作為登入帳號 (選填)。
+   * 見 User.accountName 的說明。
+   */
+  accountName?: string;
   /** 選填 — 備用行動電話 (與 phone 不同) */
   alternatePhone: string | null;
   /** 選填 — 住家電話 */
@@ -156,6 +174,11 @@ export interface Nanny {
   companyId?: string | null;
   name: string;
   phone: string;
+  /**
+   * 帳戶名稱 — 與 phone 皆可作為登入帳號 (選填)。
+   * 見 User.accountName 的說明。
+   */
+  accountName?: string;
   employeeId: string;
   photo: string | null;
   assignedBusIds: string[];
@@ -202,6 +225,12 @@ export interface Trip {
   nannyId: string;
   date: string;
   type: TripType;
+  /**
+   * 自訂班次類型名稱 — 僅 type='custom' 時有意義。
+   * 由班次表單「班次類型 = 自訂」時的文字輸入寫入, 供預覽 / 清單 / 詳情顯示。
+   * nullable: 舊班次 / 非自訂班次為 null (顯示時退回「自訂」)。
+   */
+  customTypeLabel?: string | null;
   status: TripStatus;
   plannedStartTime: string;
   plannedEndTime: string;

@@ -24,6 +24,12 @@ import {
   Bus as BusIcon,
   AlertTriangle,
   User,
+  UserCog,
+  KeyRound,
+  Eye,
+  EyeOff,
+  ImagePlus,
+  Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
@@ -283,6 +289,129 @@ function BusToggleCards({
 }
 
 /* -------------------------------------------------------------------------- */
+/*  PhotoUploader — 相片上載 (選填, base64 dataURL 存入 cbl_nannies.photo)        */
+/*                                                                          */
+/*  為什麼用 base64 而不是 Supabase Storage:                                   */
+/*   - 保姆相片只是小頭像, base64 直接存 text 欄即可, 不用再管 bucket / RLS     */
+/*   - 上限 2MB (手機拍的相會先壓到 512px 再存, 避免 localStorage 爆掉)          */
+/* -------------------------------------------------------------------------- */
+
+const MAX_PHOTO_BYTES = 2 * 1024 * 1024;
+
+function PhotoUploader({
+  photo,
+  name,
+  onChange,
+  onError,
+}: {
+  photo: string | null;
+  name: string;
+  onChange: (next: string | null) => void;
+  onError: (msg: string) => void;
+}) {
+  const fileRef = React.useRef<HTMLInputElement>(null);
+
+  const handlePick = React.useCallback(
+    (file: File | undefined) => {
+      if (!file) return;
+      if (!file.type.startsWith('image/')) {
+        onError('請選擇圖片檔案');
+        return;
+      }
+      if (file.size > MAX_PHOTO_BYTES) {
+        onError('相片不可超過 2MB');
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result ?? '');
+        // 大圖先壓到 512px 再存 (省 localStorage / DB 空間)
+        const img = new Image();
+        img.onload = () => {
+          const maxEdge = 512;
+          const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+          if (scale >= 1) {
+            onChange(dataUrl);
+            return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.round(img.width * scale);
+          canvas.height = Math.round(img.height * scale);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            onChange(dataUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          onChange(canvas.toDataURL('image/jpeg', 0.82));
+        };
+        img.onerror = () => onChange(dataUrl);
+        img.src = dataUrl;
+      };
+      reader.onerror = () => onError('讀取相片失敗, 請重試');
+      reader.readAsDataURL(file);
+    },
+    [onChange, onError],
+  );
+
+  return (
+    <div className="flex items-center gap-3">
+      <button
+        type="button"
+        onClick={() => fileRef.current?.click()}
+        title={photo ? '點擊更換相片' : '點擊上載相片'}
+        className="relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-rose-50 text-rose-400 ring-1 ring-inset ring-rose-100 cursor-pointer transition-colors hover:bg-rose-100 dark:bg-rose-950/40 dark:text-rose-300 dark:ring-rose-800/50 dark:hover:bg-rose-950/60"
+      >
+        {photo ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={photo} alt={name || '保姆相片'} className="h-full w-full object-cover" />
+        ) : (
+          <span className="text-[20px] font-semibold">
+            {name.trim().slice(0, 1) || <ImagePlus width={20} height={20} />}
+          </span>
+        )}
+      </button>
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-[11.5px] font-medium text-slate-700 transition-colors hover:bg-slate-50 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <ImagePlus width={12} height={12} />
+            {photo ? '更換相片' : '上載相片'}
+          </button>
+          {photo && (
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[11.5px] font-medium text-rose-600 transition-colors hover:bg-rose-50 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 dark:text-rose-300 dark:hover:bg-rose-950/40"
+            >
+              <Trash2 width={11} height={11} />
+              移除
+            </button>
+          )}
+        </div>
+        <p className="text-[10px] text-slate-400 dark:text-slate-500">
+          選填 · JPG / PNG · 2MB 以內
+        </p>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          handlePick(e.target.files?.[0]);
+          // 允許重選同一檔案
+          e.target.value = '';
+        }}
+      />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /*  InlineFieldError — 單一欄位下方的錯誤提示                                       */
 /* -------------------------------------------------------------------------- */
 
@@ -404,6 +533,9 @@ export function NannyFormModal({
   }, []);
 
   // 校驗
+  // - 新增模式: 密碼必填 (至少 6 字元)
+  // - 編輯模式: 密碼選填, 留空 = 保留現有密碼; 有填則至少 6 字元
+  const isAddMode = mode === 'add';
   const fieldErrors = React.useMemo(() => {
     const errors: Record<string, string | null> = {
       name: !form.name.trim() ? '請填寫「姓名」' : null,
@@ -413,10 +545,24 @@ export function NannyFormModal({
           : form.phone.replace(/\D/g, '').length < 8
           ? '電話需要 8 碼'
           : null,
+      accountName: form.accountName.trim()
+        ? !/^[a-zA-Z0-9_.-]{3,32}$/.test(form.accountName.trim())
+          ? '帳戶名稱為 3-32 位英數字元'
+          : null
+        : null,
+      password: isAddMode
+        ? !form.password
+          ? '請設定「登入密碼」'
+          : form.password.length < 6
+            ? '密碼至少 6 個字元'
+            : null
+        : form.password && form.password.length < 6
+          ? '密碼至少 6 個字元'
+          : null,
       description: form.description.length > 200 ? '備註不可超過 200 字' : null,
     };
     return errors;
-  }, [form.name, form.phone, form.description]);
+  }, [form.name, form.phone, form.accountName, form.password, form.description, isAddMode]);
 
   const canSubmit =
     !isSaving && Object.values(fieldErrors).every((e) => e === null);
@@ -426,13 +572,21 @@ export function NannyFormModal({
   const markTouched = (field: string) =>
     setTouched((p) => ({ ...p, [field]: true }));
 
+  // 密碼顯示/隱藏
+  const [showPwd, setShowPwd] = React.useState(false);
+  React.useEffect(() => {
+    if (open) setShowPwd(false);
+  }, [open ]);
+
   const handleSaveClick = () => {
-    setTouched({ name: true, phone: true, description: true });
+    setTouched({ name: true, phone: true, accountName: true, password: true, description: true });
     if (!canSubmit) {
       const firstError = Object.entries(fieldErrors).find(([, v]) => v !== null)?.[0] ?? '';
       const errorMessages: Record<string, string> = {
         name: '請填寫「姓名」',
         phone: '電話需要 8 碼',
+        accountName: '帳戶名稱為 3-32 位英數字元',
+        password: isAddMode ? '請設定登入密碼 (至少 6 字元)' : '密碼至少 6 個字元',
         description: '備註不可超過 200 字',
       };
       toast.error(errorMessages[firstError] || '請檢查並修正表單欄位');
@@ -513,18 +667,20 @@ export function NannyFormModal({
               <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-0">
                 {/* ============== LEFT COLUMN (輸入欄位) ============== */}
                 <div className="px-5 py-5 space-y-4 lg:border-r border-slate-100 dark:border-slate-700/80">
-                  {/* 員工編號 (置頂 — 唯讀 preview) */}
+                  {/* 相片 (置頂 — 選填) */}
                   <div>
-                    <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 mb-1 inline-flex items-center gap-1.5 dark:text-slate-400">
-                      員工編號
-                      <span className="text-[10px] text-slate-400 normal-case font-medium tracking-normal">
-                        (自動生成, 不可修改)
+                    <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
+                      相片
+                      <span className="ml-1 text-[10px] text-slate-400 normal-case font-medium tracking-normal">
+                        (選填)
                       </span>
                     </label>
-                    <div className="h-9 px-2.5 inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-slate-50 text-[12px] font-mono text-slate-700 dark:bg-slate-800 dark:border-slate-700 dark:text-slate-200">
-                      <Hash width={11} height={11} className="text-slate-400" />
-                      {previewId}
-                    </div>
+                    <PhotoUploader
+                      photo={form.photo}
+                      name={form.name}
+                      onChange={(next) => setForm((p) => ({ ...p, photo: next }))}
+                      onError={(msg) => toast.error(msg)}
+                    />
                   </div>
 
                   {/* Row 1: 姓名 / 電話 */}
@@ -570,6 +726,71 @@ export function NannyFormModal({
                       />
                     </div>
                   </div>
+
+                  {/* Row 1b: 帳戶名稱 (選填) / 登入密碼 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <LabeledInput
+                        id="nanny-form-account-name"
+                        label="帳戶名稱 (選填)"
+                        value={form.accountName}
+                        onChange={(v) =>
+                          setForm((p) => ({
+                            ...p,
+                            accountName: v.trim().slice(0, 32),
+                          }))
+                        }
+                        onBlur={() => markTouched('accountName')}
+                        placeholder="例如 siu-ming"
+                        maxLength={32}
+                        icon={<UserCog width={12} height={12} />}
+                      />
+                      <InlineFieldError
+                        message={touched.accountName ? fieldErrors.accountName : null}
+                        onShow={() => markTouched('accountName')}
+                      />
+                    </div>
+                    <div>
+                      <label
+                        htmlFor="nanny-form-password"
+                        className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
+                      >
+                        登入密碼{isAddMode && <span className="text-rose-500 ml-0.5">*</span>}
+                      </label>
+                      <div className="relative">
+                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                          <KeyRound width={12} height={12} />
+                        </span>
+                        <input
+                          id="nanny-form-password"
+                          type={showPwd ? 'text' : 'password'}
+                          value={form.password}
+                          onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
+                          onBlur={() => markTouched('password')}
+                          placeholder={isAddMode ? '至少 6 個字元' : '留空保留現有密碼'}
+                          autoComplete="new-password"
+                          spellCheck={false}
+                          className="w-full h-9 rounded-md border border-slate-200 bg-white text-[13px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-medium focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200 pl-8 pr-9"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPwd((v) => !v)}
+                          aria-label={showPwd ? '隱藏密碼' : '顯示密碼'}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer dark:hover:text-slate-200"
+                        >
+                          {showPwd ? <EyeOff width={13} height={13} /> : <Eye width={13} height={13} />}
+                        </button>
+                      </div>
+                      <InlineFieldError
+                        message={touched.password ? fieldErrors.password : null}
+                        onShow={() => markTouched('password')}
+                      />
+                    </div>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 dark:text-slate-400 -mt-2">
+                    設定後, 保姆可用「帳戶名稱」或「電話號碼」登入 (帳戶名稱 3-32 位英數字元, 同一機構內不可重複)。
+                    {isAddMode ? ' 密碼必填 (至少 6 字元)。' : ' 密碼留空 = 保留現有密碼。'}
+                  </p>
 
                   {/* Row 2: 綁定校巴 + 備註 */}
                   <div className="grid grid-cols-1 sm:grid-cols-1 gap-3">
@@ -692,6 +913,20 @@ export function NannyFormModal({
                       </p>
                     </div>
                     <div className="space-y-2">
+                      {/* 員工ID (自動生成, 不可修改) — 從左欄搬到此處 */}
+                      <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-slate-50 dark:bg-slate-800/60">
+                        <Hash
+                          width={11}
+                          height={11}
+                          className="text-slate-400 shrink-0"
+                        />
+                        <span className="text-[10.5px] text-slate-500 dark:text-slate-400 shrink-0">
+                          員工ID
+                        </span>
+                        <span className="text-[12px] font-mono font-semibold text-slate-900 dark:text-slate-100 truncate">
+                          {previewId === '—' ? '—' : `#${previewId}`}
+                        </span>
+                      </div>
                       <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-slate-50 dark:bg-slate-800/60">
                         <Phone
                           width={11}
@@ -705,6 +940,21 @@ export function NannyFormModal({
                           {form.phone || '—'}
                         </span>
                       </div>
+                      {form.accountName.trim() && (
+                        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-slate-50 dark:bg-slate-800/60">
+                          <UserCog
+                            width={11}
+                            height={11}
+                            className="text-slate-400 shrink-0"
+                          />
+                          <span className="text-[10.5px] text-slate-500 dark:text-slate-400 shrink-0">
+                            帳戶名稱
+                          </span>
+                          <span className="text-[12px] font-mono font-semibold text-slate-900 dark:text-slate-100 truncate">
+                            {form.accountName.trim()}
+                          </span>
+                        </div>
+                      )}
                       <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-slate-50 dark:bg-slate-800/60">
                         <Hash
                           width={11}
@@ -715,7 +965,7 @@ export function NannyFormModal({
                           密碼
                         </span>
                         <span className="text-[12px] font-mono font-semibold text-slate-900 dark:text-slate-100 truncate">
-                          {form.phone || '—'}
+                          {form.password ? '••••••' : isAddMode ? '—' : '保留現有密碼'}
                         </span>
                       </div>
                       <p className="text-[10px] text-slate-500 dark:text-slate-400 inline-flex items-start gap-1 pt-0.5">
@@ -725,7 +975,10 @@ export function NannyFormModal({
                           className="text-amber-500 shrink-0 mt-px"
                         />
                         <span>
-                          預設密碼與電話相同。保姆首次登入後可至「個人資料」修改。
+                          {isAddMode
+                            ? '保姆首次登入後可至「個人資料」修改密碼。'
+                            : '密碼留空 = 保留現有密碼, 有填寫才會更新。'}
+                          {form.accountName.trim() && ' 帳戶名稱與電話皆可登入。'}
                         </span>
                       </p>
                     </div>

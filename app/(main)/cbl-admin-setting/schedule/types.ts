@@ -87,6 +87,8 @@ export interface TripConflict {
 export interface TripFormValues {
   id?: string;
   type: TripType;
+  /** 自訂班次類型名稱 — 僅 type='custom' 時由表單輸入, 預覽即時顯示 */
+  customTypeLabel?: string | null;
   date: string;
   plannedStartTime: string;
   plannedEndTime: string;

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { Home, Bus, Settings, ArrowLeft, User as UserIcon, Menu as MenuIcon } from 'lucide-react';
 import { useAuth, useSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
@@ -222,24 +222,21 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
             如果外層再用 absolute inset-0 overflow-y-auto 包一次，會產生雙重捲動容器 +
             雙重 motion 進場動畫，導致 box-shadow 疊層與 scroll 殘影 (ghost scrolling)。
             因此 cbl-admin-setting 直接渲染 children，跳過外層 AnimatePresence。 */}
-      <main className="flex-1 min-h-0 relative overflow-hidden">
+      <main className="flex-1 min-h-0 overflow-y-auto no-scrollbar bg-background isolate">
         {isAdminDashboard ? (
           // 後台 dashboard (cbl-admin-setting / system-admin-setting) 自帶完整佈局
           // (sidebar + header + 自己包 motion.div)。
           // 這裡不需要外層 scroll container，直接傳遞讓它自己控制 overflow。
           children
         ) : (
-          <AnimatePresence mode="popLayout" initial={false}>
-            <motion.div
-              key={pathname}
-              initial={{ opacity: 0.4 }}
-              animate={{ opacity: 1 }}
-              transition={{ duration: 0.12, ease: 'easeOut' }}
-              className="absolute inset-0 overflow-y-auto no-scrollbar"
-            >
-              {children}
-            </motion.div>
-          </AnimatePresence>
+          <motion.div
+            key={pathname}
+            initial={{ opacity: 0.4 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.12, ease: 'easeOut' }}
+          >
+            {children}
+          </motion.div>
         )}
       </main>
 
