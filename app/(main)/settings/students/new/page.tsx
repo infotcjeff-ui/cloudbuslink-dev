@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
 import { formatAcademicYear, parseAcademicYearCode } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 
@@ -32,7 +32,7 @@ export default function NewStudentPage() {
   // (例如 settings 改成了 '3031') 就 fallback 到白名單第一個, 避免下拉無對應。
   const [academicYear, setAcademicYear] = useState<string>(
     () => {
-      const settings = STORAGE.settings.getByClient(user?.clientId || '');
+      const settings = STORAGE.settings.getByClient(resolveDataScope(user).clientId || user?.clientId || '');
       const cur = settings.academicYear;
       return ACADEMIC_YEAR_OPTIONS.includes(cur) ? cur : ACADEMIC_YEAR_OPTIONS[0];
     }
@@ -42,8 +42,13 @@ export default function NewStudentPage() {
 
   if (!user) return null;
 
-  const allParents = STORAGE.parents.getByClient(user.clientId || '');
-  const allBuses = STORAGE.buses.getByClient(user.clientId || '');
+  const scope = resolveDataScope(user);
+  const allParents = scope.isSuperAdmin
+    ? STORAGE.parents.getAll()
+    : STORAGE.parents.getByClient(scope.clientId);
+  const allBuses = scope.isSuperAdmin
+    ? STORAGE.buses.getAll()
+    : STORAGE.buses.getByClient(scope.clientId);
 
   const handleSubmit = async () => {
     setError('');
@@ -53,11 +58,11 @@ export default function NewStudentPage() {
 
     setSaving(true);
     try {
-      const studentId = STORAGE.students.generateStudentId(resolveClientId(user.clientId || null), academicYear);
+      const studentId = STORAGE.students.generateStudentId(scope.clientId || resolveClientId(user.clientId || null), academicYear);
 
       const newStudent = {
         id: STORAGE.genId('student'),
-        clientId: resolveClientId(user.clientId || null),
+        clientId: scope.clientId || resolveClientId(user.clientId || null),
         studentId,
         name: name.trim(),
         classNumber: classNumber.trim(),

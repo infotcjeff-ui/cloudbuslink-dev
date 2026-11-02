@@ -1,11 +1,15 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Bus, Users, Search, CalendarDays, Inbox, X } from 'lucide-react';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope, scopedTripsByDate } from '@/lib/storage';
+import {
+  resolveParentChildren,
+  tripInvolvesStudents,
+} from '@/lib/parent-children';
 import {
   cn,
   today,
@@ -56,22 +60,45 @@ function ParentsTripsPageInner() {
   const [search, setSearch] = useState('');
 
   // 找出此家長 + 其綁定學生
+  //
+  // ⚠️ 家長/子女配對統一走 lib/parent-children.ts (id → 電話 → 帳戶名稱)。
+  //    原本這頁自己寫了一套, /parents 與 /parents/settings/binding 又各寫一套,
+  //    三邊規則不一致 → 同一個家長在不同頁面看到不同的子女數。
+  const reloadStudents = useCallback(() => {
+    if (!user) {
+      setParent(null);
+      setMyStudents([]);
+      return;
+    }
+    const scope = resolveDataScope(user);
+    // 家長 + 子女 (統一邏輯, 見 lib/parent-children.ts)
+    const { parent: foundParent, students } = resolveParentChildren(user, {
+      isSuperAdmin: scope.isSuperAdmin,
+      clientId: scope.clientId,
+    });
+    setParent(foundParent);
+    setMyStudents(students);
+  }, [user]);
+
+  useEffect(() => {
+    reloadStudents();
+  }, [reloadStudents]);
+
+  // 監聽雲端同步 / 後台改資料 → 自動重畫 (先前完全沒有監聽,
+  // 同步完成後不會更新, 使用者必須手動重新整理)
   useEffect(() => {
     if (!user) return;
-    const parents = STORAGE.parents.getByClient(user.clientId || '');
-    const foundParent =
-      parents.find((p) => p.id === user.id.replace('user-', '')) ||
-      parents.find((p) => p.phone === user.phone);
-    setParent(foundParent || null);
-
-    if (foundParent) {
-      const all = STORAGE.students.getByClient(user.clientId || '');
-      const mine = all.filter((s) => s.parentIds.includes(foundParent.id));
-      setMyStudents(mine);
-    } else {
-      setMyStudents([]);
-    }
-  }, [user]);
+    const events = [
+      'cbl-parents-refresh',
+      'cbl-students-refresh',
+      'cbl-users-refresh',
+      'cbl-clients-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, reloadStudents));
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, reloadStudents));
+    };
+  }, [reloadStudents, user]);
 
   // 載入當天班次並過濾為「綁定學生相關」
   useEffect(() => {
@@ -80,13 +107,15 @@ function ParentsTripsPageInner() {
       return;
     }
     const myIds = new Set(myStudents.map((s) => s.id));
-    const all = STORAGE.trips.getByDate(user.clientId || '', date);
-    setTrips(all.filter((t) => t.studentIds.some((sid) => myIds.has(sid))));
+    const all = scopedTripsByDate(resolveDataScope(user), date);
+    // ⚠️ 同時檢查 trip.studentIds 與 waypoints[].studentIds ——
+    //    有些班次只把學生寫在站點上, 只看前者會漏掉班次。
+    setTrips(all.filter((t) => tripInvolvesStudents(t, myIds)));
   }, [user, date, myStudents]);
 
   const counts = useMemo(() => {
     const base = studentFilter
-      ? trips.filter((t) => t.studentIds.includes(studentFilter))
+      ? trips.filter((t) => tripInvolvesStudents(t, new Set([studentFilter])))
       : trips;
     return {
       all: base.length,
@@ -98,7 +127,9 @@ function ParentsTripsPageInner() {
 
   const filtered = useMemo(() => {
     return trips
-      .filter((t) => (studentFilter ? t.studentIds.includes(studentFilter) : true))
+      .filter((t) =>
+        studentFilter ? tripInvolvesStudents(t, new Set([studentFilter])) : true,
+      )
       .filter((t) => (tab === 'all' ? true : t.type === tab))
       .filter((t) => {
         if (!search.trim()) return true;
@@ -184,7 +215,9 @@ function ParentsTripsPageInner() {
           </div>
           <p className="text-sm font-medium">尚未綁定任何子女</p>
           <p className="text-xs text-muted-foreground mt-1">
-            綁定後即可在此查看子女的乘車班次
+            {parent
+              ? '綁定後即可在此查看子女的乘車班次'
+              : '找不到您的家長資料, 請聯絡學校管理員重新綁定'}
           </p>
           <button
             type="button"
@@ -292,7 +325,7 @@ function ParentsTripsPageInner() {
               renderItem={(trip) => (
                 <ParentTripCard
                   trip={trip}
-                  clientId={user.clientId || ''}
+                  myStudents={myStudents}
                   busPlate={STORAGE.buses.getById(trip.busId)?.plateNumber || '未指派校巴'}
                   driverName={
                     STORAGE.buses.getById(trip.busId)?.driverId
@@ -332,27 +365,33 @@ function CountPill({ n }: { n: number }) {
  */
 function ParentTripCard({
   trip,
-  clientId,
+  myStudents,
   busPlate,
   driverName,
   nannyName,
   onClick,
 }: {
   trip: Trip;
-  clientId: string;
+  myStudents: Student[];
   busPlate: string;
   driverName: string;
   nannyName: string;
   onClick: () => void;
 }) {
-  // 解析「我的學生」姓名 (trip.studentIds 是所有該班次的學生,
-  // 但家長只在意自己綁定的; 透過 clientId + parentIds 過濾)。
+  // 解析「我的學生」姓名 — 只顯示家長自己綁定的子女。
+  //
+  // ⚠️ 原本用 `STORAGE.students.getByClient(clientId)`, 當 clientId 為空
+  //    (帳號沒掛學校 / 跨機構) 時直接回傳 [] → 卡片上「接送學生」永遠空白。
+  //    現在改由上層直接傳入已解析好的 myStudents。
   const studentNames = useMemo(() => {
-    if (!clientId) return [];
-    const allStudents = STORAGE.students.getByClient(clientId);
-    const myIds = new Set(trip.studentIds);
-    return allStudents.filter((s) => myIds.has(s.id)).map((s) => s.name);
-  }, [trip.studentIds, clientId]);
+    if (!myStudents.length) return [];
+    const myIds = new Set(myStudents.map((s) => s.id));
+    const tripIds = new Set([
+      ...(trip.studentIds || []),
+      ...(trip.waypoints || []).flatMap((w) => w.studentIds || []),
+    ]);
+    return myStudents.filter((s) => tripIds.has(s.id)).map((s) => s.name);
+  }, [trip, myStudents]);
 
   const statusColor = {
     scheduled: 'bg-muted text-muted-foreground',

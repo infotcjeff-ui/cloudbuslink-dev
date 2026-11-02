@@ -1,7 +1,14 @@
 // Supabase 資料服務 - 從 Supabase 讀取資料並同步到 LocalStorage
 // 這樣可以確保 localhost 和 livesite 看到相同的資料
 import { supabase } from './supabase';
-import { STORAGE, isInitialized, markInitialized } from './storage';
+import {
+  STORAGE,
+  isInitialized,
+  markInitialized,
+  mergeCloudUsers,
+  mergeCloudRecords,
+  applyPendingPatches,
+} from './storage';
 import { camelize, snakify } from './supabase-case';
 import { dispatchNannyRefresh } from './cbl-events';
 import { resolveSystemConfig } from './system-config';
@@ -123,12 +130,49 @@ async function doSync(): Promise<boolean> {
     if (typeof window !== 'undefined' && companies.length > 0) {
       try { window.dispatchEvent(new CustomEvent('cbl-companies-refresh')); } catch { /* ignore */ }
     }
-    if (users.length > 0) STORAGE.users.setAll(users as User[]);
+    if (users.length > 0) {
+      // ⚠️ 帳號不能整批覆蓋 ——
+      //   帳號是「本機先寫、雲端後推」的流程: 管理員新增家長 / 保姆時先寫
+      //   localStorage, 背景再 push 到 cbl_users。push 還沒完成時 setAll()
+      //   會把剛建立的帳號洗掉 → 家長頁顯示「無帳號」, 登入回「帳戶不存在」。
+      //   → 改用 mergeCloudUsers (保留尚未 push 的本機帳號)。
+      const { merged, keptLocal } = mergeCloudUsers(users as User[]);
+      if (keptLocal > 0) {
+        console.log(`[Supabase] 保留 ${keptLocal} 筆尚未推上雲端的本機帳號`);
+      }
+      STORAGE.users.setAll(merged);
+    }
     if (drivers.length > 0) STORAGE.drivers.setAll(drivers as Driver[]);
     if (buses.length > 0) STORAGE.buses.setAll(buses as Bus[]);
-    if (parents.length > 0) STORAGE.parents.setAll(parents as Parent[]);
-    if (students.length > 0) STORAGE.students.setAll(students as Student[]);
-    if (nannies.length > 0) STORAGE.nannies.setAll(nannies as Nanny[]);
+    // ⚠️ parents / students / nannies / routes 用「合併」而非 setAll ——
+    //   這些實體是「本機先寫、雲端後推」的流程:
+    //     管理員在後台新增家長 / 綁定子女時先寫 localStorage (讓 UI 即時反應),
+    //     背景再 push 到 DB。push 還沒完成 (或失敗) 時, setAll() 會用雲端的
+    //     舊快照整批覆蓋 → 剛綁定的 student.parentIds 憑空消失 →
+    //     家長端顯示「沒有子女」、班次頁也找不到班次。
+    //   mergeCloudRecords 以「有沒有推過雲端」判斷:
+    //     - 雲端有 + 本機有        → 以雲端為準
+    //     - 只有雲端有            → 採用 (別的裝置新建的)
+    //     - 只有本機有 + 推過雲端 → 丟掉 (在別的裝置被刪了)
+    //     - 只有本機有 + 沒推過    → 保留 (還在等待 push)
+    if (parents.length > 0) {
+      mergeCloudRecords('parents',
+        STORAGE.parents.getAll(),
+        applyPendingPatches('parents', parents as Parent[]),
+        (rows) => STORAGE.parents.setAll(rows));
+    }
+    if (students.length > 0) {
+      mergeCloudRecords('students',
+        STORAGE.students.getAll(),
+        applyPendingPatches('students', students as Student[]),
+        (rows) => STORAGE.students.setAll(rows));
+    }
+    if (nannies.length > 0) {
+      mergeCloudRecords('nannies',
+        STORAGE.nannies.getAll(),
+        applyPendingPatches('nannies', nannies as Nanny[]),
+        (rows) => STORAGE.nannies.setAll(rows));
+    }
     // trips / attendances 用 mergeAll 而非 setAll ——
     // 理由: 這兩張表是「本機先寫、雲端後推」的流程。
     //   setAll 會用 DB 的舊快照整批覆蓋 localStorage, 導致:
@@ -138,8 +182,8 @@ async function doSync(): Promise<boolean> {
     //   註: 兩者皆空時維持原狀 (不清空), 與其他表一致。
     if (trips.length > 0) STORAGE.trips.mergeAll(trips as Trip[]);
     if (attendances.length > 0) STORAGE.attendances.mergeAll(attendances as Attendance[]);
-    // 公告用 merge 而不是 setAll — 示範公告 (ann-001) 只在 localStorage,
-    // 用 setAll 覆蓋會讓它在第一次 sync 後消失。
+    // 公告用 merge 而不是 setAll — 支援「本機先寫、雲端後推」,
+    // 用 setAll 覆蓋會讓尚未推上雲端的那則在第一次 sync 後消失。
     if (announcements.length > 0) STORAGE.announcements.mergeAll(announcements as Announcement[]);
     if (routes.length > 0) STORAGE.routes.setAll(routes as Route[]);
 

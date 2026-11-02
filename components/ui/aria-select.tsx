@@ -11,8 +11,22 @@ import { cn } from '@/lib/utils';
 // 對外 API (AriaSelectRoot / AriaSelectItem / SelectedCheck) 保持不變,
 // 呼叫端無需改動。
 //
-// 注意: 必須傳 textValue 才能讓 trigger 內 Select.Value 顯示純字串
-// (不含 children 內的 circle-check icon)。
+// ⚠️ Radix 的兩個「陷阱」—— 本檔案所有排版都必須繞開它們:
+//
+//   1) <Select.Value> 與 <Select.ItemText> 都會把傳入的 className / style
+//      直接丟掉 (radix-ui/react-select 的實作是
+//      `const { className, style, ...rest } = props`, 之後再也沒用到這兩個值)。
+//      → 想控制排版, 只能在他們「外面」自己包一層 <span>。
+//
+//   2) <Select.Value> 若沒給 children, Radix 會把「被選中 item 的
+//      ItemText children」整份 portal 進 trigger。
+//      我們的 item children 含有 圓點 / 頭像 / 選中圈勾, 被 portal 進 trigger
+//      之後會發生:
+//        - trigger 多出一個圈勾 icon
+//        - trigger 內容被擠成上下兩行 (icon + 文字 / 圈勾)
+//      → 這裡自己維護「value → 純文字」對照表, 直接把純文字當作
+//        <Select.Value> 的 children 傳入; 有 children 時 Radix 不會再 portal。
+//
 // API:
 //   <AriaSelectRoot icon={<X />}>
 //     <AriaSelectItem value="..." textValue="label 純字串">...完整 children...</AriaSelectItem>
@@ -39,6 +53,52 @@ interface AriaSelectRootProps {
   disabled?: boolean;
 }
 
+interface AriaSelectItemProps {
+  /** 等同 Radix 的 value — 內部對應到 selectedKey/onSelectionChange */
+  value?: string;
+  /** react-aria 時代用的 id — 此實作會 fallback 到 id */
+  id?: string;
+  /** 純字串標籤 — 用於 trigger 內顯示 + 鍵盤輸入搜尋 */
+  textValue: string;
+  /** 完整 children — 顯示在 popover 內的 item (含圓點/雙行/圈勾) */
+  children: React.ReactNode;
+  className?: string;
+  disabled?: boolean;
+}
+
+/**
+ * 收集所有 item 的「value → 純文字標籤」對照表。
+ *
+ * 用途: trigger 顯示用。
+ *   Radix 在沒有 children 時會把 item 的完整 children (圓點/頭像/圈勾)
+ *   portal 進 trigger, 導致 trigger 內容變兩行 + 出現多餘的圈勾。
+ *   改成自己查出純文字傳給 <Select.Value>, 即可讓 trigger 永遠只有一行純字。
+ *
+ * 遞迴處理 Fragment / group, 讓包在 <></> 裡面的 item 也能被收集到。
+ */
+function collectItemLabels(children: React.ReactNode): Map<string, string> {
+  const map = new Map<string, string>();
+
+  const visit = (nodes: React.ReactNode) => {
+    React.Children.forEach(nodes, (child) => {
+      if (!React.isValidElement(child)) return;
+
+      const props = child.props as AriaSelectItemProps & { children?: React.ReactNode };
+      if (typeof props.textValue === 'string') {
+        const key = props.value ?? props.id ?? '';
+        map.set(String(key), props.textValue);
+      }
+
+      if (child.type === React.Fragment && props.children) {
+        visit(props.children);
+      }
+    });
+  };
+
+  visit(children);
+  return map;
+}
+
 export function AriaSelectRoot({
   value: valueProp,
   selectedKey,
@@ -58,6 +118,17 @@ export function AriaSelectRoot({
 }) {
   // value 優先; 否則從 selectedKey 取 (相容舊的 react-aria 風格)
   const value = valueProp !== undefined ? valueProp : (selectedKey != null ? String(selectedKey) : undefined);
+
+  // value → 純文字對照表 (給 trigger 用)
+  const labels = React.useMemo(() => collectItemLabels(children), [children]);
+  const currentLabel = value !== undefined ? labels.get(String(value)) : undefined;
+
+  // Radix 的 placeholder 條件是 value === '' 或 undefined。
+  // 這個時候觸發器只顯示 placeholder, 不顯示 item 的純文字。
+  // 所以當呼叫端沒給 placeholder、但有「空值 item」(id / value = '') 時,
+  // 直接拿那個 item 的 textValue 當 placeholder —— 避免觸發器變成空白。
+  const emptyItemLabel = labels.get('');
+  const resolvedPlaceholder = placeholder ?? (value === '' ? emptyItemLabel : undefined);
 
   const handleValueChange = (v: string) => {
     // 對應 react-aria 的 onSelectionChange: 給呼叫端 string (原本就是用 (k as string) 處理)
@@ -91,12 +162,16 @@ export function AriaSelectRoot({
             {icon}
           </span>
         )}
-        {/* Select.Value 自動根據 item.textValue 顯示純字串 — 不渲染 item 的 children,
-            避免把 item 內的 icon / circle / tick 塞進 trigger。 */}
-        <SelectPrimitive.Value
-          placeholder={placeholder}
-          className="truncate text-left flex-1"
-        />
+        {/* Radix 會丟掉 <Select.Value> 的 className, 所以排版只能靠外層這一層:
+            - flex-1 + min-w-0: 佔滿剩餘空間, 讓 chevron 靠右
+            - truncate: nowrap + ellipsis, 保證「任何螢幕寬度都只有一行」
+            有傳 children 給 <Select.Value> 時 Radix 不會把 item 的完整 children
+            (圓點/頭像/圈勾) portal 進 trigger → 不會再出現圈勾或多餘的一行。 */}
+        <span className="min-w-0 flex-1 truncate text-left">
+          <SelectPrimitive.Value placeholder={resolvedPlaceholder}>
+            {currentLabel ?? ''}
+          </SelectPrimitive.Value>
+        </span>
         <SelectPrimitive.Icon asChild>
           <ChevronDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
         </SelectPrimitive.Icon>
@@ -123,19 +198,6 @@ export function AriaSelectRoot({
   );
 }
 
-interface AriaSelectItemProps {
-  /** 等同 Radix 的 value — 內部對應到 selectedKey/onSelectionChange */
-  value?: string;
-  /** react-aria 時代用的 id — 此實作會 fallback 到 id */
-  id?: string;
-  /** 純字串標籤 — 用於 trigger 內顯示 + 鍵盤輸入搜尋 */
-  textValue: string;
-  /** 完整 children — 顯示在 popover 內的 item (含圓點/雙行/圈勾) */
-  children: React.ReactNode;
-  className?: string;
-  disabled?: boolean;
-}
-
 export function AriaSelectItem({
   value: valueProp,
   id,
@@ -151,15 +213,22 @@ export function AriaSelectItem({
       textValue={textValue}
       disabled={disabled}
       className={cn(
-        'flex items-center gap-3 rounded-xl px-3 py-2 outline-none cursor-pointer select-none',
+        'flex items-center gap-2 rounded-xl px-3 py-2 outline-none cursor-pointer select-none',
         'data-[highlighted]:bg-muted/60 data-[highlighted]:text-foreground',
         'data-[state=checked]:bg-blue-50/80',
         'data-[disabled]:opacity-50 data-[disabled]:cursor-not-allowed',
         className
       )}
     >
-      <SelectPrimitive.ItemText className="flex items-center gap-3 flex-1 min-w-0">
-        {children}
+      {/* Radix 會丟掉 <Select.ItemText> 的 className, 所以用內層 span 建立
+          flex row:
+            - 圓點 (w-2.5 h-2.5) 變成 flex item → 才有尺寸 (inline span 會變 0 寬)
+            - 文字 (flex-1 truncate) 佔滿剩餘空間並在必要時截斷
+            - 圈勾留在同一行右側, 不會被擠到第二行
+          (原本 ItemText 沒有 display:flex, 內容是 inline 排版, 圈勾是 block 級
+           div → 必定換行, item 變成兩行高) */}
+      <SelectPrimitive.ItemText>
+        <span className="flex items-center gap-2 min-w-0">{children}</span>
       </SelectPrimitive.ItemText>
     </SelectPrimitive.Item>
   );

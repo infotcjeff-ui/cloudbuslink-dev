@@ -43,7 +43,8 @@ import {
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
-import { resolveClientId } from '@/lib/storage';
+import { useAuthClientId } from '@/lib/use-client-id';
+import { markPendingPatch } from '@/lib/storage';
 import { Pill, Dot } from './primitives';
 import {
   Button,
@@ -319,20 +320,13 @@ export function StudentsConsoleContent({
 
   /* -------- Handlers -------- */
   // 取得當前登入者的 clientId (供 form 內即時新增家長 + preview studentId 使用)
-  const authClientId = React.useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    try {
-      const raw = localStorage.getItem('cbl_auth');
-      if (!raw) return '';
-      const u = JSON.parse(raw);
-      // 跨機構角色 (super_admin / system_admin) 沒有自己的 clientId,
-      // 但建立資料時需要一個有效的 client_id (DB 有 NOT NULL + FK 約束)
-      // → 用 resolveClientId 兜底到已知學校的 clientId
-      return resolveClientId(u?.clientId || null);
-    } catch {
-      return resolveClientId(null);
-    }
-  }, []);
+  //
+  // ⚠️ 用 useAuthClientId (而不是 useMemo + []) 的原因:
+  //   useMemo 只在 mount 算一次, 而 localStorage 的 cbl_clients 要等雲端同步
+  //   回來才有值 → mount 時 resolveClientId() 找不到學校 → 回傳 ''
+  //   → 建立的資料 client_id='' → 撞 FK → 推不上去。
+  //   hook 會監聽 cbl-clients-refresh, 同步回來後自動重算。
+  const authClientId = useAuthClientId();
 
   // 取得學年字串 (供 studentId preview)
   const academicYear = React.useMemo(() => {
@@ -464,6 +458,14 @@ export function StudentsConsoleContent({
           };
           STORAGE.students.update(formModal.editingId, updates);
           savedName = updates.name;
+
+          // ⚠️ 家長↔子女的綁定必須記成「待推送」。
+          //    這裡是「本機先寫、雲端後推」, 若 push 還在跑時有一次 sync 拉回
+          //    雲端舊快照, 綁定會被洗掉 → 家長端立刻看不到子女。
+          markPendingPatch('students', formModal.editingId, {
+            parentIds: updates.parentIds,
+            primaryParentId: updates.primaryParentId,
+          });
 
           // 推回雲端 (背景)
           const { supabaseStudents } = await import('@/lib/supabase-entities');

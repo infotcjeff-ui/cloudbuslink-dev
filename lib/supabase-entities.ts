@@ -24,7 +24,8 @@
 // ============================================================================
 
 import { camelize, snakify } from './supabase-case';
-import { markSynced, unmarkSynced } from './storage';
+import { alignPayloadClientId } from './supabase-client-id';
+import { markSynced, unmarkSynced, clearPendingPatch } from './storage';
 import type { Student, Parent, Nanny, Route } from './types';
 
 /** entityKey — 對應 lib/storage.ts 的 STORAGE 屬性名 (同步記錄用) */
@@ -61,6 +62,11 @@ async function insertWithColumnFallback(
 ): Promise<{ success: boolean; error?: string }> {
   const { supabase } = await import('./supabase');
   let payload = body;
+
+  // ⚠️ client_id 有 FK → cbl_clients(id), 而且這些表的 client_id 是 NOT NULL。
+  //    空字串 '' 一定撞 FK (例: cbl_parents_client_id_fkey) → 整筆 insert 失敗。
+  //    → 先對齊到雲端真的存在的學校 id。
+  await alignPayloadClientId(payload);
 
   for (let attempt = 0; attempt < 12; attempt++) {
     const { error } = await supabase.from(table).insert(payload);
@@ -149,12 +155,31 @@ async function updateWithColumnFallback(
   let payload = body;
   const dropped: string[] = [];
 
+  // ⚠️ 同 insert: 若 patch 帶了 client_id, 必須對齊到雲端真的存在的 id
+  //    (空字串 / 舊 id 都會撞 FK)。
+  if ('client_id' in payload) {
+    await alignPayloadClientId(payload);
+  }
+
   for (let attempt = 0; attempt < 12; attempt++) {
-    const { error } = await supabase
+    // ⚠️ 必須用 .select() 二次驗證 ——
+    //   PostgREST 對「update 0 筆」(id 在雲端不存在) 會回傳成功 + 無錯誤,
+    //   但實際上什麼都沒寫進去 → 呼叫端以為成功了, 雲端卻還是沒有這筆資料。
+    //   這正是「家長已更新, 但雲端 cbl_parents 永遠是空的」的原因。
+    const { data, error } = await supabase
       .from(table)
       .update(payload)
-      .eq('id', id);
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
     if (!error) {
+      if (!data) {
+        console.warn(`[Supabase] ${table}.update 沒有匹配到任何列 (id=${id})`);
+        return {
+          success: false,
+          error: `雲端找不到這筆資料 (${table}/${id}), 請重新新增`,
+        };
+      }
       if (dropped.length > 0) {
         console.warn(
           `[Supabase] ${table}.update 已略過 live schema 沒有的欄位: ${dropped.join(', ')}`,
@@ -289,6 +314,9 @@ export const supabaseStudents = {
       return res;
     }
     markSynced('students', id);
+    // push 成功 → 這筆的「待推送變更」可以清掉了
+    // (清掉後雲端就是唯一真相, 之後 sync 不會再套用 pending)
+    clearPendingPatch('students', id);
     return { success: true };
   },
 
@@ -347,6 +375,22 @@ export const supabaseParents = {
       snakify(patch) as Record<string, unknown>,
     );
     if (!res.success) {
+      // ⚠️ 雲端沒有這筆 row (本機有、雲端沒有) → 退化成「新增」,
+      //   讓 update 也能把資料補建到雲端。
+      //   沒有這段的話, 編輯家長只會一直回報「更新成功」,
+      //   但雲端 cbl_parents 永遠是空的 (PostgREST 對 update 0 筆回成功)。
+      if (res.error?.includes('雲端找不到這筆資料')) {
+        const { STORAGE } = await import('./storage');
+        const local = STORAGE.parents.getById(id);
+        if (local) {
+          const merged: Parent = { ...local, ...patch };
+          const addRes = await this.add(merged);
+          if (addRes.success) {
+            console.warn('[Supabase] cbl_parents 雲端缺這筆 → 已改用新增補建');
+          }
+          return addRes;
+        }
+      }
       console.error('[Supabase] Failed to update parent:', res.error);
       return res;
     }

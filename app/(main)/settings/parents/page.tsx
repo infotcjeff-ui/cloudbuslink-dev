@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, Search, Edit2, Trash2, Users, Eye, EyeOff, Sparkles } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,7 +12,8 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE, resolveClientId, resolveDataScope, markPendingPatch } from '@/lib/storage';
+import { useAuthClientId } from '@/lib/use-client-id';
 import { isValidPhone } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import {
@@ -20,7 +21,7 @@ import {
   EMPTY_PARENT_FORM,
   type ParentFormState,
 } from '@/app/(main)/cbl-admin-setting/[layout]/students/ParentFormModal';
-import type { Parent } from '@/lib/types';
+import type { Parent, Student } from '@/lib/types';
 
 // 編輯模式的密碼 sentinel: 代表「保留現有密碼」
 const KEEP_PASSWORD = '__KEEP__';
@@ -49,11 +50,33 @@ export default function ParentsPage() {
     password: '',     // 新增: 必填 (>=6); 編輯: 留空 = 不改
   });
   const [error, setError] = useState('');
+  // 學生清單 — 「新版家長表單」的「關聯學生」多選需要它
+  // (沒傳 students 進 ParentFormModal → 選單永遠空白 → 家長綁不到任何子女)
+  const [students, setStudents] = useState<Student[]>([]);
+
+  // 資料可見範圍 (超管看全部, 一般角色只看自己學校)。
+  // 放在 component 頂層 (handleSubmit 之後宣告會用到 → TS2448)。
+  // ⚠️ 必須 useMemo: resolveDataScope 每次呼叫都回傳新物件,
+  //    若直接放進 useEffect deps 會每次 render 都重跑 effect → 無限迴圈。
+  const scope = useMemo(() => resolveDataScope(user), [user]);
+
+  // 建立家長時要用的 clientId。
+  // ⚠️ 不可直接用 user.clientId — 跨機構角色 (super_admin / system_admin) 沒有,
+  //    而且 user.clientId 在「首次載入、雲端同步未完成」時也可能拿不到。
+  //    useAuthClientId 會在雲端同步回來後自動重算 → 避免 client_id='' 撞 FK。
+  const authClientId = useAuthClientId(user?.clientId);
 
   useEffect(() => {
     if (!user) return;
-    setParents(STORAGE.parents.getByClient(user.clientId || ''));
-  }, [user]);
+    // 依資料可見範圍取家長 (超管看全部, 一般角色只看自己學校)
+    setParents(scope.isSuperAdmin
+      ? STORAGE.parents.getAll()
+      : STORAGE.parents.getByClient(scope.clientId));
+    // 學生清單 (供 ParentFormModal 的「關聯學生」使用)
+    setStudents(scope.isSuperAdmin
+      ? STORAGE.students.getAll()
+      : STORAGE.students.getByClient(scope.clientId));
+  }, [user, scope]);
 
   if (!user) return null;
 
@@ -145,14 +168,14 @@ export default function ParentsPage() {
           password: newPassword,  // 使用管理員自訂密碼
           role: 'parent',
           name: form.name.trim(),
-          clientId: user.clientId,
+          clientId: authClientId,
           status: 'active',
           createdAt: new Date().toISOString(),
         });
 
         const newParent = {
           id: STORAGE.genId('parent'),
-          clientId: resolveClientId(user.clientId || null),
+          clientId: authClientId,
           name: form.name.trim(),
           phone: form.phone,
           alternatePhone: form.alternatePhone || null,
@@ -162,7 +185,11 @@ export default function ParentsPage() {
           relationship: form.relationship,
           isPickupAuth: form.isPickupAuth,
           isPrimaryContact: false,
-          password: form.phone, // 預設密碼 = 電話 (使用者可在「家長管理」再改)
+          // ⚠️ 密碼必須跟 user 帳號一致 (newPassword), 不能寫成電話!
+          //   cbl_parents.password 是「自癒層」的憑證來源 ——
+          //   當 cbl_users 那筆帳號被 sync 洗掉時, 登入會靠這裡的密碼重建帳號。
+          //   寫成電話的話, 重建出來的密碼跟管理員設定的不符 → 登入時回「密碼錯誤」。
+          password: newPassword,
           notificationEnabled: form.notificationEnabled,
           status: form.status,
           createdAt: new Date().toISOString(),
@@ -178,6 +205,38 @@ export default function ParentsPage() {
             toast.warning(`家長已新增，但雲端同步失敗：${sbRes.error}`);
           }
         }
+
+        // ⚠️ 登入帳號也必須推回雲端 ——
+        //   這裡原本只寫 localStorage, 沒有 push 到 cbl_users。
+        //   → 家長在另一台裝置 / 重新整理後就登入不到 (帳號不存在)。
+        {
+          const { supabaseUsers } = await import('@/lib/supabase-users');
+          const account = STORAGE.users.findByPhone(form.phone);
+          if (account) {
+            const sbExisting = await supabaseUsers.findByPhone(form.phone);
+            const sbRes = sbExisting.data
+              ? await supabaseUsers.update(sbExisting.data.id, {
+                  password: newPassword,
+                  name: account.name,
+                  accountName: null,
+                })
+              : await supabaseUsers.add({
+                  id: account.id,
+                  phone: account.phone,
+                  accountName: null,
+                  password: account.password,
+                  role: 'parent',
+                  name: account.name,
+                  clientId: account.clientId ?? null,
+                  status: account.status,
+                  createdAt: account.createdAt,
+                });
+            if (!sbRes.success) {
+              console.warn('[Parents] Supabase user push failed:', sbRes.error);
+              toast.warning(`家長已新增，但登入帳號雲端同步失敗：${sbRes.error}`);
+            }
+          }
+        }
         toast.success(`家長「${form.name.trim()}」已新增, 登入帳號已建立`);
       }
     } catch (e) {
@@ -186,7 +245,9 @@ export default function ParentsPage() {
       toast.error(`儲存失敗：${msg}`);
       return;
     }
-    setParents(STORAGE.parents.getByClient(user.clientId || ''));
+    setParents(scope.isSuperAdmin
+      ? STORAGE.parents.getAll()
+      : STORAGE.parents.getByClient(scope.clientId));
     setDialogOpen(false);
     setEditId(null);
   };
@@ -209,7 +270,9 @@ export default function ParentsPage() {
         console.warn('[Parents] Supabase delete error:', e);
       }
       toast.success(`家長「${targetName}」已刪除`);
-      setParents(STORAGE.parents.getByClient(user.clientId || ''));
+      setParents(scope.isSuperAdmin
+        ? STORAGE.parents.getAll()
+        : STORAGE.parents.getByClient(scope.clientId));
       setDeleteId(null);
     } catch (e) {
       console.error('[Parents] handleDelete error:', e);
@@ -226,7 +289,7 @@ export default function ParentsPage() {
   const handleNewFormSave = async (state: ParentFormState) => {
     setIsNewFormSaving(true);
     try {
-      const clientId = resolveClientId(user?.clientId || null);
+      const clientId = authClientId || resolveClientId(user?.clientId || null);
       const name = state.name.trim();
       const phone = state.phone.trim();
       // 1) 新增家長 (主要聯繫人標記已移至學生層級, 此處不再儲存)
@@ -278,6 +341,32 @@ export default function ParentsPage() {
           status: 'active',
           createdAt: new Date().toISOString(),
         });
+      }
+      // 3.5) 同步綁定子女 (student.parentIds)
+      //
+      // ⚠️ 原本這裡完全沒處理「關聯學生」→ 表單裡勾的子女從沒被綁到,
+      //    家長端當然看不到任何子女。而且就算綁了, 也必須推回雲端,
+      //    否則下次 syncFromSupabase() 會用雲端快照覆蓋 → 綁定消失。
+      if (state.studentIds.length > 0) {
+        const { supabaseStudents } = await import('@/lib/supabase-entities');
+        for (const sid of state.studentIds) {
+          const student = STORAGE.students.getById(sid);
+          if (!student) continue;
+          const parentIds = student.parentIds.includes(newId)
+            ? student.parentIds
+            : [...student.parentIds, newId];
+          const patch = {
+            parentIds,
+            primaryParentId: student.primaryParentId || newId,
+          };
+          STORAGE.students.update(sid, patch);
+          markPendingPatch('students', sid, patch);
+          const sbRes = await supabaseStudents.update(sid, patch);
+          if (!sbRes.success) {
+            console.warn('[Parents] Supabase student parentIds update failed:', sbRes.error);
+          }
+        }
+        window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
       }
       // 4) 雲端 user 帳號也一併寫 (避免 syncToStorage 把本機 user 洗掉 → 前台顯示無帳號)
       try {
@@ -531,6 +620,7 @@ export default function ParentsPage() {
         mode="add"
         initial={EMPTY_PARENT_FORM}
         existingParents={parents}
+        students={students}
         isSaving={isNewFormSaving}
         onSave={handleNewFormSave}
         onClose={() => setNewFormOpen(false)}

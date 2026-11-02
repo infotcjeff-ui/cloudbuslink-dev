@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { UserCheck, Settings, LogOut, ArrowLeft, Bus } from 'lucide-react';
+import { UserCheck, Settings, LogOut, ArrowLeft } from 'lucide-react';
 import { useAuth, useSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { getParentPath } from '@/lib/navigation';
@@ -16,8 +16,12 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
   const { settings } = useSettings(user?.clientId);
   const [mounted, setMounted] = useState(false);
 
-  // 頂層頁面 (我的班次 / 班次列表 / 設定) 不顯示返回鍵; 子頁才顯示
-  const topLevelPaths = ['/nanny', '/nanny/portal', '/nanny/trips', '/nanny/settings'];
+  // 頂層頁面 (我的班次 / 設定) 不顯示返回鍵; 子頁才顯示
+  //
+  // 注意: /nanny/trips 已從底部 tab 移除 (只保留「我的班次」與「設定」),
+  // 但頁面本身仍然保留 (由「我的班次」頁的「查看其他日期」進入),
+  // 所以它不再算頂層頁 — 要顯示返回鍵返回 /nanny。
+  const topLevelPaths = ['/nanny', '/nanny/portal', '/nanny/settings'];
   const isTopLevel = topLevelPaths.includes(pathname);
   const showBackButton = !isTopLevel;
 
@@ -100,14 +104,14 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
         {children}
       </main>
 
-      {/* Bottom Tab Bar */}
+      {/* Bottom Tab Bar — 只保留「我的班次」與「設定」 */}
       <nav className="fixed bottom-3 left-0 right-0 z-40 safe-bottom pointer-events-none">
-        <div className="mx-auto max-w-[80vw] liquid-glass rounded-2xl shadow-lg p-1.5 pointer-events-auto">
-          <div className="flex justify-around">
+        <div className="mx-auto max-w-[65vw] liquid-glass rounded-2xl shadow-lg p-1.5 pointer-events-auto">
+          <div className="grid grid-cols-2 gap-1">
             <Link
               href="/nanny"
               className={cn(
-                'flex flex-col items-center gap-1 py-2 px-3 rounded-xl text-xs font-medium transition-colors',
+                'relative flex flex-row items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-colors',
                 pathname === '/nanny' || pathname === '/nanny/portal'
                   ? 'text-emerald-500 bg-emerald-500/10'
                   : 'text-muted-foreground'
@@ -117,21 +121,9 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
               <span>我的班次</span>
             </Link>
             <Link
-              href="/nanny/trips"
-              className={cn(
-                'flex flex-col items-center gap-1 py-2 px-3 rounded-xl text-xs font-medium transition-colors',
-                pathname.startsWith('/nanny/trips')
-                  ? 'text-emerald-500 bg-emerald-500/10'
-                  : 'text-muted-foreground'
-              )}
-            >
-              <Bus className="w-5 h-5" />
-              <span>班次</span>
-            </Link>
-            <Link
               href="/nanny/settings"
               className={cn(
-                'flex flex-col items-center gap-1 py-2 px-3 rounded-xl text-xs font-medium transition-colors',
+                'relative flex flex-row items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-medium transition-colors',
                 pathname.startsWith('/nanny/settings')
                   ? 'text-emerald-500 bg-emerald-500/10'
                   : 'text-muted-foreground'

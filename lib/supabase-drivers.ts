@@ -1,5 +1,6 @@
 // Supabase 司機 CRUD 操作
 import { camelize, snakify } from './supabase-case';
+import { alignPayloadClientId } from './supabase-client-id';
 
 /**
  * 解析一個「雲端真的存在的」client id。
@@ -8,32 +9,13 @@ import { camelize, snakify } from './supabase-case';
  *   本機 localStorage 的 clientId 可能是舊的 / 不同步的 id,
  *   直接拿去 insert 會撞 FK violation (cbl_drivers_client_id_fkey)。
  *
- * 處置順序:
- *   1. 傳進來的 id 若雲端存在 → 用它
- *   2. 否則 → 用雲端第一間 cbl_clients (只有一間時就是它)
- *   3. 雲端連一間都沒有 → 回傳原值, 讓呼叫端自己處理錯誤
+ * ⚠️ 本函式保留「回傳字串」的舊簽名 (呼叫端 lib/supabase-buses.ts 依賴它)。
+ *    新的共用實作在 lib/supabase-client-id.ts, 那裡還多處理了
+ *    「刻意給 null」與「空字串」的語意差異 —— 這裡直接委派過去, 避免兩份邏輯漂移。
  */
 export async function resolveCloudClientId(preferred?: string | null): Promise<string> {
-  try {
-    const { supabase } = await import('./supabase');
-    if (preferred) {
-      const { data } = await supabase
-        .from('cbl_clients')
-        .select('id')
-        .eq('id', preferred)
-        .maybeSingle();
-      if (data) return preferred;
-    }
-    const { data: first } = await supabase
-      .from('cbl_clients')
-      .select('id')
-      .limit(1)
-      .maybeSingle();
-    if (first?.id) return first.id;
-  } catch (e) {
-    console.warn('[Supabase] resolveCloudClientId failed:', e);
-  }
-  return preferred || '';
+  const { resolveCloudClientId: resolve } = await import('./supabase-client-id');
+  return (await resolve(preferred)) ?? '';
 }
 
 // 司機 CRUD 操作
@@ -99,6 +81,9 @@ export const supabaseDrivers = {
   }): Promise<{ success: boolean; error?: string; id?: string }> {
     const { supabase } = await import('./supabase');
     const payload = snakify(driver);
+
+    // ⚠️ client_id 有 FK → cbl_clients(id) 且 NOT NULL → 空字串一定撞 FK
+    await alignPayloadClientId(payload);
 
     // 用 .select() 驗證資料是否真的寫入 (RLS 政策可能會靜默拒絕)
     const { data, error } = await supabase

@@ -240,8 +240,8 @@ export const supabaseAnnouncements = {
    * - 公告是「會變動」的資料 (管理員新增/停用), 需要在進入頁面時保證是最新
    *
    * 為什麼用 mergeAll 而不是 setAll:
-   * - 示範公告 (ann-001) 只在 localStorage (mock-data 種子), 不在 DB
-   * - 用 setAll 覆蓋會讓示範公告在進一次後台頁面後消失
+   * - 公告支援「本機先寫、雲端後推」(後台頁先寫 localStorage 再同步 DB)
+   * - 用 setAll 覆蓋會讓尚未推上雲端的那則公告在下一次同步時消失
    */
   async syncToStorage(): Promise<{ success: boolean; error?: string }> {
     const { data, error } = await this.getAll();

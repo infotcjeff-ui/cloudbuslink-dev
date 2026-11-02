@@ -687,7 +687,12 @@ export function TripRouteFormModal({
                           required
                           renderLabel={(d) => `${d.name} · ${d.phone}`}
                         />
-                        {selectedBus?.driverId && master.driverId === selectedBus.driverId && boundDriverName ? (
+                        {/* 只有「新增路線」時顯示此提示 —— 該提示是用來說明「選校巴後自動帶入司機」,
+                            編輯路線時司機本來就已是綁定司機, 再顯示一次是多餘的 */}
+                        {mode === 'add' &&
+                        selectedBus?.driverId &&
+                        master.driverId === selectedBus.driverId &&
+                        boundDriverName ? (
                           <p className="mt-1 text-[10.5px] text-emerald-600 dark:text-emerald-300 inline-flex items-center gap-1">
                             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="shrink-0">
                               <path d="M20 6 9 17l-5-5" />

@@ -8,6 +8,7 @@ import { useAuth, useSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { getParentPath } from '@/lib/navigation';
 import { NotificationDropdown } from '@/components/NotificationDropdown';
+import { syncFromSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 
 export default function ParentsPortalLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -37,6 +38,36 @@ export default function ParentsPortalLayout({ children }: { children: React.Reac
       router.replace('/login');
     }
   }, [user, loading, router]);
+
+  // ⚠️ 主動拉一次雲端資料 (這是「家長看不到自己子女」的最後一塊拼圖)
+  //
+  // 為什麼需要:
+  //   initWithSupabase() 在 localStorage 已 initialized 時會直接 return,
+  //   所以家長第一次登入後, 之後不管重整幾次都不會再拉雲端 →
+  //   管理員在另一台裝置綁定的子女, 家長這邊永遠看不到。
+  //   → 家長 portal 進場時主動 syncFromSupabase(), 讓資料是最新的。
+  //
+  //   sync 完成後會 dispatch cbl-*-refresh 事件, 各頁面的 reload 會自動重畫。
+  useEffect(() => {
+    if (!user) return;
+    if (!isSupabaseAvailable()) return;
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        await syncFromSupabase();
+      } catch (e) {
+        console.warn('[ParentsPortalLayout] cloud sync failed:', e);
+      }
+      if (cancelled) return;
+      // 保險: 處理「sync 早於子頁掛上監聽器」的情況
+      window.dispatchEvent(new CustomEvent('cbl-parents-refresh'));
+      window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
+    };
+    void sync();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   if (!mounted || (loading && !user)) {
     return (

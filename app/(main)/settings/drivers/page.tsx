@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
 import { isValidPhone } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import type { Driver } from '@/lib/types';
@@ -30,10 +30,15 @@ export default function DriversPage() {
 
   useEffect(() => {
     if (!user) return;
-    setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
+    const scope = resolveDataScope(user);
+    setDrivers(scope.isSuperAdmin
+      ? STORAGE.drivers.getAll()
+      : STORAGE.drivers.getByClient(scope.clientId));
   }, [user]);
 
   if (!user) return null;
+
+  const scope = resolveDataScope(user);
 
   const filtered = drivers.filter(d => !search || d.name.includes(search) || d.phone.includes(search));
 
@@ -67,7 +72,7 @@ export default function DriversPage() {
       } else {
         STORAGE.drivers.add({
           id: STORAGE.genId('driver'),
-          clientId: resolveClientId(user.clientId || null),
+          clientId: scope.clientId || resolveClientId(user.clientId || null),
           name: form.name.trim(),
           phone: form.phone,
           licenseNumber: form.licenseNumber.trim(),
@@ -83,7 +88,9 @@ export default function DriversPage() {
       toast.error(`儲存失敗：${msg}`);
       return;
     }
-    setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
+    setDrivers(scope.isSuperAdmin
+      ? STORAGE.drivers.getAll()
+      : STORAGE.drivers.getByClient(scope.clientId));
     setDialogOpen(false);
     setEditId(null);
   };
@@ -94,7 +101,9 @@ export default function DriversPage() {
       const targetName = drivers.find((d) => d.id === deleteId)?.name ?? '';
       STORAGE.drivers.remove(deleteId);
       toast.success(`司機「${targetName}」已刪除`);
-      setDrivers(STORAGE.drivers.getByClient(user.clientId || ''));
+      setDrivers(scope.isSuperAdmin
+        ? STORAGE.drivers.getAll()
+        : STORAGE.drivers.getByClient(scope.clientId));
       setDeleteId(null);
     } catch (e) {
       console.error('[Drivers] handleDelete error:', e);

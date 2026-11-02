@@ -518,7 +518,7 @@ export function UsersConsoleContent({
     });
   }, [users, currentUserId, clients]);
 
-  /** 開啟「編輯帳號」modal — 帶入既有資料 (密碼留空 = 不更改) */
+  /** 開啟「編輯帳號」modal — 預填現有密碼 (遮罩顯示，按眼查看，方便核對 Vercel 登入問題) */
   const openEditAccount = React.useCallback((u: User) => {
     setAccountModal({
       open: true,
@@ -527,8 +527,8 @@ export function UsersConsoleContent({
       initial: {
         name: u.name,
         phone: u.phone,
-        // 密碼不預填 (避免在畫面上裸露); 留空代表不修改
-        password: '',
+        // 預填現有明碼，modal 內以 type=password 顯示為 ••••，按眼才明文
+        password: u.password ?? '',
         email: u.email ?? '',
         role: u.role,
         clientId: u.clientId ?? null,

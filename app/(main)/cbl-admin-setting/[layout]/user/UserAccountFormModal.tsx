@@ -362,8 +362,7 @@ export function UserAccountFormModal({
           : '登入帳號需為 8 位數字'
         : null,
       password:
-        // Edit mode: 密碼欄位留空 = 不修改現有密碼, 所以空值不算錯誤
-        // Add mode: 密碼必填
+        // Edit mode 預填現有密碼（遮罩顯示），清空 = 保留原密碼不改；Add mode 密碼必填
         form.password.length === 0
           ? mode === 'add'
             ? '請填寫「密碼」'
@@ -562,7 +561,7 @@ export function UserAccountFormModal({
                         )}
                         {mode === 'edit' && (
                           <span className="ml-1.5 normal-case tracking-normal font-normal text-slate-400">
-                            留空 = 不修改
+                            按右側眼睛查看現有密碼
                           </span>
                         )}
                       </label>
@@ -578,7 +577,7 @@ export function UserAccountFormModal({
                             setForm((p) => ({ ...p, password: e.target.value }))
                           }
                           placeholder={
-                            mode === 'add' ? '至少 6 個字元' : '留空則保留原密碼'
+                            mode === 'add' ? '至少 6 個字元' : '現有密碼（可直接修改）'
                           }
                           autoComplete="new-password"
                           spellCheck={false}
@@ -774,8 +773,23 @@ export function UserAccountFormModal({
                           密碼
                         </span>
                         <span className="text-[12px] font-mono font-semibold text-slate-900 dark:text-slate-100 truncate ml-auto">
-                          {form.password ? '••••••••' : '—'}
+                          {form.password ? (showPwd ? form.password : '••••••••') : '—'}
                         </span>
+                        {form.password ? (
+                          <button
+                            type="button"
+                            onClick={() => setShowPwd((s) => !s)}
+                            aria-label={showPwd ? '隱藏密碼' : '顯示密碼'}
+                            title={showPwd ? '隱藏密碼' : '顯示密碼'}
+                            className="shrink-0 text-slate-400 hover:text-slate-600 cursor-pointer transition-colors dark:hover:text-slate-300"
+                          >
+                            {showPwd ? (
+                              <EyeOff width={12} height={12} />
+                            ) : (
+                              <Eye width={12} height={12} />
+                            )}
+                          </button>
+                        ) : null}
                       </div>
                       <p className="text-[10px] text-slate-500 dark:text-slate-400 inline-flex items-start gap-1 pt-0.5">
                         <AlertTriangle

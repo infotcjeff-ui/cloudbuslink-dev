@@ -5,18 +5,21 @@ import { useRouter } from 'next/navigation';
 import { Bus, MapPin, Clock, User, Users, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
-import type { Bus as BusType, Trip, Nanny, Student, Waypoint } from '@/lib/types';
+import { useAuth, useNannyTrips } from '@/lib/hooks';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
+import { today } from '@/lib/utils';
+import { getNannyBuses } from '@/lib/nanny-trips';
+import type { Bus as BusType, Student, Waypoint } from '@/lib/types';
 
 // 保姆 Portal - 顯示負責校巴、今日班次、打卡入口
 export default function NannyPortalPage() {
   const router = useRouter();
   const { user } = useAuth();
   const [assignedBuses, setAssignedBuses] = useState<BusType[]>([]);
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [nannyInfo, setNannyInfo] = useState<Nanny | null>(null);
   const [students, setStudents] = useState<Student[]>([]);
+
+  // 今日班次 + 保姆資料 (共用邏輯, 見 lib/nanny-trips.ts)
+  const { nanny: nannyInfo, trips, loading } = useNannyTrips(today());
 
   useEffect(() => {
     if (!user) return;
@@ -29,36 +32,41 @@ export default function NannyPortalPage() {
       }
       return;
     }
-
-    // 查詢此保姆的資料
-    const allNannies = STORAGE.nannies.getByClient(user.clientId || '');
-    const myNanny = allNannies.find(n => n.phone === user.phone);
-    if (myNanny) {
-      setNannyInfo(myNanny);
-
-      // 查詢負責的校巴
-      const allBuses = STORAGE.buses.getByClient(user.clientId || '');
-      const myBuses = allBuses.filter(b => myNanny.assignedBusIds.includes(b.id));
-      setAssignedBuses(myBuses);
-
-      // 查詢今日班次
-      const today = new Date().toISOString().split('T')[0];
-      const allTrips = STORAGE.trips.getByClient(user.clientId || '');
-      const myTrips = allTrips.filter(t =>
-        t.date === today && t.nannyId === myNanny.id
-      );
-      setTrips(myTrips);
-
-      // 載入相關學生
-      const allStudents = STORAGE.students.getByClient(user.clientId || '');
-      const myStudents = allStudents.filter(s =>
-        myTrips.some(t => t.studentIds.includes(s.id))
-      );
-      setStudents(myStudents);
-    }
   }, [user, router]);
 
+  // 負責校巴 (綁定資料變更時同步)
+  useEffect(() => {
+    if (!nannyInfo) {
+      setAssignedBuses([]);
+      return;
+    }
+    setAssignedBuses(getNannyBuses(nannyInfo));
+  }, [nannyInfo]);
+
+  // 載入相關學生 (只取今日班次上的學生)
+  useEffect(() => {
+    if (!user || trips.length === 0) {
+      setStudents([]);
+      return;
+    }
+    const scope = resolveDataScope(user);
+    const allStudents = scope.isSuperAdmin
+      ? STORAGE.students.getAll()
+      : STORAGE.students.getByClient(scope.clientId);
+    const ids = new Set<string>();
+    trips.forEach(t => t.studentIds.forEach(sid => ids.add(sid)));
+    setStudents(allStudents.filter(s => ids.has(s.id)));
+  }, [user, trips]);
+
   if (!user || user.role !== 'nanny') return null;
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <div className="w-8 h-8 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="px-4 pt-4 pb-24 space-y-4">

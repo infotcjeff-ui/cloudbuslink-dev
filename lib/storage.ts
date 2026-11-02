@@ -2,7 +2,7 @@
 // ?????? Supabase ????????????????
 
 import type {
-  User, Client, Company, Driver, Bus, Student, Parent, Nanny,
+  User, UserRole, Client, Company, Driver, Bus, Student, Parent, Nanny,
   Trip, Attendance, Announcement, SiteSettings, Route
 } from './types';
 
@@ -54,7 +54,7 @@ const STORAGE_KEYS = {
     // value: string[]
   //
   // 用途: 讓 mergeAll 能分辨「這則公告是從沒進過 DB, 還是已經在 DB 被刪了」
-  //   - 從沒進過 DB (例如示範公告 ann-001) → 保留在 localStorage
+  //   - 從沒進過 DB (本機先寫、尚未推上雲端) → 保留在 localStorage
   //   - 已經在 DB 但現在不見了 → 是在別的裝置被刪掉 → 也要跟著刪
   ANNOUNCEMENTS_SYNCED_IDS: 'cbl_announcements_synced_ids',
   // 每個實體「已成功推送到 Supabase」的 id 清單
@@ -738,15 +738,16 @@ export const announcementStorage = {
    * 合併 (merge) 而不是覆蓋 (replace)。
    *
    * 為什麼需要 merge:
-   * - 示範公告 (ann-001) 只存在 localStorage (mock-data 種子資料), 不在 DB
-   * - 若 syncToStorage() 用 setAll() 覆蓋, 進一次後台頁面就會把示範公告清掉
+   * - 公告支援「本機先寫、雲端後推」(後台頁先寫 localStorage 再同步 DB)
+   * - 若 syncToStorage() 用 setAll() 覆蓋, 尚未推上雲端的那則會在下一次
+   *   同步時消失
    *
    * 合併規則:
    * - DB 是 source of truth → DB 有的項目以 DB 內容為準
    * - 但 currentCount 取 localStorage / DB 的較大值
    *   (避免「本機已 +1、DB 還沒同步到」的短暫 race 造成次數被倒退)
    * - DB 沒有、localStorage 有的項目:
-   *   - 從沒同步過 (不在 syncedIds) → 保留 (示範公告這種情況)
+   *   - 從沒同步過 (不在 syncedIds) → 保留 (本機先寫、尚未推上雲端)
    *   - 已經同步過但 DB 不見了 → 是在別的裝置被刪掉 → 跟著刪
    */
   mergeAll(fromDb: Announcement[]) {
@@ -1256,6 +1257,106 @@ export function resolveClientId(preferred?: string | null): string {
   return '';
 }
 
+/**
+ * 取得「目前使用者可見的資料範圍」。
+ *
+ * 為什麼需要這個 helper (這是「/trips 看不到自己新增的班次」的根因):
+ *
+ *   超管 (super_admin / system_admin) 的 `user.clientId` 是 **null**。
+ *   而各頁面原本都寫成 `STORAGE.trips.getByDate(user.clientId || '', date)`,
+ *   於是 clientId 變成空字串 '' → 過濾條件 `t.clientId === ''` 永遠不成立
+ *   → **整頁班次清單是空的**。
+ *
+ *   後台 (/cbl-admin-setting/*) 早就知道要對超管 special-case (用 getAll() 看全部),
+ *   但 (main) 群組的前台頁面 (/、/trips、/settings/*) 沒有跟上 →
+ *   同一個帳號在後台看得到班次、在 /trips 卻看到「當日沒有班次」。
+ *
+ * 統一規則 (與後台一致):
+ *   - 跨機構角色 (super_admin / system_admin) → 看全部 (clientId = '')
+ *   - 其他角色 → 只看自己學校 (user.clientId)
+ *   - user.clientId 為空且非跨機構角色 → fallback 到記憶/第一間學校
+ *     (避免「資料存在但看不到」這種靜默失敗)
+ */
+export interface DataScope {
+  /** 用於 getByClient 的 clientId; 跨機構角色為 '' (代表看全部) */
+  clientId: string;
+  /** 是否為跨機構角色 (看全部資料) */
+  isSuperAdmin: boolean;
+}
+
+/** 跨機構角色 — 沒有自己的 clientId, 可看所有學校的資料 */
+export function isCrossTenantRole(role: UserRole | string | null | undefined): boolean {
+  return role === 'super_admin' || role === 'system_admin';
+}
+
+/**
+ * 解析目前使用者的資料可見範圍。
+ *
+ * @param user 目前登入者 (null = 未登入)
+ * @param opts.preferredClientId 額外的優先 clientId (例如 URL ?client= 或記憶值)
+ */
+export function resolveDataScope(
+  user: User | null | undefined,
+  opts?: { preferredClientId?: string | null },
+): DataScope {
+  const superAdmin = isCrossTenantRole(user?.role);
+
+  // 跨機構角色 → 看全部 (clientId = '' 代表不過濾)
+  if (superAdmin) {
+    return { clientId: '', isSuperAdmin: true };
+  }
+
+  // 一般角色 → 自己的學校
+  const own = (user?.clientId || '').trim();
+  if (own) {
+    return { clientId: own, isSuperAdmin: false };
+  }
+
+  // 沒有 clientId 的普通角色 → 依「記憶值 → 第一間學校」兜底
+  // (否則 getByClient('') 會靜默回傳空陣列, 使用者完全看不到資料)
+  const preferred = (opts?.preferredClientId || '').trim();
+  if (preferred && clientStorage.getById(preferred)) {
+    return { clientId: preferred, isSuperAdmin: false };
+  }
+  const remembered = selectedClientStorage.get();
+  if (remembered && clientStorage.getById(remembered)) {
+    return { clientId: remembered, isSuperAdmin: false };
+  }
+  const first = clientStorage.getAll()[0]?.id || '';
+  return { clientId: first, isSuperAdmin: false };
+}
+
+/**
+ * 依「資料可見範圍」取得資料列。
+ *
+ * ⚠️ 傳入的 getAll / getByClient 必須是 arrow function 或已綁定的 method ——
+ *    STORAGE.*.getByClient 內部有用到 `this.getAll()`, 直接傳 method reference
+ *    會失去 this 綁定而炸掉。
+ */
+export function scopedRows<T extends { clientId: string }>(
+  scope: DataScope,
+  getAll: () => T[],
+  getByClient: (clientId: string) => T[],
+): T[] {
+  if (scope.isSuperAdmin) return getAll();
+  return scope.clientId ? getByClient(scope.clientId) : [];
+}
+
+/**
+ * 依「資料可見範圍」取得某日的班次。
+ *
+ * 這是 /trips 班次列表的正確取法:
+ *   - 跨機構角色 (超管) → 跨所有學校 (與後台排程頁一致)
+ *   - 一般角色 → 只有自己學校的班次
+ */
+export function scopedTripsByDate(scope: DataScope, date: string): Trip[] {
+  return scopedRows<Trip>(
+    scope,
+    () => tripStorage.getAll(),
+    (cid) => tripStorage.getByClient(cid),
+  ).filter((t) => t.date === date);
+}
+
 /** 讀取某實體「已成功推送到 Supabase」的 id 清單 */
 export function getSyncedIds(entityKey: string): string[] {
   const map = get<Record<string, string[]>>(STORAGE_KEYS.SYNCED_ENTITY_IDS, {});
@@ -1391,6 +1492,163 @@ export function mergeCloudRecords<T extends { id: string }>(
   setAll(result);
 
   return { merged: result, added, updated, removed, keptLocal };
+}
+
+/* ==========================================================================
+    待推送的本機變更 (pending patches)
+   ==========================================================================
+   為什麼需要:
+     學生 / 家長 / 保姆是「本機先寫、雲端後推」的流程。
+     管理員綁定子女時先寫 localStorage, 背景才 push 到 DB。
+
+     問題: 綁定剛寫完、push 還在跑, 此時若有一次 syncFromSupabase() 拉回
+     雲端的「舊快照」(還沒包含這次綁定), 合併時會以雲端為準 → 綁定被洗掉。
+     (這跟 tripStorage.mergeAll 註解裡說的「自己吃掉自己」是同一類 bug,
+      只是這次受害的是 student.parentIds。)
+
+   解法:
+     綁定後把「待推送的欄位值」記在這裡 (PENDING_PATCHES),
+     合併時把這些 pending 值覆蓋在雲端資料上 → 綁定不會被洗掉。
+     push 成功後呼叫 clearPendingPatch() 移除 → 之後雲端就是唯一真相。
+
+   value: { [entityKey]: { [id]: { [field]: unknown } } }
+   ========================================================================== */
+
+const PENDING_PATCH_KEY = 'cbl_pending_patches';
+
+type PendingMap = Record<string, Record<string, Record<string, unknown>>>;
+
+function readPending(): PendingMap {
+  return get<PendingMap>(PENDING_PATCH_KEY, {});
+}
+
+function writePending(m: PendingMap): void {
+  set(PENDING_PATCH_KEY, m);
+}
+
+/**
+ * 記錄「這筆資料的這些欄位有本機變更還沒推上雲端」。
+ *
+ * @param entityKey 實體識別 (例如 'students')
+ * @param id        該筆資料的 id
+ * @param patch     變更的欄位值 (camelCase, 例如 { parentIds: [...] })
+ */
+export function markPendingPatch(
+  entityKey: string,
+  id: string,
+  patch: Record<string, unknown>,
+): void {
+  if (!entityKey || !id || !patch || Object.keys(patch).length === 0) return;
+  const map = readPending();
+  if (!map[entityKey]) map[entityKey] = {};
+  map[entityKey][id] = { ...(map[entityKey][id] || {}), ...patch };
+  writePending(map);
+}
+
+/** push 成功後清除該筆的待推送紀錄 */
+export function clearPendingPatch(entityKey: string, id: string): void {
+  const map = readPending();
+  if (!map[entityKey] || !map[entityKey][id]) return;
+  delete map[entityKey][id];
+  if (Object.keys(map[entityKey]).length === 0) delete map[entityKey];
+  writePending(map);
+}
+
+/**
+ * 把「待推送的本機變更」套回雲端資料上。
+ *
+ * @param entityKey 實體識別 (例如 'students')
+ * @param dbRows    從雲端拉回來的資料
+ * @returns 套用 pending 之後的資料
+ */
+export function applyPendingPatches<T extends { id: string }>(
+  entityKey: string,
+  dbRows: T[],
+): T[] {
+  const pending = readPending()[entityKey];
+  if (!pending || Object.keys(pending).length === 0) return dbRows;
+  return dbRows.map((row) => {
+    const p = pending[row.id];
+    if (!p) return row;
+    return { ...row, ...p } as T;
+  });
+}
+
+/* ==========================================================================
+    登入帳號的「雲端 → 本機」合併 (cbl_users 專用)
+   ==========================================================================
+   為什麼需要獨立一個函式:
+     帳號是「本機先寫、雲端後推」的流程 ——
+     管理員新增家長 / 保姆時先寫 localStorage (讓 UI 即時反應),
+     背景再 push 到 cbl_users。如果 push 還沒完成、或 push 失敗
+     (FK / RLS / 網路), 雲端就沒有這筆帳號。
+
+     若這裡用 setAll() 整批覆蓋 →
+     剛建立的帳號會憑空消失 → 家長頁顯示「無帳號」,
+     家長端登入回「帳戶不存在」。
+
+   合併規則 (和 mergeCloudRecords 一致的思路):
+     - 雲端有的 id                       → 以雲端為準 (source of truth)
+     - 只有本機有的 id + 推過雲端        → 丟掉 (在別的裝置被刪了)
+     - 只有本機有的 id + 沒推過雲端      → 保留 (還沒 push 成功, 別洗掉)
+     - 電話與雲端重複的本機帳號           → 丟棄 (避免兩筆同電話的帳號,
+                                       導致 findByPhone 命中錯誤的那筆)
+
+   ⚠️ 「推過雲端」的判斷依賴 SYNCED_ENTITY_IDS (markSynced / unmarkSynced)。
+      所以 cbl_users 的 add / update 成功後必須呼叫 markSynced('users', id),
+      否則「在別的裝置被刪掉」的帳號會永遠留在本機。
+   ========================================================================== */
+export function mergeCloudUsers(cloudUsers: User[]): {
+  merged: User[];
+  keptLocal: number;
+} {
+  const localUsers = userStorage.getAll();
+  const cloudIds = new Set(cloudUsers.map((u) => u.id));
+  const cloudPhones = new Set(cloudUsers.map((u) => u.phone));
+  const syncedIds = new Set(getSyncedIds('users'));
+
+  let keptLocal = 0;
+  let removed = 0;
+
+  const localOnly: User[] = [];
+  for (const u of localUsers) {
+    // 雲端已有這筆 (同 id) → 雲端為準, 本機這筆不需要保留
+    if (cloudIds.has(u.id)) continue;
+
+    // 電話與雲端重複 → 讓位給雲端那筆 (以雲端為準)
+    if (cloudPhones.has(u.phone)) {
+      removed++;
+      continue;
+    }
+
+    // 推過雲端但雲端不見了 → 在別的裝置被刪了 → 跟著刪
+    if (syncedIds.has(u.id)) {
+      removed++;
+      continue;
+    }
+
+    // 沒推過雲端 → 保留 (還在等待 push)
+    keptLocal++;
+    localOnly.push(u);
+  }
+
+  if (removed > 0) {
+    console.log(`[Storage] 移除 ${removed} 筆已被雲端取代或刪除的本機帳號`);
+  }
+  if (keptLocal > 0) {
+    console.log(
+      `[Storage] 保留 ${keptLocal} 筆尚未推上雲端的本機帳號: ${localOnly
+        .map((u) => u.phone)
+        .join(', ')}`,
+    );
+  }
+
+  // 記錄這次 sync 後雲端有的 id (供下次判斷「是否推過雲端」)
+  const map = get<Record<string, string[]>>(STORAGE_KEYS.SYNCED_ENTITY_IDS, {});
+  map.users = Array.from(cloudIds);
+  set(STORAGE_KEYS.SYNCED_ENTITY_IDS, map);
+
+  return { merged: [...cloudUsers, ...localOnly], keptLocal };
 }
 
 export const STORAGE = {

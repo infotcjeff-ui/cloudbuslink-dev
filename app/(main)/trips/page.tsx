@@ -1,13 +1,15 @@
 'use client';
 
-import { Suspense, useEffect, useMemo, useState } from 'react';
+import { Suspense, useEffect, useMemo, useState, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Bus, Plus, X, Search, CalendarDays, Inbox } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AriaSelectRoot, AriaSelectItem, SelectedCheck } from '@/components/ui/aria-select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope, scopedTripsByDate } from '@/lib/storage';
+import { findNannyForUser, getNannyTrips } from '@/lib/nanny-trips';
+import { syncFromSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
 import { cn, today, cnWeekday, tripTypeLabel } from '@/lib/utils';
 import type { Trip, TripType } from '@/lib/types';
 import { DatePillRow } from '@/components/trips/date-pill-row';
@@ -37,21 +39,63 @@ function TripsPageInner() {
   const [busFilter, setBusFilter] = useState<string>(searchParams.get('busId') || '');
   const [search, setSearch] = useState('');
 
-  useEffect(() => {
+  const recompute = useCallback(() => {
     if (!user) return;
-    const all = STORAGE.trips.getByDate(user.clientId || '', date);
     if (user.role === 'nanny') {
-      const nanny = STORAGE.nannies.getByClient(user.clientId || '')
-        .find((n) => n.phone === user.phone);
-      setTrips(nanny ? all.filter((t) => t.nannyId === nanny.id) : []);
+      // 保姆只看自己的班次 — 歸屬規則與管理員排程頁一致
+      // (trip.nannyId 精確匹配 → 校巴綁定 fallback), 見 lib/nanny-trips.ts
+      const nanny = findNannyForUser(user);
+      setTrips(nanny ? getNannyTrips(nanny, date, user.clientId) : []);
       return;
     }
-    setTrips(all);
+    // 管理員 / 超管: 依資料可見範圍取班次
+    //
+    // ⚠️ 舊版寫成 `STORAGE.trips.getByDate(user.clientId || '', date)`:
+    //   超管的 clientId 是 null → 變成 '' → 過濾條件永遠不成立 → 整頁空白。
+    //   (後台 /cbl-admin-setting/schedule 早已對超管 special-case 看全部,
+    //    前台這頁沒跟上 → 同一帳號後台看得到、/trips 看不到。)
+    const scope = resolveDataScope(user);
+    setTrips(scopedTripsByDate(scope, date));
   }, [user, date]);
+
+  useEffect(() => {
+    recompute();
+  }, [recompute]);
+
+  // 主動從雲端拉班次 + 監聽 refresh 事件
+  //
+  // ⚠️ 為什麼不限於保姆:
+  //   initWithSupabase() 在 localStorage 已 initialized 時會直接 return true,
+  //   之後再也不會向雲端拉資料。結果是「在別的裝置/分頁新增的班次」,
+  //   在這邊永遠看不到 (重新整理也救不了, 因為 initialized 還是 true)。
+  //   管理員同樣需要這個 pull (例如管理員在後台排程頁建班 → 回到 /trips 看不到)。
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    const sync = async () => {
+      if (!isSupabaseAvailable()) return;
+      try {
+        await syncFromSupabase();
+      } catch (e) {
+        console.warn('[Trips] cloud sync failed:', e);
+      }
+    };
+    void sync();
+    const onRefresh = () => { if (!cancelled) recompute(); };
+    const evs = ['cbl-trips-refresh', 'cbl-nannies-refresh', 'cbl-nannys-refresh', 'cbl-buses-refresh'];
+    evs.forEach((ev) => window.addEventListener(ev, onRefresh));
+    return () => {
+      cancelled = true;
+      evs.forEach((ev) => window.removeEventListener(ev, onRefresh));
+    };
+  }, [user, recompute]);
 
   const buses = useMemo(() => {
     if (!user) return [];
-    return STORAGE.buses.getByClient(user.clientId || '');
+    const scope = resolveDataScope(user);
+    return scope.isSuperAdmin
+      ? STORAGE.buses.getAll()
+      : STORAGE.buses.getByClient(scope.clientId);
   }, [user]);
 
   const filteredBus = busFilter ? STORAGE.buses.getById(busFilter) : null;

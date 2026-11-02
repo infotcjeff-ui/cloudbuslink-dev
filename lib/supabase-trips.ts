@@ -16,6 +16,7 @@
 //   這是「push-on-demand」策略 — 只同步實際被引用的那一筆, 不做全量灌資料。
 
 import { camelize, snakify } from './supabase-case';
+import { alignPayloadClientId } from './supabase-client-id';
 
 export interface TripRow {
   id: string;
@@ -352,6 +353,8 @@ export const supabaseTrips = {
   async add(trip: TripRow): Promise<{ success: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
     const payload = snakify(trip);
+    // ⚠️ client_id 有 FK → cbl_clients(id) 且 NOT NULL → 空字串一定撞 FK
+    await alignPayloadClientId(payload);
     // migration 0005 未套用時, 剔除 route_id 避免整筆 insert 失敗
     if (!(await this.hasRouteIdColumn())) {
       delete payload.route_id;
@@ -371,6 +374,10 @@ export const supabaseTrips = {
   ): Promise<{ success: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
     const payload = snakify(patch);
+    // 同 add: 若 patch 帶 client_id, 必須對齊到雲端真的存在的 id
+    if ('client_id' in payload) {
+      await alignPayloadClientId(payload);
+    }
     // migration 0005 未套用時, 剔除 route_id 避免整筆 update 失敗
     if (!(await this.hasRouteIdColumn())) {
       delete payload.route_id;
@@ -379,11 +386,23 @@ export const supabaseTrips = {
     if ('customTypeLabel' in patch && !(await this.hasCustomTypeLabelColumn())) {
       delete payload.custom_type_label;
     }
-    const { error } = await supabase
+    // ⚠️ 必須 .select() 二次驗證 ——
+    //   PostgREST 對「update 0 筆」(id 在雲端不存在) 回傳成功 + 無錯誤,
+    //   但實際沒寫進任何東西 → 呼叫端以為成功, 雲端卻沒有這筆資料。
+    const { data, error } = await supabase
       .from('cbl_trips')
       .update(payload)
-      .eq('id', id);
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
     if (error) return { success: false, error: error.message };
+    if (!data) {
+      console.warn(`[Supabase] cbl_trips.update 沒有匹配到任何列 (id=${id})`);
+      return {
+        success: false,
+        error: `雲端找不到這筆資料 (cbl_trips/${id}), 請重新新增`,
+      };
+    }
     return { success: true };
   },
 

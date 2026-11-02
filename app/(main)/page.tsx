@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bus as BusIcon, Gauge, MapPin, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { AriaSelectRoot, AriaSelectItem, SelectedCheck } from '@/components/ui/aria-select';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
 import type { Bus } from '@/lib/types';
 import { useAuth } from '@/lib/hooks';
 
@@ -258,7 +258,12 @@ export default function HomePage() {
   // ── 初始載入 ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!user) return;
-    const allBuses = STORAGE.buses.getByClient(user.clientId || '');
+    // 依資料可見範圍取校巴 (超管看全部, 一般角色只看自己學校)
+    // 舊版 `getByClient(user.clientId || '')` 在超管時 → clientId='' → 空白地圖
+    const scope = resolveDataScope(user);
+    const allBuses = scope.isSuperAdmin
+      ? STORAGE.buses.getAll()
+      : STORAGE.buses.getByClient(scope.clientId);
     setBuses(allBuses);
   }, [user]);
 

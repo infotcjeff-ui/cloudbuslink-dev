@@ -23,6 +23,7 @@ import type {
   ScheduleFilter,
 } from './types';
 import type { Attendance as AttendanceRow } from '@/lib/types';
+import { resolveTripRoute } from '@/lib/trip-route';
 
 /* ============================================================================
  * Trip + Relations 聚合
@@ -137,18 +138,8 @@ export function joinTripRelationsWithMaps(
       .map((sid) => maps.studentById.get(sid))
       .filter((s): s is Student => !!s);
   const myAttendances = maps.attendancesByTripId.get(trip.id) ?? [];
-  const route =
-    (trip.routeId ? maps.routeById.get(trip.routeId) : undefined) ??
-    maps.routes.find(
-      (r) =>
-        r.shiftType ===
-          (trip.type === 'morning'
-            ? 'morning'
-            : trip.type === 'afternoon'
-            ? 'afternoon'
-            : 'extracurricular') && r.busId === trip.busId,
-    ) ??
-    undefined;
+  // 路線模板解析規則抽到 lib/trip-route.ts, 令保姆 portal 同管理員排程頁一致
+  const route = resolveTripRoute(trip, maps.routes);
   return { trip, bus, driver, nanny, students: myStudents, attendances: myAttendances, route };
 }
 

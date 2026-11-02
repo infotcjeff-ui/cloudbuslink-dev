@@ -27,9 +27,12 @@ import { cn } from '@/lib/utils';
  */
 export default function PortalSettings({
   showPayment = false,
+  topContent,
   children,
 }: {
   showPayment?: boolean;
+  /** 顯示在「編輯個人資料」按鈕上方的內容 (例: 保姆的員工基本資料) */
+  topContent?: React.ReactNode;
   children?: React.ReactNode;
 }) {
   const { user, logout } = useAuth();
@@ -40,6 +43,9 @@ export default function PortalSettings({
 
   return (
     <div className="px-4 pt-4 pb-24 space-y-4">
+      {/* 頁首額外內容 (例: 保姆的員工基本資料) — 在「編輯個人資料」上方 */}
+      {topContent}
+
       {/* 編輯個人資料 */}
       {showProfileForm ? (
         <Card>

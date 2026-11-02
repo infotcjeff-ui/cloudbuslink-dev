@@ -72,7 +72,8 @@ import {
   TAB_FADE_DURATION,
 } from './design-tokens';
 import { useToast } from '@/components/ui/toast';
-import { resolveClientId } from '@/lib/storage';
+import { useAuthClientId, alignClientIdForWrite } from '@/lib/use-client-id';
+import { markPendingPatch } from '@/lib/storage';
 import type { ParentTab } from './types';
 
 /* -------------------------------------------------------------------------- */
@@ -350,19 +351,13 @@ export function ParentsConsoleContent({
 
   /* -------- Handlers -------- */
   // 取得當前登入者的 clientId (供 form 內新增家長帶入正確的 clientId)
-  const authClientId = React.useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    try {
-      const raw = localStorage.getItem('cbl_auth');
-      if (!raw) return '';
-      const u = JSON.parse(raw);
-      // 跨機構角色沒有自己的 clientId → 兜底到已知學校的 clientId
-      // (DB 的 client_id 有 NOT NULL + FK 約束, 空字串推不上去)
-      return resolveClientId(u?.clientId || null);
-    } catch {
-      return resolveClientId(null);
-    }
-  }, []);
+  //
+  // ⚠️ 用 useAuthClientId (而不是 useMemo + []) 的原因:
+  //   useMemo 只在 mount 算一次, 而 localStorage 的 cbl_clients 要等雲端同步
+  //   回來才有值 → mount 時 resolveClientId() 找不到學校 → 回傳 ''
+  //   → 建立的資料 client_id='' → 撞 FK → 推不上去 (「家長已新增但雲端同步失敗」)。
+  //   hook 會監聽 cbl-clients-refresh, 同步回來後自動重算。
+  const authClientId = useAuthClientId();
 
   const openAdd = React.useCallback(() => {
     setFormModal({ open: true, mode: 'add', initial: EMPTY_PARENT_FORM, editingId: undefined });
@@ -535,25 +530,45 @@ export function ParentsConsoleContent({
           });
 
           // 同步此家長的學生關聯: 對比 state.studentIds vs 目前 parentIds, 增/刪
+          //
+          // ⚠️ 這裡必須「本機 + 雲端」雙寫。
+          //    原本只寫 localStorage → 下一次 syncFromSupabase() 用雲端快照
+          //    覆蓋 cbl_students → parentIds 連結消失 → 家長端看不到子女、班次頁也空。
           const currentStudentIds = (STORAGE.students.getAll().filter((s) => s.parentIds.includes(editingId!)))
             .map((s) => s.id);
           const toAdd = state.studentIds.filter((id) => !currentStudentIds.includes(id));
           const toRemove = currentStudentIds.filter((id) => !state.studentIds.includes(id));
-          toAdd.forEach((sid) => {
+          const { supabaseStudents } = await import('@/lib/supabase-entities');
+          for (const sid of toAdd) {
             const student = STORAGE.students.getById(sid);
             if (student) {
-              STORAGE.students.update(sid, { parentIds: [...student.parentIds, editingId!] });
+              const patch = { parentIds: [...student.parentIds, editingId!] };
+              STORAGE.students.update(sid, patch);
+              // 先記下「待推送」→ 就算 push 還在跑, sync 也不會把綁定洗掉
+              markPendingPatch('students', sid, patch);
+              const sbRes = await supabaseStudents.update(sid, patch);
+              if (!sbRes.success) {
+                console.warn('[ParentsConsole] Supabase student parentIds add failed:', sbRes.error);
+                warning?.(`子女已綁定，但雲端同步失敗：${sbRes.error}`);
+              }
             }
-          });
-          toRemove.forEach((sid) => {
+          }
+          for (const sid of toRemove) {
             const student = STORAGE.students.getById(sid);
             if (student) {
-              STORAGE.students.update(sid, {
+              const patch = {
                 parentIds: student.parentIds.filter((pid) => pid !== editingId!),
                 primaryParentId: student.primaryParentId === editingId! ? null : student.primaryParentId,
-              });
+              };
+              STORAGE.students.update(sid, patch);
+              markPendingPatch('students', sid, patch);
+              const sbRes = await supabaseStudents.update(sid, patch);
+              if (!sbRes.success) {
+                console.warn('[ParentsConsole] Supabase student parentIds remove failed:', sbRes.error);
+                warning?.(`子女解除綁定，但雲端同步失敗：${sbRes.error}`);
+              }
             }
-          });
+          }
 
           setFormModal({ open: false, mode: 'add', initial: EMPTY_PARENT_FORM, editingId: undefined });
           success?.(password ? '家長資料與登入密碼已更新' : '家長資料已更新');
@@ -561,6 +576,16 @@ export function ParentsConsoleContent({
           window.dispatchEvent(new CustomEvent('cbl-students-refresh'));
         } else {
           // 新增模式
+          // ⚠️ 必須有有效的 clientId (cbl_parents.client_id NOT NULL + FK → cbl_clients)。
+          //    沒有有效值時提早回報明確錯誤, 而不是讓 DB 回一句難懂的 FK violation。
+          const effectiveClientId = await alignClientIdForWrite(authClientId);
+          if (!effectiveClientId) {
+            toastError?.(
+              '無法建立家長：找不到有效的「所屬學校」。請先到「網站設定 → 所屬學校」新增一間學校, 或檢查雲端連線設定。',
+            );
+            return;
+          }
+
           // 再次校驗電話是否被佔用 (保護 race condition, 雖然 modal 已擋)
           const existingUser = STORAGE.users.findByPhone(phone);
           if (existingUser) {
@@ -576,13 +601,13 @@ export function ParentsConsoleContent({
             name,
             accountName,
             password,
-            clientId: authClientId,
+            clientId: effectiveClientId,
             status: 'active',
           });
 
           // 建立 / 更新 parent
           const existingParent = STORAGE.parents.getAll().find(
-            (p) => p.phone === phone && p.clientId === authClientId,
+            (p) => p.phone === phone && p.clientId === effectiveClientId,
           );
           let savedParentId: string;
           const parentUpdates = {
@@ -608,7 +633,7 @@ export function ParentsConsoleContent({
             const newParentId = STORAGE.genId('parent');
             const newParent = {
               id: newParentId,
-              clientId: authClientId,
+              clientId: effectiveClientId,
               name,
               phone,
               accountName: accountName || undefined,
@@ -636,13 +661,23 @@ export function ParentsConsoleContent({
           }
 
           // 同步學生 parentIds (新增模式下用 savedParentId)
+          //
+          // ⚠️ 同樣必須推回雲端, 否則下次 sync 會把綁定洗掉。
           if (state.studentIds.length > 0) {
-            state.studentIds.forEach((sid) => {
+            const { supabaseStudents } = await import('@/lib/supabase-entities');
+            for (const sid of state.studentIds) {
               const student = STORAGE.students.getById(sid);
               if (student && !student.parentIds.includes(savedParentId)) {
-                STORAGE.students.update(sid, { parentIds: [...student.parentIds, savedParentId] });
+              const patch = { parentIds: [...student.parentIds, savedParentId] };
+              STORAGE.students.update(sid, patch);
+              markPendingPatch('students', sid, patch);
+                const sbRes = await supabaseStudents.update(sid, patch);
+                if (!sbRes.success) {
+                  console.warn('[ParentsConsole] Supabase student parentIds add failed:', sbRes.error);
+                  warning?.(`子女已綁定，但雲端同步失敗：${sbRes.error}`);
+                }
               }
-            });
+            }
           }
 
           setFormModal({ open: false, mode: 'add', initial: EMPTY_PARENT_FORM, editingId: undefined });
@@ -676,7 +711,11 @@ export function ParentsConsoleContent({
       const parentId = deleteTarget.id;
 
       // 1) 解除所有學生的 parentIds / primaryParentId
-      students.forEach((s) => {
+      //
+      // ⚠️ 也要推回雲端 — 否則刪掉的家長 id 仍留在雲端學生資料裡,
+      //    之後家長頁會出現「已刪除家長的 id 仍被視為綁定」的幽靈資料。
+      const { supabaseStudents } = await import('@/lib/supabase-entities');
+      for (const s of students) {
         if (s.parentIds.includes(parentId)) {
           const newParentIds = s.parentIds.filter((id) => id !== parentId);
           const newPrimary =
@@ -685,8 +724,19 @@ export function ParentsConsoleContent({
             parentIds: newParentIds,
             primaryParentId: newPrimary,
           });
+          markPendingPatch('students', s.id, {
+            parentIds: newParentIds,
+            primaryParentId: newPrimary,
+          });
+          const sbRes = await supabaseStudents.update(s.id, {
+            parentIds: newParentIds,
+            primaryParentId: newPrimary,
+          });
+          if (!sbRes.success) {
+            console.warn('[ParentsConsole] Supabase student parentIds cleanup failed:', sbRes.error);
+          }
         }
-      });
+      }
 
       // 2) 刪除對應 user 登入帳號 (若存在)
       //    ⚠️ 也要刪雲端 — 否則下次 syncToStorage() 會把這筆帳號「復活」回來。

@@ -1,51 +1,82 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
+import {
+  resolveParentChildren,
+  tripInvolvesStudents,
+} from '@/lib/parent-children';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Bus, MapPin, Users } from 'lucide-react';
+import { today } from '@/lib/utils';
 import type { Student, Parent, Bus as BusType } from '@/lib/types';
 
 /**
  * 家長 Portal 主內容 — 同時服務 /parents 與 /parents/portal 兩條路徑。
  * /parents/portal 是 (main) layout 角色保護的 redirect 目標,
  * 兩邊共用同一份實作避免邏輯分歧。
+ *
+ * ⚠️ 家長/子女的配對邏輯統一放在 lib/parent-children.ts —
+ *    這裡不要再自己寫一套 (先前三個頁面各寫各的, 結果互相對不上)。
  */
 export default function ParentsPortalContent() {
   const { user } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [parent, setParent] = useState<Parent | null>(null);
 
-  useEffect(() => {
+  /**
+   * 重新讀取「我的子女」。
+   *
+   * 依賴 cbl-*-refresh 事件 → 雲端同步完成後自動重畫,
+   * 不需要使用者手動重新整理。
+   */
+  const reload = useCallback(() => {
     if (!user) return;
-    // 找出這個家長的記錄
-    const parents = STORAGE.parents.getByClient(user.clientId || '');
-    const foundParent = parents.find(p => p.phone === user.phone);
-    setParent(foundParent || null);
+    const scope = resolveDataScope(user);
 
-    // 找出所有綁定學生的資訊
-    if (foundParent) {
-      const allStudents = STORAGE.students.getByClient(user.clientId || '');
-      const myStudents = allStudents.filter(s => s.parentIds.includes(foundParent.id));
-      setStudents(myStudents);
-    }
+    // 找家長 + 子女 (統一邏輯, 見 lib/parent-children.ts)
+    const { parent: foundParent, students: myStudents } = resolveParentChildren(user, {
+      isSuperAdmin: scope.isSuperAdmin,
+      clientId: scope.clientId,
+    });
+    setParent(foundParent);
+    setStudents(myStudents);
   }, [user]);
+
+  useEffect(() => {
+    reload();
+    if (!user) return;
+    const events = [
+      'cbl-parents-refresh',
+      'cbl-students-refresh',
+      'cbl-users-refresh',
+      'cbl-clients-refresh',
+      'cbl-trips-refresh',
+      'cbl-buses-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, reload));
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, reload));
+    };
+  }, [reload, user]);
 
   if (!user) return null;
 
   const getBus = (busId: string | null): BusType | null => {
-    if (!busId || !user.clientId) return null;
-    const buses = STORAGE.buses.getByClient(user.clientId);
-    return buses.find(b => b.id === busId) || null;
+    if (!busId) return null;
+    const buses = STORAGE.buses.getAll();
+    return buses.find((b) => b.id === busId) || null;
   };
 
   const getTripStatus = (student: Student) => {
-    if (!user.clientId) return null;
-    const today = new Date().toISOString().split('T')[0];
-    const trips = STORAGE.trips.getByClient(user.clientId);
-    const todayTrip = trips.find(t => t.date === today && t.studentIds.includes(student.id));
+    const todayStr = today();
+    const myIds = new Set(students.map((s) => s.id));
+    const trips = STORAGE.trips.getAll().filter(
+      (t) => t.date === todayStr && tripInvolvesStudents(t, myIds),
+    );
+    const todayTrip = trips.find((t) => tripInvolvesStudents(t, new Set([student.id])));
     if (!todayTrip) return { type: 'no-trip', label: '今日無班次', color: 'bg-gray-100 text-gray-600' };
     const statusMap: Record<string, { label: string; color: string }> = {
       scheduled: { label: '等待出發', color: 'bg-blue-100 text-blue-700' },

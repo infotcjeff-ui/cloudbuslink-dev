@@ -157,6 +157,19 @@ export default function LoginPage() {
     }
 
     setSubmitting(true);
+    // Vercel 首次開啟 localStorage 是空的 — 必須先等 cbl_users 同步下來再驗證，
+    // 否則立即點登入會誤報「帳戶不存在」。
+    if (isSupabaseAvailable()) {
+      try {
+        const { supabaseUsers } = await import('@/lib/supabase-users');
+        await Promise.race([
+          supabaseUsers.syncToStorage(),
+          new Promise((r) => setTimeout(r, 8000)),
+        ]);
+      } catch (e) {
+        console.warn('[Login] pre-login user sync failed:', e);
+      }
+    }
     const result = login(accountVal, pwdVal, config.allowedRoles);
 
     if (!result.ok) {

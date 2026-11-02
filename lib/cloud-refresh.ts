@@ -168,6 +168,11 @@ export async function refreshCloud(options?: {
     // ---- 租戶 / 帳號層 ----
     await pull<Client>('clients', 'cbl_clients', () => STORAGE.clients.getAll(), (r) => STORAGE.clients.setAll(r));
     await pull<Company>('companies', 'cbl_companies', () => STORAGE.companies.getAll(), (r) => STORAGE.companies.setAll(r));
+    // ⚠️ 帳號不能整批覆蓋 ——
+    //   帳號是「本機先寫、雲端後推」的流程: 管理員新增家長 / 保姆時先寫
+    //   localStorage, 背景再 push 到 cbl_users。push 還沒完成時整批覆蓋
+    //   會把剛建立的帳號洗掉 → 登入回「帳戶不存在」。
+    //   → pull() 走 mergeCloudRecords() → 保留尚未 push 成功的本機帳號。
     await pull<User>('users', 'cbl_users', () => STORAGE.users.getAll(), (r) => STORAGE.users.setAll(r));
 
     // ---- 營運層 ----
@@ -197,7 +202,7 @@ export async function refreshCloud(options?: {
       keyOf: (a) => `${a.tripId}__${a.studentId}__${a.waypointId}`,
     });
 
-    // 公告用專屬的 mergeAll (要保留示範公告 ann-001)
+    // 公告用專屬的 mergeAll (要保留「本機先寫、尚未推上雲端」的公告)
     if (should('announcements')) {
       try {
         const { data, error } = await supabase.from('cbl_announcements').select('*');

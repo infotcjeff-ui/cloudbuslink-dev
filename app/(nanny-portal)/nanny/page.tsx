@@ -2,66 +2,99 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { useAuth, useNannyTrips } from '@/lib/hooks';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
+import { today } from '@/lib/utils';
+import { resolveTripRoute } from '@/lib/trip-route';
 import { Card, CardContent } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { Bus, MapPin, Clock, CheckCircle, AlertCircle } from 'lucide-react';
-import type { Trip, Nanny, Student, Bus as BusType } from '@/lib/types';
+import type { Trip, Student } from '@/lib/types';
+import { Bus, Clock, CheckCircle, MapPin, Route as RouteIcon, Users } from 'lucide-react';
 
 export default function NannyPage() {
   const { user } = useAuth();
   const router = useRouter();
-  const [nanny, setNanny] = useState<Nanny | null>(null);
-  const [todayTrips, setTodayTrips] = useState<Trip[]>([]);
-  const [loading, setLoading] = useState(true);
 
+  // 香港時間 (UTC+8) — 學校喺香港, 手機時區未必係, 一律用香港時間顯示。
+  // SSR 階段唔計, 避免 hydration mismatch (與 AdminShell 相同做法)。
+  const [hkTime, setHkTime] = useState<string>('');
   useEffect(() => {
-    if (!user) return;
-    
-    // 找出保姆記錄
-    const nannies = STORAGE.nannies.getByClient(user.clientId || '');
-    const foundNanny = nannies.find(n => n.phone === user.phone);
-    setNanny(foundNanny || null);
+    const fmt = () => {
+      setHkTime(new Date().toLocaleTimeString('en-GB', {
+        timeZone: 'Asia/Hong_Kong',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }));
+    };
+    fmt();
+    const id = setInterval(fmt, 30_000);
+    return () => clearInterval(id);
+  }, []);
 
-    // 找出保姆負責的今日班次
-    if (foundNanny) {
-      const today = new Date().toISOString().split('T')[0];
-      const allTrips = STORAGE.trips.getByClient(user.clientId || '');
-      const myTrips = allTrips.filter(t => 
-        t.date === today && 
-        t.nannyId === foundNanny.id
-      );
-      setTodayTrips(myTrips);
-    }
-    setLoading(false);
-  }, [user]);
+  // 今日班次 + 保姆資料
+  //
+  // useNannyTrips 會:
+  //   - 用本地時區的「今日」(原本用 UTC, 凌晨會對不上日期)
+  //   - 依「trip.nannyId 精確匹配 → 校巴綁定 fallback」判定班次歸屬
+  //     (與管理員排程頁完全一致)
+  //   - 監聽 cbl-*-refresh 事件 → 雲端同步完成後自動重畫
+  const { trips: todayTrips, loading } = useNannyTrips(today());
 
   if (!user) return null;
 
-  const getBus = (busId: string): BusType | null => {
-    if (!user.clientId) return null;
-    const buses = STORAGE.buses.getByClient(user.clientId);
+  const getBus = (busId: string) => {
+    const scope = resolveDataScope(user);
+    const buses = scope.isSuperAdmin
+      ? STORAGE.buses.getAll()
+      : STORAGE.buses.getByClient(scope.clientId);
     return buses.find(b => b.id === busId) || null;
   };
 
-  const getStudentNames = (studentIds: string[]): string => {
-    if (!user.clientId) return '';
-    const students = STORAGE.students.getByClient(user.clientId);
-    return studentIds
-      .map(id => students.find(s => s.id === id)?.name)
-      .filter(Boolean)
-      .join('、') || '無';
+  // 路線模板 — 解析規則與管理員排程頁完全一致 (見 lib/trip-route.ts):
+  //   1. trip.routeId 精確匹配
+  //   2. 同一台校巴 + 同一行車時段 (處理冇 routeId 的舊班次)
+  //
+  // ⚠️ 之前呢度只睇 trip.routeId, 而好多班次係經「校巴綁定」建立,
+  //    routeId 為空 → 保姆見到「自訂路線」, 但管理員見到「黃大仙早上線」,
+  //    兩邊講法唔一致。共用 resolveTripRoute 之後就統一咗。
+  const getRoute = (trip: Trip) => {
+    const scope = resolveDataScope(user);
+    const routes = scope.isSuperAdmin
+      ? STORAGE.routes.getAll()
+      : STORAGE.routes.getByClient(scope.clientId);
+    return resolveTripRoute(trip, routes);
   };
 
-  const getTripTypeLabel = (type: string) => {
+  // 路線地點 (站點名稱串接) — 顯示在班次卡片, 令保姆一眼知道要去邊度
+  const getRouteStops = (trip: Trip): string[] => {
+    const wps = trip.waypoints ?? [];
+    if (wps.length === 0) return [];
+    const names = wps.map(w => w.location.name).filter(Boolean);
+    // 去重 (同一地點可能同時是上車點與下車點)
+    return names.filter((n, i) => names.indexOf(n) === i);
+  };
+
+  // 乘車學生 — 只顯示頭像圓圈 + 人數, 唔再列全名 (卡片更易讀)
+  const getTripStudents = (studentIds: string[]): Student[] => {
+    const scope = resolveDataScope(user);
+    if (!scope.clientId && !scope.isSuperAdmin) return [];
+    const students = scope.isSuperAdmin
+      ? STORAGE.students.getAll()
+      : STORAGE.students.getByClient(scope.clientId);
+    return studentIds
+      .map(id => students.find(s => s.id === id))
+      .filter((s): s is Student => !!s);
+  };
+
+  const getTripTypeLabel = (trip: Trip): string => {
+    // 自訂班次優先用管理員輸入嘅自訂名稱
+    if (trip.type === 'custom' && trip.customTypeLabel) return trip.customTypeLabel;
     const labels: Record<string, string> = {
       morning: '上午班',
       afternoon: '下午班',
       custom: '自訂班次',
     };
-    return labels[type] || type;
+    return labels[trip.type] || trip.type;
   };
 
   const getStatusBadge = (status: string) => {
@@ -86,34 +119,25 @@ export default function NannyPage() {
     <div className="px-4 pt-4 pb-24 space-y-4">
       {/* 歡迎訊息 */}
       <div className="bg-gradient-to-r from-emerald-500 to-teal-500 rounded-2xl p-4 text-white">
-        <p className="text-lg font-semibold">歡迎, {user.name}</p>
-        <p className="text-sm opacity-90 mt-1">今日有 {todayTrips.length} 個班次</p>
-      </div>
-
-      {/* 保姆資訊卡片 */}
-      {nanny && (
-        <Card>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-600 text-lg font-bold">
-                {nanny.name.slice(0, 1)}
-              </div>
-              <div className="flex-1">
-                <p className="font-semibold">{nanny.name}</p>
-                <p className="text-xs text-muted-foreground">員工編號: {nanny.employeeId}</p>
-              </div>
-              <Badge variant={nanny.status === 'active' ? 'success' : 'secondary'}>
-                {nanny.status === 'active' ? '在職' : '離職'}
-              </Badge>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-lg font-semibold truncate">歡迎, {user.name}</p>
+            <p className="text-sm opacity-90 mt-1">今日有 {todayTrips.length} 個班次</p>
+          </div>
+          <div className="flex flex-col items-end flex-shrink-0">
+            <div className="flex items-center gap-1.5 text-3xl font-bold tabular-nums leading-none">
+              <Clock className="w-6 h-6 opacity-90" />
+              {hkTime || '--:--'}
             </div>
-          </CardContent>
-        </Card>
-      )}
+            <span className="text-xs opacity-80 mt-1.5">香港時間</span>
+          </div>
+        </div>
+      </div>
 
       {/* 今日班次列表 */}
       <div>
         <h2 className="text-sm font-semibold mb-3">今日班次</h2>
-        
+
         {todayTrips.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-12 text-center">
             <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-3">
@@ -126,63 +150,104 @@ export default function NannyPage() {
             {todayTrips.map(trip => {
               const bus = getBus(trip.busId);
               const badge = getStatusBadge(trip.status);
+              const route = getRoute(trip);
+              const routeStops = getRouteStops(trip);
+              const students = getTripStudents(trip.studentIds);
+              const isDone = trip.status === 'completed' || trip.status === 'cancelled';
 
               return (
-                <Card key={trip.id}>
+                <Card
+                  key={trip.id}
+                  className="active:scale-[0.98] transition-transform cursor-pointer"
+                  onClick={() => router.push(
+                    isDone ? `/trips/${trip.id}` : `/trips/${trip.id}/checkin`
+                  )}
+                >
                   <CardContent className="p-4 space-y-3">
-                    {/* 班次標題 */}
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-lg font-bold">{getTripTypeLabel(trip.type)}</span>
-                        <span className={`text-xs px-2 py-1 rounded-full ${badge.className}`}>
-                          {badge.label}
-                        </span>
+                    {/* 班次標題 + 路線名稱 */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-lg font-bold">{getTripTypeLabel(trip)}</span>
+                          <span className={`text-xs px-2 py-1 rounded-full ${badge.className}`}>
+                            {badge.label}
+                          </span>
+                        </div>
+                        {/* 路線名稱 — 來自套用的路線模板 */}
+                        <p className="text-sm font-semibold text-emerald-700 mt-1 flex items-center gap-1 min-w-0">
+                          <RouteIcon className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate">
+                            {route?.name || '沒有套用路線模板'}
+                          </span>
+                        </p>
                       </div>
-                      <div className="flex items-center gap-1 text-muted-foreground">
+                      <div className="flex items-center gap-1 text-muted-foreground flex-shrink-0">
                         <Clock className="w-4 h-4" />
                         <span className="text-sm">{trip.plannedStartTime}</span>
                       </div>
                     </div>
 
-                    {/* 校巴資訊 */}
-                    {bus && (
-                      <div className="flex items-center gap-2 bg-muted/50 rounded-xl p-2">
-                        <Bus className="w-4 h-4 text-emerald-600" />
-                        <span className="text-sm font-medium">{bus.plateNumber}</span>
-                        <span className="text-xs text-muted-foreground">{bus.model}</span>
-                      </div>
-                    )}
+                    {/* 校巴 + 路線地點 + 乘車學生 — 合在同一個 section */}
+                    <div className="rounded-xl bg-muted/40 divide-y divide-border/50 overflow-hidden">
+                      {/* 校巴資訊 */}
+                      {bus && (
+                        <div className="flex items-center gap-2 px-3 py-2.5">
+                          <Bus className="w-4 h-4 text-emerald-600 flex-shrink-0" />
+                          <span className="text-sm font-medium">{bus.plateNumber}</span>
+                          <span className="text-xs text-muted-foreground truncate">{bus.model}</span>
+                        </div>
+                      )}
 
-                    {/* 學生名單 */}
-                    <div className="bg-blue-50 rounded-xl p-3">
-                      <div className="flex items-center gap-1 text-blue-600 mb-2">
-                        <CheckCircle className="w-4 h-4" />
-                        <span className="text-xs font-medium">乘車學生 ({trip.studentIds.length}人)</span>
+                      {/* 路線地點 (站點串接) */}
+                      {routeStops.length > 0 && (
+                        <div className="px-3 py-2.5">
+                          <div className="flex items-center gap-1 text-emerald-700 mb-1">
+                            <MapPin className="w-3.5 h-3.5" />
+                            <span className="text-xs font-medium">路線地點 ({routeStops.length} 個)</span>
+                          </div>
+                          <p className="text-xs text-emerald-900/80 leading-relaxed">
+                            {routeStops.join(' → ')}
+                          </p>
+                        </div>
+                      )}
+
+                      {/* 乘車學生 — 只顯示頭像圓圈 + 人數 */}
+                      <div className="flex items-center gap-2.5 px-3 py-2.5">
+                        <div className="flex -space-x-2 flex-shrink-0">
+                          {students.slice(0, 5).map(s => (
+                            <div
+                              key={s.id}
+                              title={s.name}
+                              className="w-7 h-7 rounded-full ring-2 ring-background bg-emerald-500/15 text-emerald-600 text-[10px] font-bold flex items-center justify-center overflow-hidden"
+                            >
+                              {s.photo ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={s.photo} alt={s.name} className="h-full w-full object-cover" />
+                              ) : (
+                                s.name.slice(0, 1)
+                              )}
+                            </div>
+                          ))}
+                          {students.length > 5 && (
+                            <div className="w-7 h-7 rounded-full ring-2 ring-background bg-muted text-muted-foreground text-[10px] font-bold flex items-center justify-center">
+                              +{students.length - 5}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 text-muted-foreground min-w-0">
+                          <Users className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="text-xs">
+                            乘車學生 ({students.length}人)
+                          </span>
+                        </div>
                       </div>
-                      <p className="text-sm">{getStudentNames(trip.studentIds)}</p>
                     </div>
 
-                    {/* 打卡按鈕 */}
-                    {trip.status === 'scheduled' && (
-                      <Button
-                        onClick={() => router.push(`/trips/${trip.id}/checkin`)}
-                        className="w-full h-12 bg-gradient-to-r from-emerald-500 to-teal-500"
-                      >
-                        開始打卡
-                      </Button>
-                    )}
-                    {trip.status === 'in_progress' && (
-                      <Button
-                        onClick={() => router.push(`/trips/${trip.id}/checkin`)}
-                        className="w-full h-12 bg-gradient-to-r from-amber-500 to-orange-500"
-                      >
-                        繼續打卡
-                      </Button>
-                    )}
+                    {/* 班次已完成 — 只作狀態提示 (成張卡已可點擊) */}
                     {trip.status === 'completed' && (
-                      <div className="flex items-center justify-center gap-2 py-2 text-green-600">
-                        <CheckCircle className="w-5 h-5" />
-                        <span className="text-sm font-medium">班次已完成</span>
+                      <div className="flex items-center justify-center gap-2 py-1 text-green-600">
+                        <CheckCircle className="w-4 h-4" />
+                        <span className="text-xs font-medium">班次已完成</span>
                       </div>
                     )}
                   </CardContent>

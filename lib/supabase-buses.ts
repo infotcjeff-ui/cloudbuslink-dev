@@ -1,5 +1,6 @@
 // Supabase 校巴 CRUD 操作
 import { camelize, snakify } from './supabase-case';
+import { alignPayloadClientId } from './supabase-client-id';
 
 /**
  * 從錯誤解析「不存在的欄位名」。
@@ -42,6 +43,10 @@ async function insertWithColumnFallback(
 ): Promise<{ success: boolean; error?: string }> {
   const { supabase } = await import('./supabase');
   let payload = body;
+
+  // ⚠️ client_id 有 FK → cbl_clients(id) 且 NOT NULL → 空字串一定撞 FK
+  await alignPayloadClientId(payload);
+
   for (let attempt = 0; attempt < 12; attempt++) {
     const { error } = await supabase.from(table).insert(payload);
     if (!error) return { success: true };
@@ -68,8 +73,25 @@ async function updateWithColumnFallback(
   const { supabase } = await import('./supabase');
   let payload = body;
   for (let attempt = 0; attempt < 12; attempt++) {
-    const { error } = await supabase.from(table).update(payload).eq('id', id);
-    if (!error) return { success: true };
+    // ⚠️ 必須 .select() 二次驗證 ——
+    //   PostgREST 對「update 0 筆」(id 在雲端不存在) 回傳成功 + 無錯誤,
+    //   但實際沒寫進任何東西 → 呼叫端以為成功, 雲端卻沒有這筆資料。
+    const { data, error } = await supabase
+      .from(table)
+      .update(payload)
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
+    if (!error) {
+      if (!data) {
+        console.warn(`[Supabase] ${table}.update 沒有匹配到任何列 (id=${id})`);
+        return {
+          success: false,
+          error: `雲端找不到這筆資料 (${table}/${id}), 請重新新增`,
+        };
+      }
+      return { success: true };
+    }
     const colName = parseMissingColumn(error);
     if (colName && colName in payload) {
       const next = { ...payload };

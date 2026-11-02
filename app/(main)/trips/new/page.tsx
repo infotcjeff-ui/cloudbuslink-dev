@@ -10,10 +10,10 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { AriaSelectRoot, AriaSelectItem, SelectedCheck } from '@/components/ui/aria-select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
 import { cn, today, cnWeekday, tripTypeLabel } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
-import type { Waypoint, TripType } from '@/lib/types';
+import type { Waypoint, TripType, Trip } from '@/lib/types';
 import { StepsProgress } from '@/components/trips/steps-progress';
 import { SegmentedControl } from '@/components/trips/segmented-control';
 import { StickyActionBar } from '@/components/trips/sticky-action-bar';
@@ -55,11 +55,34 @@ export default function NewTripPage() {
   }, []);
 
   // Computed
-  const buses = useMemo(() => (user ? STORAGE.buses.getByClient(user.clientId || '') : []), [user]);
-  const nannies = useMemo(() => (user ? STORAGE.nannies.getByClient(user.clientId || '') : []), [user]);
-  const allStudents = useMemo(
-    () => (user ? STORAGE.students.getByClient(user.clientId || '').filter((s) => s.status === 'active') : []),
+  //
+  // 依資料可見範圍取下拉選項 (超管看全部, 一般角色只看自己學校)。
+  // 舊版 `getByClient(user.clientId || '')` 在超管時 → clientId='' → 下拉全部空白,
+  // 使用者根本選不到校巴/保姆/學生 → 無法新增班次。
+  const scope = useMemo(
+    () => resolveDataScope(user),
     [user]
+  );
+  const buses = useMemo(
+    () => (user
+      ? (scope.isSuperAdmin ? STORAGE.buses.getAll() : STORAGE.buses.getByClient(scope.clientId))
+      : []),
+    [user, scope]
+  );
+  const nannies = useMemo(
+    () => (user
+      ? (scope.isSuperAdmin ? STORAGE.nannies.getAll() : STORAGE.nannies.getByClient(scope.clientId))
+      : []),
+    [user, scope]
+  );
+  const allStudents = useMemo(
+    () => (user
+      ? (scope.isSuperAdmin
+          ? STORAGE.students.getAll()
+          : STORAGE.students.getByClient(scope.clientId)
+        ).filter((s) => s.status === 'active')
+      : []),
+    [user, scope]
   );
   const busStudents = useMemo(() => allStudents.filter((s) => s.busId === busId), [allStudents, busId]);
 
@@ -192,9 +215,20 @@ export default function NewTripPage() {
     }
     setSaving(true);
     try {
-      STORAGE.trips.add({
+      // clientId 決定班次屬於哪間學校 (cbl_trips.client_id 在 DB 是 NOT NULL FK)。
+      //
+      // ⚠️ 舊版用 `user.clientId || ''`: 超管建立班次時 → clientId='' →
+      //    班次寫進 localStorage 但 client_id 是空字串 → 之後任何
+      //    `getByClient(真實clientId)` 都撈不到它, 而且推上雲端會 FK violation。
+      //
+      // 正確做法: 以「所選校巴所屬學校」為準 (與後台排程頁 handleSave 一致)。
+      const bus = STORAGE.buses.getById(busId);
+      const effectiveClientId =
+        scope.clientId || bus?.clientId || STORAGE.clients.getAll()[0]?.id || '';
+
+      const trip: Trip = {
         id: STORAGE.genId('trip'),
-        clientId: user.clientId || '',
+        clientId: effectiveClientId,
         busId,
         nannyId,
         date,
@@ -210,9 +244,30 @@ export default function NewTripPage() {
         waypoints,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-      });
+      };
+
+      STORAGE.trips.add(trip);
+      window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
       toast.success(`已建立新班次 (${date} ${plannedStartTime} → ${plannedEndTime})`);
       setSuccess(true);
+
+      // 推雲端 (背景, 不阻擋 UI)
+      //
+      // ⚠️ 舊版完全沒有這一步 → 班次只存在這台裝置的 localStorage,
+      //    換分頁/換裝置就看不到自己剛建的班次。
+      //    失敗只提示 (本機已存, mergeAll 會在下次 sync 保留)。
+      void (async () => {
+        try {
+          const { pushTripToCloud } = await import('@/lib/trip-cloud');
+          const syncErr = await pushTripToCloud(trip, 'insert');
+          if (syncErr) {
+            toast.warning(`班次已存本機, 但未同步到雲端：${syncErr}`, 6000);
+          }
+        } catch (e) {
+          console.warn('[Trips/New] cloud push failed:', e);
+        }
+      })();
+
       setTimeout(() => router.push('/trips'), 650);
     } catch (e) {
       console.error('[Trips/New] handleSubmit error:', e);

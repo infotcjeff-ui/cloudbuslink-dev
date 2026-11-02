@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
 import type { Student } from '@/lib/types';
@@ -30,7 +30,11 @@ export default function StudentsPage() {
 
   useEffect(() => {
     if (!user) return;
-    setStudents(STORAGE.students.getByClient(user.clientId || ''));
+    // 依資料可見範圍取學生 (超管看全部, 一般角色只看自己學校)
+    const scope = resolveDataScope(user);
+    setStudents(scope.isSuperAdmin
+      ? STORAGE.students.getAll()
+      : STORAGE.students.getByClient(scope.clientId));
   }, [user]);
 
   if (!user) return null;
@@ -60,7 +64,10 @@ export default function StudentsPage() {
     } catch (e) {
       console.warn('[Students] Supabase delete error:', e);
     }
-    setStudents(STORAGE.students.getByClient(user.clientId || ''));
+    const scope = resolveDataScope(user);
+    setStudents(scope.isSuperAdmin
+      ? STORAGE.students.getAll()
+      : STORAGE.students.getByClient(scope.clientId));
     setDeleteId(null);
   };
 

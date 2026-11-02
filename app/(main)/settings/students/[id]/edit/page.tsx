@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope, markPendingPatch } from '@/lib/storage';
 import { formatAcademicYear, parseAcademicYearCode } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import type { Student } from '@/lib/types';
@@ -62,8 +62,13 @@ export default function EditStudentPage() {
 
   if (!student || !user) return <div className="p-4 text-center text-muted-foreground">載入中...</div>;
 
-  const allParents = STORAGE.parents.getByClient(user.clientId || '');
-  const allBuses = STORAGE.buses.getByClient(user.clientId || '');
+  const scope = resolveDataScope(user);
+  const allParents = scope.isSuperAdmin
+    ? STORAGE.parents.getAll()
+    : STORAGE.parents.getByClient(scope.clientId);
+  const allBuses = scope.isSuperAdmin
+    ? STORAGE.buses.getAll()
+    : STORAGE.buses.getByClient(scope.clientId);
 
   const handleSubmit = async () => {
     setError('');
@@ -82,7 +87,14 @@ export default function EditStudentPage() {
         busId: busId || null,
         parentIds,
       };
-      STORAGE.students.update(student.id, updates);
+          STORAGE.students.update(student.id, updates);
+
+      // ⚠️ 家長↔子女的綁定必須記成「待推送」:
+      //    若 push 還在跑時有一次 sync 拉回雲端舊快照, 綁定會被洗掉
+      //    → 家長端立刻看不到子女、班次頁也找不到班次。
+      markPendingPatch('students', student.id, {
+        parentIds: updates.parentIds,
+      });
 
       // 推回雲端 (背景)
       const { supabaseStudents } = await import('@/lib/supabase-entities');

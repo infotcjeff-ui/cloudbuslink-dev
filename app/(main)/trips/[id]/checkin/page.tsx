@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import {
   Check, X, Clock, AlertCircle, MapPin, ChevronLeft, ChevronRight,
-  StickyNote, Phone, Undo2, Users, Flag,
+  StickyNote, Phone, Undo2, Users, Flag, CircleDot,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -16,6 +16,7 @@ import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { MotionList } from '@/components/trips/motion-list';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
+import { getResumeWaypointIndex } from '@/lib/nanny-trips';
 import {
   cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel,
 } from '@/lib/utils';
@@ -41,14 +42,20 @@ export default function CheckinPage() {
     if (!params.id) return;
     const found = STORAGE.trips.getById(params.id as string);
     if (found) {
-      setTrip(found);
       // 自動開始班次 (如果未開始)
       if (found.status === 'scheduled') {
         STORAGE.trips.update(found.id, {
           status: 'in_progress',
           actualStartTime: currentTimeStamp(),
         });
-        setTrip({ ...found, status: 'in_progress', actualStartTime: currentTimeStamp() });
+        const started = { ...found, status: 'in_progress' as const, actualStartTime: currentTimeStamp() };
+        setTrip(started);
+        // 恢復步驟: 直接跳到第一個未完成的站點 (已完成上車 → 直接到下一站)
+        setCurrentWaypointIdx(getResumeWaypointIndex(started));
+      } else {
+        setTrip(found);
+        // 恢復步驟: 直接跳到第一個未完成的站點 (已完成上車 → 直接到下一站)
+        setCurrentWaypointIdx(getResumeWaypointIndex(found));
       }
       // 載入現有打卡記錄
       setAttendances(STORAGE.attendances.getByTrip(found.id));
@@ -233,7 +240,12 @@ export default function CheckinPage() {
     });
     pushTripToCloud(trip.id);
     setFinishConfirm(false);
-    router.push(`/trips/${trip.id}`);
+    // 完成班次 → 保姆回到「我的班次」; 其他角色回到班次詳情
+    if (user?.role === 'nanny') {
+      router.push('/nanny');
+    } else {
+      router.push(`/trips/${trip.id}`);
+    }
   };
 
   const goPrevWaypoint = () => {
@@ -274,20 +286,25 @@ export default function CheckinPage() {
   }
 
   const isLast = currentWaypointIdx === trip.waypoints.length - 1;
-  const progress = stats.total > 0 ? (stats.boarded + stats.absent) / stats.total : 0;
   const typePill = currentWaypoint.type === 'pickup'
     ? 'bg-amber-100 text-amber-700'
     : 'bg-blue-100 text-blue-700';
 
+  // 站點類型 → 視覺主題色 (上車 = 琥珀, 下車 = 藍)
+  const theme = currentWaypoint.type === 'pickup'
+    ? { ring: 'ring-amber-500/20', bar: 'bg-amber-500', soft: 'bg-amber-50 text-amber-700' }
+    : { ring: 'ring-blue-500/20', bar: 'bg-blue-500', soft: 'bg-blue-50 text-blue-700' };
+
   return (
-    <div className="px-3 pt-3 pb-6">
+    <div className="px-3 pt-3 pb-28">
       {/* 站點進度 — 與班次列表 TripCard 同一語言 */}
       <motion.div
         initial={{ opacity: 0, y: -6 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: DUR.base, ease: EASE_OUT_QUART }}
-        className="rounded-2xl p-3 bg-card border border-border/50 shadow-sm mb-2"
+        className={cn('rounded-2xl p-3 bg-card border border-border/50 shadow-sm mb-2 ring-1', theme.ring)}
       >
+        {/* 站點編號 + 類型 + 人數 */}
         <div className="flex items-center justify-between gap-2 mb-2">
           <div className="flex items-center gap-1.5 min-w-0">
             <span className={cn('text-[10px] font-medium px-2 py-0.5 rounded-full', typePill)}>
@@ -308,31 +325,29 @@ export default function CheckinPage() {
           </div>
         </div>
 
-        <h1 className="text-xl font-bold tracking-tight truncate">{currentWaypoint.location.name}</h1>
-        {currentWaypoint.location.address && (
-          <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1 truncate">
-            <MapPin className="w-3 h-3 flex-shrink-0" />
-            <span className="truncate">{currentWaypoint.location.address}</span>
-          </p>
-        )}
+        {/* 站點名稱 */}
+        <div className="flex items-start gap-2">
+          <CircleDot className={cn('w-5 h-5 mt-0.5 flex-shrink-0', currentWaypoint.type === 'pickup' ? 'text-amber-500' : 'text-blue-500')} />
+          <div className="min-w-0 flex-1">
+            <h1 className="text-xl font-bold tracking-tight leading-tight">
+              {currentWaypoint.location.name}
+            </h1>
+            {currentWaypoint.location.address && (
+              <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
+                <MapPin className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate">{currentWaypoint.location.address}</span>
+              </p>
+            )}
+          </div>
+        </div>
 
-        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2">
-          <Clock className="w-3 h-3" />
+        {/* 計劃 / 實際時間 */}
+        <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2 pl-7">
+          <Clock className="w-3 h-3 flex-shrink-0" />
           <span className="tabular-nums">計劃 {fmtTime(currentWaypoint.scheduledTime)}</span>
           {currentWaypoint.actualTime && (
             <span className="tabular-nums text-success">· 實際 {fmtTime(currentWaypoint.actualTime)}</span>
           )}
-        </div>
-
-        <div className="mt-2">
-          <div className="h-1 rounded-full bg-muted overflow-hidden">
-            <motion.div
-              className={cn('h-full rounded-full', stats.absent > 0 ? 'bg-warning' : 'bg-success')}
-              initial={{ width: 0 }}
-              animate={{ width: `${progress * 100}%` }}
-              transition={{ duration: 0.5, ease: 'easeOut' }}
-            />
-          </div>
         </div>
 
         {/* 站點切換 — 與 DatePillRow 同一手感 */}
@@ -378,7 +393,7 @@ export default function CheckinPage() {
         <Button
           onClick={markAllBoarded}
           variant="outline"
-          className="w-full mb-2 h-10 rounded-full text-sm active:scale-[0.98]"
+          className="w-full mb-2 h-11 rounded-full text-sm active:scale-[0.98]"
         >
           <Check className="w-4 h-4" />
           全部標記為已上車 ({stats.pending} 位)
@@ -429,36 +444,38 @@ export default function CheckinPage() {
         }}
       />
 
-      {/* 底部操作 — sticky 在捲動流內, 不再用 fixed (避免被 transform 綁架錯位) */}
-      <div className="sticky bottom-3 mt-3 z-30">
-        <div className="bg-background/85 backdrop-blur-md border border-border rounded-2xl shadow-lg p-2 flex items-center gap-2 safe-bottom">
-          <Button
-            onClick={goPrevWaypoint}
-            variant="ghost"
-            disabled={currentWaypointIdx === 0}
-            aria-label="上一站"
-            className="h-12 px-4 rounded-xl active:scale-95"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </Button>
-          <Button
-            onClick={completeWaypoint}
-            className="flex-1 h-12 rounded-xl bg-success text-success-foreground text-[15px] font-semibold active:scale-[0.98]"
-          >
-            <Flag className="w-4 h-4" />
-            {isLast
-              ? `完成打卡 (${stats.boarded + stats.absent}/${stats.total})`
-              : `完成${waypointTypeLabel(currentWaypoint.type)} (${stats.boarded + stats.absent}/${stats.total})`}
-          </Button>
-          <Button
-            onClick={goNextWaypoint}
-            variant="ghost"
-            disabled={isLast}
-            aria-label="下一站"
-            className="h-12 px-4 rounded-xl active:scale-95"
-          >
-            <ChevronRight className="w-5 h-5" />
-          </Button>
+      {/* 底部操作 — 與底部 menu 同款 (floating liquid-glass pill) */}
+      <div className="fixed bottom-3 left-0 right-0 z-40 safe-bottom pointer-events-none">
+        <div className="mx-auto max-w-[85vw] liquid-glass rounded-2xl shadow-lg p-1.5 pointer-events-auto">
+          <div className="flex items-center gap-1.5">
+            <Button
+              onClick={goPrevWaypoint}
+              variant="ghost"
+              disabled={currentWaypointIdx === 0}
+              aria-label="上一站"
+              className="h-12 w-12 rounded-xl active:scale-95"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </Button>
+            <Button
+              onClick={completeWaypoint}
+              className="flex-1 h-12 rounded-xl bg-success text-success-foreground text-[15px] font-semibold active:scale-[0.98]"
+            >
+              <Flag className="w-4 h-4" />
+              {isLast
+                ? `完成班次 (${stats.boarded + stats.absent}/${stats.total})`
+                : `完成${waypointTypeLabel(currentWaypoint.type)} (${stats.boarded + stats.absent}/${stats.total})`}
+            </Button>
+            <Button
+              onClick={goNextWaypoint}
+              variant="ghost"
+              disabled={isLast}
+              aria-label="下一站"
+              className="h-12 w-12 rounded-xl active:scale-95"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -663,7 +680,7 @@ function StudentCheckinRow({
           className="mt-2 w-full h-8 rounded-full bg-muted/60 text-xs text-muted-foreground flex items-center justify-center gap-1 active:scale-[0.98] transition-transform"
         >
           <Undo2 className="w-3 h-3" />
-          {done ? `${statusLabel} · 點一下復原` : `${statusLabel} · 點一下復原`}
+          {statusLabel} · 點一下復原
         </button>
       )}
 

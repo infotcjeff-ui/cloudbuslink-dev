@@ -11,7 +11,8 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
+import { useAuthClientId } from '@/lib/use-client-id';
 import { isValidPhone } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import type { Nanny } from '@/lib/types';
@@ -40,12 +41,24 @@ export default function NanniesPage() {
 
   useEffect(() => {
     if (!user) return;
-    setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
+    const scope = resolveDataScope(user);
+    setNannies(scope.isSuperAdmin
+      ? STORAGE.nannies.getAll()
+      : STORAGE.nannies.getByClient(scope.clientId));
   }, [user]);
+
+  // 建立保姆時要用的 clientId。
+  // ⚠️ 不可直接用 scope.clientId — 跨機構角色 (super_admin / system_admin) 沒有,
+  //    而且雲端同步未完成時也可能拿不到。
+  //    useAuthClientId 會在雲端同步回來後自動重算 → 避免 client_id='' 撞 FK。
+  const authClientId = useAuthClientId(user?.clientId);
 
   if (!user) return null;
 
-  const buses = STORAGE.buses.getByClient(user.clientId || '');
+  const scope = resolveDataScope(user);
+  const buses = scope.isSuperAdmin
+    ? STORAGE.buses.getAll()
+    : STORAGE.buses.getByClient(scope.clientId);
 
   const filtered = nannies.filter(n => !search || n.name.includes(search) || n.phone.includes(search));
 
@@ -126,14 +139,14 @@ export default function NanniesPage() {
           password: newPassword,  // 使用管理員自訂密碼
           role: 'nanny',
           name: form.name.trim(),
-          clientId: user.clientId,
+          clientId: authClientId,
           status: 'active',
           createdAt: new Date().toISOString(),
         });
 
         const newNanny = {
           id: STORAGE.genId('nanny'),
-          clientId: resolveClientId(user.clientId || null),
+          clientId: authClientId,
           name: form.name.trim(),
           phone: form.phone,
           employeeId: form.employeeId.trim(),
@@ -153,9 +166,43 @@ export default function NanniesPage() {
             toast.warning(`保姆已新增，但雲端同步失敗：${sbRes.error}`);
           }
         }
+
+        // ⚠️ 登入帳號也必須推回雲端 ——
+        //   這裡原本只寫 localStorage, 沒有 push 到 cbl_users。
+        //   → 保姆在另一台裝置 / 重新整理後就登入不到 (帳戶不存在)。
+        {
+          const { supabaseUsers } = await import('@/lib/supabase-users');
+          const account = STORAGE.users.findByPhone(form.phone);
+          if (account) {
+            const sbExisting = await supabaseUsers.findByPhone(form.phone);
+            const sbRes = sbExisting.data
+              ? await supabaseUsers.update(sbExisting.data.id, {
+                  password: newPassword,
+                  name: account.name,
+                  accountName: null,
+                })
+              : await supabaseUsers.add({
+                  id: account.id,
+                  phone: account.phone,
+                  accountName: null,
+                  password: account.password,
+                  role: 'nanny',
+                  name: account.name,
+                  clientId: account.clientId ?? null,
+                  status: account.status,
+                  createdAt: account.createdAt,
+                });
+            if (!sbRes.success) {
+              console.warn('[Nannies] Supabase user push failed:', sbRes.error);
+              toast.warning(`保姆已新增，但登入帳號雲端同步失敗：${sbRes.error}`);
+            }
+          }
+        }
         toast.success(`保姆「${form.name.trim()}」已新增, 登入帳號已建立`);
       }
-      setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
+      setNannies(scope.isSuperAdmin
+        ? STORAGE.nannies.getAll()
+        : STORAGE.nannies.getByClient(scope.clientId));
       setDialogOpen(false);
       setEditId(null);
     } catch (e) {
@@ -183,7 +230,9 @@ export default function NanniesPage() {
         console.warn('[Nannies] Supabase delete error:', e);
       }
       toast.success(`保姆「${targetName}」已刪除`);
-      setNannies(STORAGE.nannies.getByClient(user.clientId || ''));
+      setNannies(scope.isSuperAdmin
+        ? STORAGE.nannies.getAll()
+        : STORAGE.nannies.getByClient(scope.clientId));
       setDeleteId(null);
     } catch (e) {
       console.error('[Nannies] handleDelete error:', e);

@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
 import { fmtDate, boardingStatusLabel, dropoffStatusLabel, today } from '@/lib/utils';
 import type { Trip, Bus, Student, Driver, Nanny, Attendance, Parent } from '@/lib/types';
 
@@ -25,7 +25,10 @@ export default function ReportsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const all = STORAGE.trips.getByClient(user.clientId || '');
+    const scope = resolveDataScope(user);
+    const all = scope.isSuperAdmin
+      ? STORAGE.trips.getAll()
+      : STORAGE.trips.getByClient(scope.clientId);
     const filtered = all.filter(t => {
       if (t.date < dateFrom || t.date > dateTo) return false;
       if (busFilter && t.busId !== busFilter) return false;
@@ -37,7 +40,10 @@ export default function ReportsPage() {
 
   if (!user) return null;
 
-  const buses = STORAGE.buses.getByClient(user.clientId || '');
+  const scope = resolveDataScope(user);
+  const buses = scope.isSuperAdmin
+    ? STORAGE.buses.getAll()
+    : STORAGE.buses.getByClient(scope.clientId);
 
   // 匯出 Excel
   const exportToExcel = () => {
@@ -47,7 +53,9 @@ export default function ReportsPage() {
     try {
       // 行程報表 - 詳細數據
       const rows: any[] = [];
-      const settings = STORAGE.settings.getByClient(user.clientId || '');
+      const settings = scope.clientId
+        ? STORAGE.settings.getByClient(scope.clientId)
+        : STORAGE.settings.default('');
 
       trips.forEach(trip => {
         const bus = STORAGE.buses.getById(trip.busId);

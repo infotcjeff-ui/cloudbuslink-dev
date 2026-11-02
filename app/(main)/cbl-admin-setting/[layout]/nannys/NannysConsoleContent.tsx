@@ -40,7 +40,8 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useToast } from '@/components/ui/toast';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE } from '@/lib/storage';
+import { useAuthClientId } from '@/lib/use-client-id';
 import { dispatchNannyRefresh } from '@/lib/cbl-events';
 import {
   Pill,
@@ -324,20 +325,12 @@ export function NannysConsoleContent({
   // 當前登入者的 clientId (供 form 內員工編號 preview 使用)
   // 超管沒有 clientId → 用第一筆可見保姆 / 校巴 / 第一間學校兜底
   // (cbl_nannies.client_id 有 FK 必填, 不能寫 '')
-  const authClientId = React.useMemo(() => {
-    if (typeof window === 'undefined') return '';
-    try {
-      const raw = localStorage.getItem('cbl_auth');
-      if (!raw) return '';
-      const u = JSON.parse(raw);
-      if (u?.clientId) return u.clientId as string;
-      // 跨機構角色沒有自己的 clientId → 兜底到已知學校的 clientId
-      // (cbl_nannies.client_id 有 FK 必填, 不能寫 '')
-      return resolveClientId(null);
-    } catch {
-      return resolveClientId(null);
-    }
-  }, []);
+  //
+  // ⚠️ 用 useAuthClientId (而不是 useMemo + []) 的原因:
+  //   useMemo 只在 mount 算一次, 而 localStorage 的 cbl_clients 要等雲端同步
+  //   回來才有值 → mount 時 resolveClientId() 找不到學校 → 回傳 ''
+  //   → 建立的資料 client_id='' → 撞 FK → 推不上去。
+  const authClientId = useAuthClientId();
 
   // Add mode 預覽的員工編號 (與 storage 同步)
   const [previewEmployeeId, setPreviewEmployeeId] = React.useState<string>(

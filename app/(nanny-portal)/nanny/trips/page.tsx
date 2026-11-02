@@ -1,16 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Calendar, Clock, Bus as BusIcon, Users, MapPin, ChevronRight } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { useAuth } from '@/lib/hooks';
+import { useNannyTrips } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
-import { cn, today, cnWeekday, tripStatusLabel, tripTypeLabel } from '@/lib/utils';
-import type { Trip, Nanny } from '@/lib/types';
+import { today, cnWeekday, tripStatusLabel, tripTypeLabel } from '@/lib/utils';
 
 /**
  * /nanny/trips — 保姆的班次列表 (跨日期)。
@@ -22,29 +21,14 @@ import type { Trip, Nanny } from '@/lib/types';
  * 只顯示該保姆自己負責的班次 (nannyId 過濾), 不會看到同車隊其他人。
  */
 export default function NannyTripsPage() {
-  const { user } = useAuth();
   const router = useRouter();
-  const [nanny, setNanny] = useState<Nanny | null>(null);
   const [date, setDate] = useState(today());
-  const [trips, setTrips] = useState<Trip[]>([]);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (!user) return;
-
-    const foundNanny = STORAGE.nannies.getByClient(user.clientId || '')
-      .find(n => n.phone === user.phone);
-    setNanny(foundNanny || null);
-
-    if (foundNanny) {
-      setTrips(STORAGE.trips.getByNanny(foundNanny.id)
-        .filter(t => t.date === date && t.clientId === (user.clientId || ''))
-        .sort((a, b) => a.plannedStartTime.localeCompare(b.plannedStartTime)));
-    } else {
-      setTrips([]);
-    }
-    setLoading(false);
-  }, [user, date]);
+  // 共用邏輯 (與 /nanny 及管理員排程頁一致):
+  //   - 本地時區日期 (不用 UTC)
+  //   - 班次歸屬: trip.nannyId 精確匹配 → 校巴綁定 fallback
+  //   - 雲端同步完成後自動重畫
+  const { nanny, trips, loading } = useNannyTrips(date);
 
   if (loading) {
     return (

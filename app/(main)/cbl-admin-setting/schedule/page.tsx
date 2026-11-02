@@ -24,6 +24,7 @@ import {
   supabaseTrips,
   type TripRow,
 } from '@/lib/supabase-trips';
+import { pushTripToCloud as pushTripToCloudShared } from '@/lib/trip-cloud';
 
 import { useScheduleTrips } from './hooks/useScheduleTrips';
 import { ScheduleConsoleContent } from './ScheduleConsoleContent';
@@ -159,7 +160,9 @@ export default function CblAdminSchedulePage() {
   /* ---- 寫入 / 維護 ---- */
 
   /**
-   * 把本機的 trip 推到 Supabase。
+ * 把本機的 trip 推到 Supabase。
+   *
+   * 共用實作見 lib/trip-cloud.ts (前台 /trips/new 也用同一份, 避免欄位漂移)。
    *
    * 流程 (FK-safe):
    *   1. ensureTripParents — 保證 bus / driver / nanny / students / route 在 DB 存在
@@ -173,62 +176,7 @@ export default function CblAdminSchedulePage() {
     trip: Trip,
     mode: 'insert' | 'update',
   ): Promise<string | null> => {
-    try {
-      const bus = STORAGE.buses.getById(trip.busId);
-      const driver = bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null;
-      const nanny = trip.nannyId ? STORAGE.nannies.getById(trip.nannyId) : null;
-      const route = trip.routeId ? STORAGE.routes.getById(trip.routeId) : null;
-      const students = STORAGE.students.getAll().filter((s) => trip.studentIds.includes(s.id));
-
-      const ensured = await ensureTripParents({
-        clientId: trip.clientId,
-        busId: trip.busId,
-        nannyId: trip.nannyId,
-        driverId: bus?.driverId ?? null,
-        studentIds: trip.studentIds,
-        routeId: trip.routeId ?? null,
-        client: STORAGE.clients.getById(trip.clientId),
-        bus,
-        driver,
-        nanny,
-        route,
-        students,
-      });
-
-      if (!ensured.ok) {
-        return `缺少關聯資料 (${ensured.missing.join(', ')})`;
-      }
-
-      const row: TripRow = {
-        id: trip.id,
-        clientId: trip.clientId,
-        busId: trip.busId,
-        nannyId: trip.nannyId,
-        date: trip.date,
-        type: trip.type,
-        customTypeLabel: trip.customTypeLabel ?? null,
-        status: trip.status,
-        plannedStartTime: trip.plannedStartTime,
-        plannedEndTime: trip.plannedEndTime,
-        actualStartTime: trip.actualStartTime,
-        actualEndTime: trip.actualEndTime,
-        waypoints: trip.waypoints,
-        studentIds: trip.studentIds,
-        currentRouteIndex: trip.currentRouteIndex,
-        completedStops: trip.completedStops,
-        routeId: trip.routeId ?? null,
-        createdAt: trip.createdAt,
-        updatedAt: trip.updatedAt,
-      };
-
-      const res = mode === 'insert'
-        ? await supabaseTrips.add(row)
-        : await supabaseTrips.update(trip.id, row);
-      return res.success ? null : (res.error ?? '未知錯誤');
-    } catch (err) {
-      console.error('[Schedule] pushTripToCloud failed:', err);
-      return err instanceof Error ? err.message : String(err);
-    }
+    return pushTripToCloudShared(trip, mode);
   }, []);
 
   const handleSave = useCallback(async (values: TripFormValues) => {

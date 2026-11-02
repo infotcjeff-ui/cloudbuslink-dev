@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { STORAGE } from './storage';
-import { initWithSupabase, isSupabaseAvailable } from './supabase-data';
+import { initWithSupabase, syncFromSupabase, isSupabaseAvailable } from './supabase-data';
 import { resolveLoginAccount } from './auth-lookup';
-import type { User, UserRole } from './types';
+import { findNannyForUser, getNannyTrips } from './nanny-trips';
+import type { User, UserRole, Nanny, Trip } from './types';
 
 // 初始化資料 (僅在 client side, 只走 Supabase)
 export function useInitData() {
@@ -124,6 +125,123 @@ export function useAuth() {
   }, [user]);
 
   return { user, loading, login, logout, updateProfile };
+}
+
+/**
+ * useNannyTrips — 取得登入保姆在指定日期的班次, 並在雲端同步完成後自動重畫。
+ *
+ * 為什麼需要這個 hook (而不是各頁自己 useEffect):
+ *   1. **雲端同步是非同步的**
+ *      useAuth() → useInitData() → initWithSupabase() 會在背景拉雲端資料。
+ *      保姆頁 mount 時 localStorage 可能還是空的 → 讀到 0 班。
+ *      同步完成後 supabase-data 會 dispatch 'cbl-trips-refresh' 等事件,
+ *      這個 hook 監聽它們 → 重新讀取 → 畫面自動更新。
+ *      之前保姆頁完全沒有監聽 → 使用者必須手動重新整理才看得到班次。
+ *
+ *   2. **班次歸屬規則要一致**
+ *      「這班是不是我的」在管理員排程頁與保姆 portal 必須同一套規則
+ *      (trip.nannyId 精確匹配 → 校巴綁定 fallback), 否則管理員看得到、
+ *      保姆看不到。共用邏輯放在 lib/nanny-trips.ts。
+ *
+ * @param date YYYY-MM-DD (本地時區日期字串)
+ */
+export function useNannyTrips(date: string) {
+  const { user } = useAuth();
+  const [nanny, setNanny] = useState<Nanny | null>(null);
+  const [trips, setTrips] = useState<Trip[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // 用 ref 保存最新的 nanny / date, 讓 interval 回呼 (effect 閉包外的舊值)
+  // 不會讀到過期的資料。
+  const nannyRef = useRef<Nanny | null>(null);
+  const dateRef = useRef(date);
+  dateRef.current = date;
+
+  useEffect(() => {
+    if (!user) {
+      nannyRef.current = null;
+      setNanny(null);
+      setTrips([]);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const reload = () => {
+      if (cancelled) return;
+      const found = findNannyForUser(user) ?? null;
+      nannyRef.current = found;
+      setNanny(found);
+      setTrips(found ? getNannyTrips(found, dateRef.current, user.clientId) : []);
+      setLoading(false);
+    };
+
+    // 立即載入一次 (localStorage 已有資料時秒開)
+    reload();
+
+    // ⚠️ 主動從雲端拉一次 (核心修復)
+    //
+    // 為什麼需要:
+    //   initWithSupabase() 在 localStorage 已 initialized (cbl_initialized=true) 時
+    //   會直接 return true → 永遠不會再拉雲端。
+    //   結果: 管理員在別的分頁/裝置新增班次並綁了保姆, 保姆這邊的 localStorage
+    //   還是舊快照 → 「今日沒有班次」, 而且重新整理也救不了 (因為 initialized 還是 true)。
+    //
+    //   所以保姆頁 mount 時要主動 syncFromSupabase()。
+    //   (tripStorage.mergeAll 以 updatedAt 較新者為準, 會把雲端新班次合併進來,
+    //    又不會吃掉本機尚未 push 的變更。)
+    let syncTimer: number | undefined;
+    const doSync = async () => {
+      if (!isSupabaseAvailable()) return;
+      try {
+        await syncFromSupabase();
+      } catch (e) {
+        console.warn('[useNannyTrips] cloud sync failed:', e);
+      }
+    };
+    void doSync();
+
+    // 監聽各實體的 refresh 事件 (雲端同步完成 / 後台改資料)
+    const events = [
+      'cbl-trips-refresh',
+      'cbl-nannys-refresh',
+      'cbl-nannies-refresh',
+      'cbl-buses-refresh',
+      'cbl-users-refresh',
+      'cbl-clients-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, reload));
+
+    // 定期重新拉取雲端 (每 2 分鐘) + 跨日更新 (每分鐘檢查日期)
+    const timer = window.setInterval(() => {
+      if (cancelled) return;
+      const cur = nannyRef.current;
+      setTrips(cur ? getNannyTrips(cur, dateRef.current, user.clientId) : []);
+    }, 60_000);
+
+    const syncTimerHandle = window.setInterval(() => {
+      if (cancelled) return;
+      void doSync();
+    }, 120_000);
+    syncTimer = syncTimerHandle;
+
+    // 從背景切回前景時也拉一次 (手機 App 常用情境)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void doSync();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+      cancelled = true;
+      events.forEach((ev) => window.removeEventListener(ev, reload));
+      window.clearInterval(timer);
+      if (syncTimer !== undefined) window.clearInterval(syncTimer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [user, date]);
+
+  return { nanny, trips, loading };
 }
 
 // 獲取當前 Client 設定

@@ -13,6 +13,8 @@
 // 所以 client 端 (anon key) 就能寫入。上線前要移除並改寫 per-role policy。
 
 import { camelize, snakify } from './supabase-case';
+import { alignPayloadClientId } from './supabase-client-id';
+import { markSynced, unmarkSynced } from './storage';
 import type { User } from './types';
 
 /**
@@ -97,6 +99,18 @@ export const supabaseUsers = {
    * - 結果: 用後台改了密碼 → 舊密碼仍可登入; 改了姓名 → 畫面仍顯示舊名稱
    * - cbl_users 是一張很小的表, 每次 mount 都拉一次的成本可以忽略,
    *   所以把它獨立出來「一定會同步」
+   *
+   * ⚠️ 為什麼不能用 setAll() 整批覆蓋 (這是「家長/保姆登入不到」的根因):
+   *   帳號是「本機先寫、雲端後推」的流程 ——
+   *   管理員新增家長時先寫 localStorage (讓 UI 即時反應), 背景再 push 到 DB。
+   *   如果 push 還沒完成、或 push 失敗 (例如 FK / RLS), 雲端就沒有這筆帳號。
+   *   → setAll() 會用雲端快照「整批覆蓋」本機 → 剛建立的帳號憑空消失
+   *   → 重新整理後家長頁顯示「無帳號」, 家長端登入回「帳戶不存在」。
+   *
+   *   修正: 改成「合併」——
+   *     - 雲端有的 id       → 以雲端為準 (source of truth, 別裝置改的)
+   *     - 只有本機有的 id   → 保留 (還沒 push 成功, 別洗掉)
+   *   這跟 lib/storage.ts 的 mergeCloudRecords 同一套思路。
    */
   async syncToStorage(): Promise<{ success: boolean; error?: string }> {
     const { data, error } = await this.getAll();
@@ -106,13 +120,31 @@ export const supabaseUsers = {
       return { success: true };
     }
 
-    const { STORAGE } = await import('./storage');
-    STORAGE.users.setAll(data as User[]);
+    const { STORAGE, mergeCloudUsers } = await import('./storage');
+    const cloudUsers = data as User[];
+
+    // ---- 合併 (而非整批覆蓋) ----
+    //  詳見 lib/storage.ts mergeCloudUsers 的說明:
+    //  帳號是「本機先寫、雲端後推」, setAll 會把還沒 push 成功的本機帳號洗掉
+    //  → 家長 / 保姆重新整理後顯示「無帳號」, 登入回「帳戶不存在」。
+    const { merged, keptLocal } = mergeCloudUsers(cloudUsers);
+    if (keptLocal > 0) {
+      console.log(
+        `[Supabase] 保留 ${keptLocal} 筆尚未推上雲端的本機帳號: ${merged
+          .filter((u) => !cloudUsers.some((c) => c.id === u.id))
+          .map((u) => u.phone)
+          .join(', ')}`,
+      );
+    }
+
+    STORAGE.users.setAll(merged);
 
     // 目前登入者的 session 記錄也一併更新 (名稱 / 密碼 / 角色 / 狀態)
     const current = STORAGE.auth.get();
     if (current) {
-      const fresh = data.find((u) => u.id === current.id || u.phone === current.phone);
+      const fresh = cloudUsers.find(
+        (u) => u.id === current.id || u.phone === current.phone,
+      );
       if (fresh && fresh.password !== current.password) {
         // 密碼在 DB 被改過 → 舊 session 的密碼已失效, 這是預期行為
         console.log('[Supabase] current user credentials updated from DB');
@@ -159,6 +191,12 @@ export const supabaseUsers = {
     let payload: Record<string, unknown> = snakify(user);
     const dropped: string[] = [];
 
+    // ⚠️ client_id 有 FK → cbl_clients(id)。
+    //    空字串 '' 一定撞 FK (cbl_users_client_id_fkey), 而 null 是允許的
+    //    (system_admin / super_admin 刻意不屬於任何學校)。
+    //    → 這裡把 '' 對齊到雲端真的存在的學校; 刻意給 null 的則保留 null。
+    await alignPayloadClientId(payload, { allowNull: true });
+
     for (let attempt = 0; attempt < 4; attempt++) {
       const { data, error } = await supabase
         .from('cbl_users')
@@ -194,6 +232,9 @@ export const supabaseUsers = {
             `[Supabase] cbl_users.insert 已略過 live schema 沒有的欄位: ${dropped.join(', ')} (請跑 migration 0013)`,
           );
         }
+        // 記錄「這筆已推上雲端」→ 之後 mergeCloudUsers 才能分辨
+        // 「這筆是還沒 push」還是「這筆在別的裝置被刪了」
+        markSynced('users', data.id);
         return { success: true, id: data.id };
       }
 
@@ -226,6 +267,11 @@ export const supabaseUsers = {
     let payload: Record<string, unknown> = snakify(patch);
     const dropped: string[] = [];
 
+    // 同 add: client_id 空字串會撞 FK, 必須對齊到雲端真的存在的 id (或保留 null)
+    if ('client_id' in payload) {
+      await alignPayloadClientId(payload, { allowNull: true });
+    }
+
     for (let attempt = 0; attempt < 4; attempt++) {
       const { data, error } = await supabase
         .from('cbl_users')
@@ -244,6 +290,8 @@ export const supabaseUsers = {
             `[Supabase] cbl_users.update 已略過 live schema 沒有的欄位: ${dropped.join(', ')} (請跑 migration 0013)`,
           );
         }
+        // 同 add: 這筆已經在雲端了
+        markSynced('users', id);
         return { success: true };
       }
 
@@ -285,6 +333,8 @@ export const supabaseUsers = {
       return { success: false, error: 'RLS 政策拒絕 (無刪除權限)' };
     }
 
+    // 已從雲端刪除 → 取消「已同步」標記 (這筆帳號不該再被保留在本機)
+    unmarkSynced('users', id);
     return { success: true };
   },
 };

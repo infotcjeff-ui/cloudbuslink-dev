@@ -12,7 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveClientId } from '@/lib/storage';
+import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import type { Bus as BusType } from '@/lib/types';
@@ -33,12 +33,18 @@ export default function BusesPage() {
 
   useEffect(() => {
     if (!user) return;
-    setBuses(STORAGE.buses.getByClient(user.clientId || ''));
+    const scope = resolveDataScope(user);
+    setBuses(scope.isSuperAdmin
+      ? STORAGE.buses.getAll()
+      : STORAGE.buses.getByClient(scope.clientId));
   }, [user]);
 
   if (!user) return null;
 
-  const drivers = STORAGE.drivers.getByClient(user.clientId || '');
+  const scope = resolveDataScope(user);
+  const drivers = scope.isSuperAdmin
+    ? STORAGE.drivers.getAll()
+    : STORAGE.drivers.getByClient(scope.clientId);
 
   const filtered = buses.filter(b => !search || b.plateNumber.includes(search.toUpperCase()));
 
@@ -79,7 +85,7 @@ export default function BusesPage() {
       } else {
         STORAGE.buses.add({
           id: STORAGE.genId('bus'),
-          clientId: resolveClientId(user.clientId || null),
+          clientId: scope.clientId || resolveClientId(user.clientId || null),
           plateNumber: plate,
           model: form.model.trim(),
           capacity: form.capacity,
@@ -102,7 +108,9 @@ export default function BusesPage() {
       toast.error(`儲存失敗：${msg}`);
       return;
     }
-    setBuses(STORAGE.buses.getByClient(user.clientId || ''));
+    setBuses(scope.isSuperAdmin
+      ? STORAGE.buses.getAll()
+      : STORAGE.buses.getByClient(scope.clientId));
     setDialogOpen(false);
     setEditId(null);
   };
@@ -113,7 +121,9 @@ export default function BusesPage() {
       const targetPlate = buses.find((b) => b.id === deleteId)?.plateNumber ?? '';
       STORAGE.buses.remove(deleteId);
       toast.success(`校巴「${targetPlate}」已刪除`);
-      setBuses(STORAGE.buses.getByClient(user.clientId || ''));
+      setBuses(scope.isSuperAdmin
+        ? STORAGE.buses.getAll()
+        : STORAGE.buses.getByClient(scope.clientId));
       setDeleteId(null);
     } catch (e) {
       console.error('[Buses] handleDelete error:', e);
@@ -145,7 +155,10 @@ export default function BusesPage() {
         <div className="space-y-2">
           {filtered.map(b => {
             const driver = b.driverId ? STORAGE.drivers.getById(b.driverId) : null;
-            const studentCount = STORAGE.students.getByClient(user.clientId || '').filter(s => s.busId === b.id).length;
+            const studentCount = (scope.isSuperAdmin
+              ? STORAGE.students.getAll()
+              : STORAGE.students.getByClient(scope.clientId)
+            ).filter(s => s.busId === b.id).length;
             return (
               <Card key={b.id}>
                 <CardContent className="p-3">

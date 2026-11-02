@@ -1,12 +1,16 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { IdCard, Phone, Bus, MapPin, Clock } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveDataScope } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import { fmtTime, today, tripStatusLabel } from '@/lib/utils';
+import {
+  resolveParentChildren,
+  tripInvolvesStudents,
+} from '@/lib/parent-children';
 import type { Student, Trip } from '@/lib/types';
 
 /**
@@ -16,25 +20,53 @@ import type { Student, Trip } from '@/lib/types';
  *       成為家長設定頁的子項目。
  * 差異: 原本的今日班次卡片可點擊跳 /trips/[id], 但家長無權進入班次頁,
  *       因此這裡改成唯讀展示, 不做導覽。
+ *
+ * ⚠️ 家長/子女配對統一走 lib/parent-children.ts
+ *    (原本用 `user.id.replace('user-','')` 比對 parent.id, 實際永遠配不到)。
  */
 export default function ParentsBindingPage() {
   const { user } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [todayTrips, setTodayTrips] = useState<Trip[]>([]);
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     if (!user) return;
-    const all = STORAGE.students.getByClient(user.clientId || '');
-    const mine = all.filter(s => s.parentIds.includes(user.id.replace('user-', '')) ||
-                                   s.parentIds.includes(user.id));
+    const scope = resolveDataScope(user);
+
+    // 找家長 + 子女 (統一邏輯, 見 lib/parent-children.ts)
+    const { parent: foundParent, students: mine } = resolveParentChildren(user, {
+      isSuperAdmin: scope.isSuperAdmin,
+      clientId: scope.clientId,
+    });
     setStudents(mine);
 
-    // 獲取今日班次
-    const myStudentIds = new Set(mine.map(s => s.id));
-    const trips = STORAGE.trips.getByDate(user.clientId || '', today())
-      .filter(t => t.studentIds.some(sid => myStudentIds.has(sid)));
+    // 獲取今日班次 (同時檢查 trip.studentIds 與 waypoints[].studentIds)
+    const myStudentIds = new Set(mine.map((s) => s.id));
+    const allTrips = scope.isSuperAdmin
+      ? STORAGE.trips.getAll()
+      : STORAGE.trips.getByClient(scope.clientId);
+    const trips = allTrips
+      .filter((t) => t.date === today())
+      .filter((t) => tripInvolvesStudents(t, myStudentIds));
     setTodayTrips(trips);
   }, [user]);
+
+  useEffect(() => {
+    reload();
+    if (!user) return;
+    const events = [
+      'cbl-parents-refresh',
+      'cbl-students-refresh',
+      'cbl-users-refresh',
+      'cbl-clients-refresh',
+      'cbl-trips-refresh',
+      'cbl-buses-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, reload));
+    return () => {
+      events.forEach((ev) => window.removeEventListener(ev, reload));
+    };
+  }, [reload, user]);
 
   if (!user) return null;
 
@@ -57,7 +89,7 @@ export default function ParentsBindingPage() {
           {students.map(s => {
             const bus = s.busId ? STORAGE.buses.getById(s.busId) : null;
             const driver = bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null;
-            const myTrips = todayTrips.filter(t => t.studentIds.includes(s.id));
+            const myTrips = todayTrips.filter((t) => tripInvolvesStudents(t, new Set([s.id])));
 
             return (
               <Card key={s.id}>

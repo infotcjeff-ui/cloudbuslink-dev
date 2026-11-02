@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/hooks';
 import { isValidLoginAccount } from '@/lib/auth-lookup';
+import { isSupabaseAvailable } from '@/lib/supabase-data';
 
 export default function NannyLoginPage() {
   const router = useRouter();
@@ -52,6 +53,19 @@ export default function NannyLoginPage() {
     }
 
     setSubmitting(true);
+    // Vercel 首次開啟 localStorage 是空的 — 先等 cbl_users 同步下來再驗證，
+    // 否則立即點登入會誤報「帳戶不存在」。
+    if (isSupabaseAvailable()) {
+      try {
+        const { supabaseUsers } = await import('@/lib/supabase-users');
+        await Promise.race([
+          supabaseUsers.syncToStorage(),
+          new Promise((r) => setTimeout(r, 8000)),
+        ]);
+      } catch (e) {
+        console.warn('[NannyLogin] pre-login user sync failed:', e);
+      }
+    }
     // 只允許 nanny 角色登入
     const result = login(account, password, ['nanny']);
     setSubmitting(false);

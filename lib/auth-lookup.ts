@@ -24,6 +24,8 @@
 //   2. cbl_users.account_name 不分大小寫相符
 //   3. cbl_nannies.account_name 相符 → 借其 phone 反查 cbl_users
 //   4. cbl_parents.account_name 相符 → 借其 phone 反查 cbl_users
+//   5. cbl_nannies / cbl_parents 的 phone 相符 → 借其 phone 反查 cbl_users
+//      (自癒層: 帳戶名稱是選填欄位, 不能只靠它查找)
 //
 //  為什麼把這段抽成獨立檔案:
 //    lib/hooks.ts (login) 、login 頁面、nannyloginportal、parentsloginportal
@@ -76,6 +78,33 @@ export function resolveLoginAccount(account: string): User | undefined {
     const linked = STORAGE.users.findByPhone(parent.phone);
     if (linked) return linked;
     const rebuilt = rebuildUserFromParent(parent);
+    if (rebuilt) return rebuilt;
+  }
+
+  // ---- 4: 自癒層 — 用「電話」反查保姆 / 家長 ----
+  //
+  //  為什麼需要這一層 (「登入不到」的真正根因):
+  //    「帳戶名稱」是選填欄位, 家長 / 保姆不一定有填。
+  //    而且 cbl_users 那筆帳號會被 syncToStorage() 用雲端資料整批覆蓋洗掉
+  //    (本機先寫、雲端後推 → 雲端沒這筆 → 本機這筆消失)。
+  //    → 只靠 account_name 查找的家長, 帳號被洗掉後就再也找不到人
+  //      → 登入時回「帳戶不存在」。
+  //
+  //  這裡補上 phone 的查找路徑: 電話是家長 / 保姆的必填欄位, 也是登入入口
+  //  預設會提示的「8 位手機號碼」→ 一定要找得到。
+  const nannyByPhone = STORAGE.nannies.getAll().find((n) => n.phone === trimmed);
+  if (nannyByPhone) {
+    const linked = STORAGE.users.findByPhone(nannyByPhone.phone);
+    if (linked) return linked;
+    const rebuilt = rebuildUserFromNanny(nannyByPhone);
+    if (rebuilt) return rebuilt;
+  }
+
+  const parentByPhone = STORAGE.parents.getAll().find((p) => p.phone === trimmed);
+  if (parentByPhone) {
+    const linked = STORAGE.users.findByPhone(parentByPhone.phone);
+    if (linked) return linked;
+    const rebuilt = rebuildUserFromParent(parentByPhone);
     if (rebuilt) return rebuilt;
   }
 
