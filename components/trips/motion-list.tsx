@@ -1,7 +1,7 @@
 'use client';
 
 import * as React from 'react';
-import { motion, AnimatePresence, type HTMLMotionProps } from 'framer-motion';
+import { motion, AnimatePresence, type Variants } from 'framer-motion';
 import { fadeUpItem, staggerContainer } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 
@@ -15,6 +15,10 @@ export interface MotionListProps<T> {
   asList?: boolean;
   /** AnimatePresence mode. */
   mode?: 'sync' | 'wait' | 'popLayout';
+  /** 預設 true。設 false 可關掉 layout 動畫 (打卡列狀態切換時避免卡片變形)。 */
+  layout?: boolean;
+  /** 自訂 item variants，預設 fadeUpItem。打卡列傳 fadeItem 只做 fade。 */
+  itemVariants?: Variants;
 }
 
 /**
@@ -36,6 +40,8 @@ export function MotionList<T>({
   itemClassName,
   asList = false,
   mode = 'popLayout',
+  layout = true,
+  itemVariants = fadeUpItem,
 }: MotionListProps<T>) {
   const Container: any = asList ? motion.ul : motion.div;
   const Item: any = asList ? motion.li : motion.div;
@@ -51,11 +57,11 @@ export function MotionList<T>({
         {items.map((item, idx) => (
           <Item
             key={getKey(item, idx)}
-            variants={fadeUpItem}
+            variants={itemVariants}
             initial="hidden"
             animate="show"
             exit="exit"
-            layout
+            {...(layout ? { layout: true } : {})}
             className={cn(itemClassName)}
           >
             {renderItem(item, idx)}

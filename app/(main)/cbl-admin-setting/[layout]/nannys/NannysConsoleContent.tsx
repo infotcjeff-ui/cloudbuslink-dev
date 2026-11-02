@@ -518,6 +518,44 @@ export function NannysConsoleContent({
           }
         } else {
           // Add mode
+          //
+          // ⚠️ 電話同時是「登入帳號」→ 必須唯一。
+          //    原本無條件 STORAGE.nannies.add() → 同一支電話被重複新增時,
+          //    雲端 cbl_nannies 會出現兩筆同電話, 而登入時先查到舊那筆
+          //    → 顯示舊名字 / 舊密碼。
+          //    → 先按電話找既有保姆: 有就更新 (併入), 沒有才新增。
+          const existingNanny = STORAGE.nannies.getAll().find((n) => n.phone === phone);
+          if (existingNanny) {
+            const updates = {
+              name,
+              accountName: accountName || undefined,
+              employeeId,
+              photo: state.photo,
+              assignedBusIds: state.assignedBusIds,
+              ...({ description: state.description } as any),
+            } as any;
+            STORAGE.nannies.update(existingNanny.id, updates);
+            await upsertLoginAccount({
+              userId: existingNanny.id,
+              phone,
+              name,
+              accountName,
+              password: state.password,
+              clientId: authClientId,
+            });
+            const { supabaseNannies } = await import('@/lib/supabase-entities');
+            const sbRes = await supabaseNannies.update(existingNanny.id, updates);
+            if (!sbRes.success) {
+              console.warn('[NannysConsole] Supabase update failed:', sbRes.error);
+              toast.warning(`保姆資料已更新但雲端同步失敗：${sbRes.error}`);
+            }
+            toast.warning(`電話 ${phone} 已被使用, 已將此筆保姆資料併入現有帳號`);
+            setFormModal((p) => ({ ...p, open: false }));
+            window.dispatchEvent(new CustomEvent('cbl-users-refresh'));
+            window.dispatchEvent(new CustomEvent('cbl-nannies-refresh'));
+            return;
+          }
+
           const newNannyId = STORAGE.genId('nanny');
           const newNanny = {
             id: newNannyId,

@@ -24,6 +24,17 @@ export const fadeUpItem: Variants = {
   exit: { opacity: 0, y: -6, transition: { duration: 0.15 } },
 };
 
+// Each list item — pure fade (no movement, no layout shift).
+// 用於打卡列: 狀態切換時只做 opacity, 不做 y/layout, 避免卡片變形。
+export const fadeItem: Variants = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: { duration: 0.2, ease: 'easeOut' },
+  },
+  exit: { opacity: 0, transition: { duration: 0.15, ease: 'easeIn' } },
+};
+
 // Directional slide for step wizard (used with custom=direction prop: 1=forward, -1=backward)
 export const stepSlide: Variants = {
   enter: (direction: number) => ({

@@ -2,16 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { motion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Check, X, Clock, AlertCircle, MapPin, ChevronLeft, ChevronRight,
-  StickyNote, Phone, Undo2, Users, Flag, CircleDot,
+  Check, X, Clock, MapPin, ChevronLeft, ChevronRight,
+  Phone, Pencil, Undo2, Users, Flag, CircleDot, ClipboardCheck,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
 import {
-  Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerDescription, DrawerFooter,
-} from '@/components/ui/drawer';
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+} from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { MotionList } from '@/components/trips/motion-list';
 import { STORAGE } from '@/lib/storage';
@@ -20,7 +19,7 @@ import { getResumeWaypointIndex } from '@/lib/nanny-trips';
 import {
   cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel,
 } from '@/lib/utils';
-import { DUR, EASE_OUT_QUART } from '@/lib/motion';
+import { DUR, EASE_OUT_QUART, fadeItem } from '@/lib/motion';
 import type {
   Trip, Waypoint, Attendance, BoardingStatus, DropoffStatus,
 } from '@/lib/types';
@@ -34,9 +33,9 @@ export default function CheckinPage() {
   const [trip, setTrip] = useState<Trip | null>(null);
   const [currentWaypointIdx, setCurrentWaypointIdx] = useState(0);
   const [attendances, setAttendances] = useState<Attendance[]>([]);
-  const [noteDialog, setNoteDialog] = useState<string | null>(null);
-  const [noteText, setNoteText] = useState('');
+  const [editDialogSid, setEditDialogSid] = useState<string | null>(null);
   const [finishConfirm, setFinishConfirm] = useState(false);
+  const [markAllConfirm, setMarkAllConfirm] = useState(false);
 
   useEffect(() => {
     if (!params.id) return;
@@ -189,7 +188,7 @@ export default function CheckinPage() {
     refreshAttendances(trip.id);
   };
 
-  // 全部標記為上車 (快捷)
+  // 全部標記為上車 (快捷) — 先彈確認, 確定才執行
   const markAllBoarded = () => {
     if (!trip || !currentWaypoint) return;
     currentWaypoint.studentIds.forEach(sid => {
@@ -203,6 +202,7 @@ export default function CheckinPage() {
         setStudentStatus(sid, 'on_time');
       }
     });
+    setMarkAllConfirm(false);
   };
 
   // 完成當前站點 (非尾站直接完成並跳轉; 尾站先彈中置確認)
@@ -248,6 +248,15 @@ export default function CheckinPage() {
     }
   };
 
+  const isWaypointDone = (idx: number) => {
+    if (!trip) return false;
+    const wp = trip.waypoints[idx];
+    if (!wp) return false;
+    if (wp.status === 'completed') return true;
+    if ((trip.completedStops ?? []).includes(wp.id)) return true;
+    return false;
+  };
+
   const goPrevWaypoint = () => {
     if (currentWaypointIdx > 0) {
       setCurrentWaypointIdx(currentWaypointIdx - 1);
@@ -255,8 +264,28 @@ export default function CheckinPage() {
   };
 
   const goNextWaypoint = () => {
-    if (trip && currentWaypointIdx < trip.waypoints.length - 1) {
-      setCurrentWaypointIdx(currentWaypointIdx + 1);
+    if (!trip || currentWaypointIdx >= trip.waypoints.length - 1) return;
+    // 未完成班次時, 必須先按「完成上車/下車」才可去下一步;
+    // 班次完成後可自由查看
+    if (trip.status !== 'completed' && !isWaypointDone(currentWaypointIdx)) return;
+    setCurrentWaypointIdx(currentWaypointIdx + 1);
+  };
+
+  // 站點進度條跳轉 — 同樣受「完成才可下一步」限制
+  const gotoWaypoint = (idx: number) => {
+    if (!trip) return;
+    if (idx === currentWaypointIdx) return;
+    if (trip.status === 'completed') {
+      setCurrentWaypointIdx(idx);
+      return;
+    }
+    // 往回看永遠可以; 往前只可去緊貼的下一站, 且當前站必須已完成
+    if (idx < currentWaypointIdx) {
+      setCurrentWaypointIdx(idx);
+      return;
+    }
+    if (idx === currentWaypointIdx + 1 && isWaypointDone(currentWaypointIdx)) {
+      setCurrentWaypointIdx(idx);
     }
   };
 
@@ -286,6 +315,10 @@ export default function CheckinPage() {
   }
 
   const isLast = currentWaypointIdx === trip.waypoints.length - 1;
+  const tripDone = trip.status === 'completed';
+  const currentDone = isWaypointDone(currentWaypointIdx);
+  // 未完成班次: 必須按「完成上車/下車」先可去下一步; 班次完成後自由查看
+  const canGoNext = !isLast && (tripDone || currentDone);
   const typePill = currentWaypoint.type === 'pickup'
     ? 'bg-amber-100 text-amber-700'
     : 'bg-blue-100 text-blue-700';
@@ -362,24 +395,29 @@ export default function CheckinPage() {
             <ChevronLeft className="w-4 h-4" />
           </button>
           <div className="flex-1 flex gap-1">
-            {trip.waypoints.map((wp, i) => (
-              <button
-                key={wp.id}
-                type="button"
-                onClick={() => setCurrentWaypointIdx(i)}
-                aria-label={`前往站點 ${i + 1}`}
-                className={cn(
-                  'h-1.5 flex-1 rounded-full transition-colors',
-                  i < currentWaypointIdx ? 'bg-success' :
-                  i === currentWaypointIdx ? 'bg-primary' : 'bg-muted'
-                )}
-              />
-            ))}
+            {trip.waypoints.map((wp, i) => {
+              const reachable = tripDone || i <= currentWaypointIdx || (i === currentWaypointIdx + 1 && currentDone);
+              return (
+                <button
+                  key={wp.id}
+                  type="button"
+                  onClick={() => gotoWaypoint(i)}
+                  disabled={!reachable}
+                  aria-label={`前往站點 ${i + 1}`}
+                  className={cn(
+                    'h-1.5 flex-1 rounded-full transition-colors',
+                    i < currentWaypointIdx ? 'bg-success' :
+                    i === currentWaypointIdx ? 'bg-primary' : 'bg-muted',
+                    !reachable && 'opacity-40'
+                  )}
+                />
+              );
+            })}
           </div>
           <button
             type="button"
             onClick={goNextWaypoint}
-            disabled={isLast}
+            disabled={!canGoNext}
             aria-label="下一站"
             className="h-9 w-9 rounded-full bg-muted/60 flex items-center justify-center active:scale-95 transition-transform disabled:opacity-40"
           >
@@ -388,23 +426,37 @@ export default function CheckinPage() {
         </div>
       </motion.div>
 
-      {/* 快速操作 */}
+      {/* 快速操作 — 先彈確認, 確定才執行 */}
       {mode === 'boarding' && stats.pending > 0 && (
         <Button
-          onClick={markAllBoarded}
-          variant="outline"
-          className="w-full mb-2 h-11 rounded-full text-sm active:scale-[0.98]"
+          onClick={() => setMarkAllConfirm(true)}
+          className="w-full mb-2 h-11 rounded-full text-sm font-medium bg-primary text-primary-foreground active:scale-[0.98]"
         >
           <Check className="w-4 h-4" />
           全部標記為已上車 ({stats.pending} 位)
         </Button>
       )}
 
-      {/* 學生列表 — MotionList stagger, 與班次列表同一進場 */}
+      {/* 點名學生 title */}
+      <div className="flex items-center gap-1.5 px-1 mt-1 mb-2">
+        <ClipboardCheck className="w-3.5 h-3.5 text-muted-foreground" />
+        <h2 className="text-xs font-semibold text-muted-foreground">
+          點名學生 · {stats.boarded + stats.absent}/{stats.total} 已處理
+        </h2>
+        {stats.pending > 0 && (
+          <span className="text-[10px] text-muted-foreground tabular-nums">
+            (尚餘 {stats.pending} 位)
+          </span>
+        )}
+      </div>
+
+      {/* 學生列表 — 純 fade, 無位移 / 無 layout, 狀態切換不變形 */}
       <MotionList
         items={currentWaypoint.studentIds}
         getKey={(sid) => `${currentWaypoint.id}-${sid}`}
         className="space-y-2"
+        layout={false}
+        itemVariants={fadeItem}
         renderItem={(sid) => {
           const student = STORAGE.students.getById(sid);
           if (!student) return null;
@@ -430,17 +482,58 @@ export default function CheckinPage() {
               status={status}
               time={time}
               mode={mode}
-              notes={att?.notes || null}
-              onBoarded={() => setStudentStatus(sid, 'on_time')}
-              onNoShow={() => setStudentStatus(sid, 'no_show')}
-              onLate={() => setStudentStatus(sid, 'late')}
+              onEdit={() => setEditDialogSid(sid)}
               onUndo={() => clearStudentStatus(sid)}
-              onAddNote={() => {
-                setNoteDialog(sid);
-                setNoteText(att?.notes || '');
-              }}
             />
           );
+        }}
+      />
+
+      {/* 狀態編輯 — 點卡片右上角鉛筆掣以 popup 打開 */}
+      <StudentStatusDialog
+        open={editDialogSid !== null}
+        onOpenChange={(open) => { if (!open) setEditDialogSid(null); }}
+        studentName={editDialogSid ? STORAGE.students.getById(editDialogSid)?.name ?? '' : ''}
+        studentMeta={
+          editDialogSid
+            ? (() => {
+                const s = STORAGE.students.getById(editDialogSid);
+                return s ? `${s.classNumber} · ${s.studentId}` : '';
+              })()
+            : ''
+        }
+        mode={mode}
+        status={
+          editDialogSid
+            ? (() => {
+                const att = attendances.find(
+                  a => a.tripId === trip.id && a.studentId === editDialogSid && a.waypointId === currentWaypoint.id
+                );
+                return (mode === 'boarding' ? att?.boardingStatus : att?.dropoffStatus) ?? null;
+              })()
+            : null
+        }
+        handled={
+          editDialogSid
+            ? (() => {
+                const att = attendances.find(
+                  a => a.tripId === trip.id && a.studentId === editDialogSid && a.waypointId === currentWaypoint.id
+                );
+                const s = mode === 'boarding' ? att?.boardingStatus : att?.dropoffStatus;
+                const d = mode === 'boarding' ? !!att?.boardingTime : !!att?.dropoffTime;
+                return !!att && (d || s === 'no_show' || s === 'absent');
+              })()
+            : false
+        }
+        onSelect={(s) => {
+          if (!editDialogSid) return;
+          setStudentStatus(editDialogSid, s);
+          setEditDialogSid(null);
+        }}
+        onUndo={() => {
+          if (!editDialogSid) return;
+          clearStudentStatus(editDialogSid);
+          setEditDialogSid(null);
         }}
       />
 
@@ -469,7 +562,7 @@ export default function CheckinPage() {
             <Button
               onClick={goNextWaypoint}
               variant="ghost"
-              disabled={isLast}
+              disabled={!canGoNext}
               aria-label="下一站"
               className="h-12 w-12 rounded-xl active:scale-95"
             >
@@ -478,6 +571,16 @@ export default function CheckinPage() {
           </div>
         </div>
       </div>
+
+      {/* 全部標記 — 中置確認, 確定才執行 */}
+      <ConfirmDialog
+        open={markAllConfirm}
+        onOpenChange={setMarkAllConfirm}
+        title="全部標記為已上車?"
+        description={`將本站尚餘 ${stats.pending} 位學生一次過標記為已上車 (已標記缺席的不受影響)。確定要繼續?`}
+        confirmLabel={`確定 (${stats.pending} 位)`}
+        onConfirm={markAllBoarded}
+      />
 
       {/* 尾站完成 — 中置確認 (取代原生 confirm) */}
       <ConfirmDialog
@@ -490,75 +593,14 @@ export default function CheckinPage() {
         onConfirm={confirmFinishTrip}
       />
 
-      {/* 備註 — 用現有 Drawer (手機規範), 取代手寫 bottom-sheet */}
-      <Drawer open={noteDialog !== null} onOpenChange={(open) => { if (!open) setNoteDialog(null); }}>
-        <DrawerContent>
-          <DrawerHeader>
-            <DrawerTitle>添加備註</DrawerTitle>
-            <DrawerDescription>例: 學生請假 / 交通意外改道 / 其他...</DrawerDescription>
-          </DrawerHeader>
-          <div className="px-5">
-            <Textarea
-              value={noteText}
-              onChange={(e) => setNoteText(e.target.value)}
-              placeholder="輸入備註..."
-              className="min-h-[100px]"
-            />
-          </div>
-          <DrawerFooter>
-            <Button
-              variant="outline"
-              onClick={() => setNoteDialog(null)}
-              className="flex-1 h-11 rounded-xl active:scale-95"
-            >
-              取消
-            </Button>
-            <Button
-              onClick={() => {
-                if (!trip || !currentWaypoint || !noteDialog) return;
-                const existing = attendances.find(
-                  a => a.tripId === trip.id && a.studentId === noteDialog && a.waypointId === currentWaypoint.id
-                );
-                const updated: Attendance = existing || {
-                  id: STORAGE.genId('att'),
-                  tripId: trip.id,
-                  studentId: noteDialog,
-                  waypointId: currentWaypoint.id,
-                  boardingTime: null,
-                  boardingStatus: 'on_time',
-                  boardingPhoto: null,
-                  boardedBy: user?.id || '',
-                  dropoffTime: null,
-                  dropoffStatus: null,
-                  dropoffPhoto: null,
-                  dropoffBy: null,
-                  notes: null,
-                  isConfirmed: false,
-                  createdAt: new Date().toISOString(),
-                  updatedAt: new Date().toISOString(),
-                };
-                STORAGE.attendances.upsert({
-                  ...updated,
-                  notes: noteText || null,
-                });
-                refreshAttendances(trip.id);
-                setNoteDialog(null);
-              }}
-              className="flex-1 h-11 rounded-xl active:scale-95"
-            >
-              保存
-            </Button>
-          </DrawerFooter>
-        </DrawerContent>
-      </Drawer>
     </div>
   );
 }
 
 function StudentCheckinRow({
   studentName, classNumber, studentId, parentPhone,
-  done, handled, status, time, mode, notes,
-  onBoarded, onNoShow, onLate, onUndo, onAddNote,
+  done, handled, status, time, mode,
+  onEdit, onUndo,
 }: {
   studentName: string;
   classNumber: string;
@@ -569,12 +611,8 @@ function StudentCheckinRow({
   status: BoardingStatus | DropoffStatus | null | undefined;
   time: string | null | undefined;
   mode: CheckinMode;
-  notes: string | null;
-  onBoarded: () => void;
-  onNoShow: () => void;
-  onLate: () => void;
+  onEdit: () => void;
   onUndo: () => void;
-  onAddNote: () => void;
 }) {
   // statusLabel / 視覺樣式依結果分流:
   // - done=true  → 綠底綠勾 (準時/遲到的正常上落車)
@@ -585,93 +623,94 @@ function StudentCheckinRow({
     : done ? (mode === 'boarding' ? '已上車' : '已下車')
     : null;
 
-  const actionLabel = mode === 'boarding' ? '已上車' : '已下車';
-  const absentLabel = mode === 'boarding' ? '缺席' : '未下車';
-
   return (
     <div
       className={cn(
-        'w-full text-left rounded-2xl p-3 bg-card border border-border/50 shadow-sm transition-colors',
+        'w-full text-left rounded-2xl p-3 bg-card border border-border/50 shadow-sm transition-colors duration-200',
         done && 'border-success/40 bg-success/[0.04]',
         !done && handled && 'border-destructive/40 bg-destructive/[0.04]',
       )}
     >
       <div className="flex items-center gap-3">
         <div className={cn(
-          'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold flex-shrink-0',
+          'w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold flex-shrink-0 transition-colors duration-200',
           done ? 'bg-success text-success-foreground'
             : handled ? 'bg-destructive text-destructive-foreground'
             : 'bg-primary/10 text-primary'
         )}>
-          {done ? <Check className="w-4 h-4" strokeWidth={3} />
-            : handled ? <X className="w-4 h-4" strokeWidth={3} />
-            : studentName.slice(0, 1)}
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.span
+              key={done ? 'done' : handled ? 'handled' : 'pending'}
+              initial={{ opacity: 0, scale: 0.7 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.7 }}
+              transition={{ duration: 0.18, ease: 'easeOut' }}
+              className="flex items-center justify-center"
+            >
+              {done ? <Check className="w-4 h-4" strokeWidth={3} />
+                : handled ? <X className="w-4 h-4" strokeWidth={3} />
+                : studentName.slice(0, 1)}
+            </motion.span>
+          </AnimatePresence>
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 min-w-0">
             <p className="text-sm font-semibold truncate">{studentName}</p>
-            {done && time && (
-              <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
-                {fmtTime(time)}
-              </span>
-            )}
-            {handled && !done && statusLabel && (
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive flex-shrink-0">
-                {statusLabel}
-              </span>
-            )}
-            {done && status === 'late' && (
-              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-warning/15 text-warning flex-shrink-0">
-                遲到
-              </span>
-            )}
+            <AnimatePresence mode="wait" initial={false}>
+              <motion.span
+                key={done ? `done-${status}` : handled ? `handled-${status}` : 'pending'}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.18, ease: 'easeOut' }}
+                className="flex items-center gap-1.5 min-w-0 flex-shrink-0"
+              >
+                {done && time && (
+                  <span className="text-[10px] text-muted-foreground tabular-nums flex-shrink-0">
+                    {fmtTime(time)}
+                  </span>
+                )}
+                {handled && !done && statusLabel && (
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-destructive/10 text-destructive flex-shrink-0">
+                    {statusLabel}
+                  </span>
+                )}
+                {done && status === 'late' && (
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-warning/15 text-warning flex-shrink-0">
+                    遲到
+                  </span>
+                )}
+                {!handled && (
+                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-muted text-muted-foreground flex-shrink-0">
+                    未點名
+                  </span>
+                )}
+              </motion.span>
+            </AnimatePresence>
           </div>
           <p className="text-xs text-muted-foreground truncate">{classNumber} · {studentId}</p>
         </div>
-        {parentPhone && (
-          <a
-            href={`tel:${parentPhone}`}
-            onClick={(e) => e.stopPropagation()}
-            aria-label={`致電家長 ${studentName}`}
-            className="p-2 rounded-full bg-success/10 text-success active:scale-95 transition-transform flex-shrink-0"
-          >
-            <Phone className="w-3.5 h-3.5" />
-          </a>
-        )}
-      </div>
-
-      {!handled && (
-        <div className={cn('grid gap-1.5 mt-2.5', mode === 'boarding' ? 'grid-cols-3' : 'grid-cols-2')}>
-          <Button
-            onClick={onBoarded}
-            size="sm"
-            className="h-11 rounded-xl bg-success text-success-foreground text-[13px] active:scale-95"
-          >
-            <Check className="w-4 h-4" strokeWidth={3} />
-            {actionLabel}
-          </Button>
-          {mode === 'boarding' && (
-            <Button
-              onClick={onLate}
-              size="sm"
-              variant="outline"
-              className="h-11 rounded-xl text-warning border-warning/40 text-[13px] active:scale-95"
+        <div className="flex items-center gap-1 flex-shrink-0">
+          {parentPhone && (
+            <a
+              href={`tel:${parentPhone}`}
+              onClick={(e) => e.stopPropagation()}
+              aria-label={`致電家長 ${studentName}`}
+              className="p-2 rounded-full bg-success/10 text-success active:scale-95 transition-transform"
             >
-              <Clock className="w-4 h-4" />
-              遲到
-            </Button>
+              <Phone className="w-3.5 h-3.5" />
+            </a>
           )}
-          <Button
-            onClick={onNoShow}
-            size="sm"
-            variant="outline"
-            className="h-11 rounded-xl text-destructive border-destructive/40 text-[13px] active:scale-95"
+          <button
+            type="button"
+            onClick={onEdit}
+            aria-label={`編輯 ${studentName} 的點名狀態`}
+            className="p-2 rounded-full bg-muted text-muted-foreground active:scale-95 transition-transform"
           >
-            <X className="w-4 h-4" />
-            {absentLabel}
-          </Button>
+            <Pencil className="w-3.5 h-3.5" />
+          </button>
         </div>
-      )}
+      </div>
 
       {handled && (
         <button
@@ -683,21 +722,88 @@ function StudentCheckinRow({
           {statusLabel} · 點一下復原
         </button>
       )}
-
-      {notes && (
-        <div className="mt-2 text-xs text-warning bg-warning/10 rounded-lg px-2 py-1.5 flex items-start gap-1">
-          <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-          <span>{notes}</span>
-        </div>
-      )}
-
-      <button
-        onClick={onAddNote}
-        className="text-[10px] text-muted-foreground mt-2 flex items-center gap-1 active:opacity-60"
-      >
-        <StickyNote className="w-3 h-3" />
-        {notes ? '編輯備註' : '添加備註'}
-      </button>
     </div>
+  );
+}
+
+function StudentStatusDialog({
+  open, onOpenChange, studentName, studentMeta, mode, status, handled, onSelect, onUndo,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  studentName: string;
+  studentMeta: string;
+  mode: CheckinMode;
+  status: BoardingStatus | DropoffStatus | null;
+  handled: boolean;
+  onSelect: (s: BoardingStatus | DropoffStatus) => void;
+  onUndo: () => void;
+}) {
+  const actionLabel = mode === 'boarding' ? '已上車' : '已下車';
+  const absentLabel = mode === 'boarding' ? '缺席' : '未下車';
+  const isSelected = (key: string) => {
+    if (key === 'boarded') return handled && status !== 'late' && status !== 'no_show' && status !== 'absent';
+    if (key === 'late') return status === 'late';
+    if (key === 'absent') return status === 'no_show' || status === 'absent';
+    return false;
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm p-5">
+        <DialogHeader>
+          <DialogTitle>{studentName || '點名'}</DialogTitle>
+          {studentMeta && <DialogDescription>{studentMeta}</DialogDescription>}
+        </DialogHeader>
+        <div className="flex flex-col gap-2 pt-1">
+          <Button
+            onClick={() => onSelect('on_time')}
+            className={cn(
+              'w-full h-12 rounded-xl text-[15px] font-semibold active:scale-[0.98]',
+              isSelected('boarded')
+                ? 'bg-success text-success-foreground'
+                : 'bg-success/10 text-success hover:bg-success/15'
+            )}
+          >
+            <Check className="w-5 h-5" strokeWidth={3} />
+            {actionLabel}
+          </Button>
+          {mode === 'boarding' && (
+            <Button
+              onClick={() => onSelect('late')}
+              variant="outline"
+              className={cn(
+                'w-full h-12 rounded-xl text-[15px] font-semibold border-warning/40 active:scale-[0.98]',
+                isSelected('late') ? 'bg-warning text-warning-foreground border-transparent' : 'text-warning'
+              )}
+            >
+              <Clock className="w-5 h-5" />
+              遲到
+            </Button>
+          )}
+          <Button
+            onClick={() => onSelect('no_show')}
+            variant="outline"
+            className={cn(
+              'w-full h-12 rounded-xl text-[15px] font-semibold border-destructive/40 active:scale-[0.98]',
+              isSelected('absent') ? 'bg-destructive text-destructive-foreground border-transparent' : 'text-destructive'
+            )}
+          >
+            <X className="w-5 h-5" />
+            {absentLabel}
+          </Button>
+          {handled && (
+            <Button
+              onClick={onUndo}
+              variant="ghost"
+              className="w-full h-10 rounded-xl text-xs text-muted-foreground"
+            >
+              <Undo2 className="w-3.5 h-3.5" />
+              清除本次點名 (復原)
+            </Button>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }

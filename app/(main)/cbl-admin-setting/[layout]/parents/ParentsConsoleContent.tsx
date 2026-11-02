@@ -606,8 +606,15 @@ export function ParentsConsoleContent({
           });
 
           // 建立 / 更新 parent
+          //
+          // ⚠️ 這裡原本是 `p.phone === phone && p.clientId === effectiveClientId`。
+          //    但「電話」同時也是登入帳號 (8 位手機號碼) → 必須全系統唯一。
+          //    用 phone + clientId 一起比對, 會讓「同電話、不同學校」的家長
+          //    被當成新的一筆 → 雲端 cbl_parents 出現兩筆同電話,
+          //    登入時 resolveLoginAccount 先查到舊那筆 → 顯示錯誤的名字。
+          //    → 只用 phone 比對 (跨學校), 確保一個登入帳號只對應一個 parent。
           const existingParent = STORAGE.parents.getAll().find(
-            (p) => p.phone === phone && p.clientId === effectiveClientId,
+            (p) => p.phone === phone,
           );
           let savedParentId: string;
           const parentUpdates = {
