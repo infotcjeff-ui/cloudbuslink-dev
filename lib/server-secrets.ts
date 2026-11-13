@@ -7,10 +7,13 @@
  *   直接看到明文。這裡改為 server-only 存放, 前端永遠拿不到明文。
  *
  * 存放 (讀取順序: DB → env → file):
- *   1. Supabase 表 cbl_server_secrets (正式持久化, Vercel 重啟 / 重部署不丟):
- *      service_role 直連讀寫 (繞過 RLS); 表上 RLS + restrictive block_anon,
- *      anon key 讀寫一律拒絕。System Admin 在 UI 改的寫這裡。
- *   2. 環境變數 (優先兜底): ONEFLEET_ACCOUNT / ONEFLEET_PASSWORD / ONEFLEET_API_KEY
+ *   1. Supabase 持久化 (正式, Vercel 重啟 / 重部署不丟), service_role 直連讀寫:
+ *      a) 專用表 cbl_server_secrets (若 migration 0025 已執行, 優先用它;
+ *         RLS + restrictive block_anon, anon 零權限);
+ *      b) 免建表 fallback: cbl_system_config 的獨立行 (id='server-secrets'),
+ *         內容是 AES-256-GCM 密文 (key 由 SUPABASE_SERVICE_ROLE_KEY 派生,
+ *         anon 就算讀到也解不開)。此行與 id='global' 的平台設定互不干擾。
+ *   2. 環境變數 (兜底): ONEFLEET_ACCOUNT / ONEFLEET_PASSWORD / ONEFLEET_API_KEY
  *      / ONEFLEET_ENDPOINT (Vercel 後台設定, 本機 .env.local)。
  *   3. 本機 server 檔案: data/system-secrets.json (gitignored, 永不進 repo,
  *      永不 import 到 client bundle)。只作本機開發兜底; Vercel 上 ephemeral,
@@ -20,6 +23,7 @@
  *       (刪除請傳 null → 清空)。
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -32,6 +36,9 @@ export interface ServerSecrets {
 
 const TABLE = 'cbl_server_secrets';
 const ROW_ID = 'global';
+/** 免建表 fallback: 借用 cbl_system_config 的另一行 (id 不同, 與平台設定互不干擾) */
+const FALLBACK_TABLE = 'cbl_system_config';
+const FALLBACK_ROW_ID = 'server-secrets';
 const DEFAULT_ENDPOINT = 'https://console.onefleet.hk';
 
 /* -------------------------------------------------------------------------- */
@@ -99,23 +106,145 @@ function cleanRow(d: unknown): Partial<ServerSecrets> {
   };
 }
 
+/* -------------------------------------------------------------------------- */
+/*  db 加密 fallback (免建表: 借用 cbl_system_config 的獨立行存密文)           */
+/*                                                                            */
+/*  為什麼要加密: cbl_system_config 有 dev_allow_all (anon 可讀), 明文絕對    */
+/*  不能放這裡。內容是 AES-256-GCM 密文, key 由 SUPABASE_SERVICE_ROLE_KEY     */
+/*  經 sha256 派生 —— anon 就算讀到該行也解不開; service_role 經後端解密。   */
+/*  行 id='server-secrets', 與 id='global' 平台設定互不干擾。                 */
+/* -------------------------------------------------------------------------- */
+
+function encKey(): Buffer | null {
+  const raw = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (!raw) return null;
+  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+}
+
+/** { iv, tag, data } base64 拼成單一字串存 jsonb */
+function encryptSecrets(next: ServerSecrets): string | null {
+  try {
+    const key = encKey();
+    if (!key) return null;
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const enc = Buffer.concat([cipher.update(JSON.stringify(next), 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `gcm1.${iv.toString('base64')}.${tag.toString('base64')}.${enc.toString('base64')}`;
+  } catch {
+    return null;
+  }
+}
+
+function decryptSecrets(payload: unknown): Partial<ServerSecrets> | null {
+  try {
+    if (typeof payload !== 'string' || !payload.startsWith('gcm1.')) return null;
+    const key = encKey();
+    if (!key) return null;
+    const [, ivB64, tagB64, dataB64] = payload.split('.');
+    if (!ivB64 || !tagB64 || !dataB64) return null;
+    const decipher = crypto.createDecipheriv(
+      'aes-256-gcm',
+      key,
+      Buffer.from(ivB64, 'base64'),
+    );
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    const dec = Buffer.concat([
+      decipher.update(Buffer.from(dataB64, 'base64')),
+      decipher.final(),
+    ]).toString('utf8');
+    return cleanRow(JSON.parse(dec) as Partial<ServerSecrets>);
+  } catch {
+    return null;
+  }
+}
+
+/** 讀 fallback 行密文 → 解密。表/行唔存在 → 回 null (不 throw)。 */
+async function readFallbackSecrets(
+  admin: import('@supabase/supabase-js').SupabaseClient,
+): Promise<Partial<ServerSecrets> | null> {
+  try {
+    const { data, error } = await admin
+      .from(FALLBACK_TABLE)
+      .select('data')
+      .eq('id', FALLBACK_ROW_ID)
+      .maybeSingle();
+    if (error || !data) return null;
+    const d = (data as { data?: unknown }).data as
+      | { enc?: unknown }
+      | Partial<ServerSecrets>
+      | null;
+    if (!d || typeof d !== 'object') return null;
+    // 新格式: { enc: 'gcm1.…', updatedAt } ; 舊格式(若有人手動寫過明文)直接清掉不用
+    if (typeof (d as { enc?: unknown }).enc === 'string') {
+      return decryptSecrets((d as { enc: string }).enc);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 寫 fallback 行密文。回 false = 寫唔到 (不 throw)。 */
+async function writeFallbackSecrets(
+  admin: import('@supabase/supabase-js').SupabaseClient,
+  next: ServerSecrets,
+): Promise<boolean> {
+  try {
+    const enc = encryptSecrets(next);
+    if (!enc) return false;
+    const { error } = await admin.from(FALLBACK_TABLE).upsert(
+      {
+        id: FALLBACK_ROW_ID,
+        data: { enc, updatedAt: new Date().toISOString() },
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: 'id' },
+    );
+    if (error) {
+      console.warn('[server-secrets] fallback 寫入失敗:', error.message);
+      return false;
+    }
+    return true;
+  } catch (e) {
+    console.warn('[server-secrets] fallback 寫入異常:', e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+/** PGRST 表唔存在嘅錯誤碼/訊息 (migration 0025 未執行) */
+function isMissingTable(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const msg = err.message || '';
+  return /does not exist|Could not find the table|schema cache/i.test(msg);
+}
+
 /**
- * 讀 DB 列。回 null = 讀唔到 (未設 service_role / 表未建 / 離線) →
- * 呼叫端降級用 env + file, 不 throw。
+ * 讀 DB。順序: 專用表 cbl_server_secrets → 加密 fallback 行。
+ * 回 null = 讀唔到 (未設 service_role / 離線) → 呼叫端降級用 env + file, 不 throw。
  */
 async function readDbSecrets(): Promise<Partial<ServerSecrets> | null> {
   try {
     const admin = await getAdminClient();
     if (!admin) return null;
     const { data, error } = await admin.from(TABLE).select('data').eq('id', ROW_ID).maybeSingle();
-    if (error || !data) return null;
-    return cleanRow((data as { data?: unknown }).data);
+    if (!error && data) return cleanRow((data as { data?: unknown }).data);
+    if (error && !isMissingTable(error)) {
+      console.warn('[server-secrets] 專用表讀取失敗:', error.message);
+      return null;
+    }
+    // 專用表未建 (migration 未執行) 或行為空 → 用免建表 fallback
+    return readFallbackSecrets(admin);
   } catch {
     return null;
   }
 }
 
-/** 寫 DB。回 false = 寫唔到 (log 警告, 呼叫端照樣回成功 + file 兜底, 不 throw)。 */
+/**
+ * 寫 DB。順序: 專用表 cbl_server_secrets → 加密 fallback 行 (兩者都試埋,
+ * 等日後 migration 執行後自動升級到專用表)。回 boolean, 不 throw。
+ */
 async function writeDbSecrets(next: ServerSecrets): Promise<boolean> {
   try {
     const admin = await getAdminClient();
@@ -123,14 +252,18 @@ async function writeDbSecrets(next: ServerSecrets): Promise<boolean> {
       console.warn('[server-secrets] 未設 SUPABASE_SERVICE_ROLE_KEY, 密鑰只寫本機檔案 (Vercel 上重啟會丟)');
       return false;
     }
+    let primaryOk = false;
     const { error } = await admin
       .from(TABLE)
       .upsert({ id: ROW_ID, data: next, updated_at: new Date().toISOString() }, { onConflict: 'id' });
-    if (error) {
-      console.warn('[server-secrets] DB 寫入失敗:', error.message);
-      return false;
+    if (!error) {
+      primaryOk = true;
+    } else if (!isMissingTable(error)) {
+      console.warn('[server-secrets] 專用表寫入失敗:', error.message);
     }
-    return true;
+    // fallback 行永遠同步寫 (免建表方案即時生效; 專用表建好後兩邊一致)
+    const fallbackOk = await writeFallbackSecrets(admin, next);
+    return primaryOk || fallbackOk;
   } catch (e) {
     console.warn('[server-secrets] DB 寫入異常:', e instanceof Error ? e.message : String(e));
     return false;
