@@ -22,20 +22,12 @@ export interface PdfOptions {
 
 /**
  * 產生並下載學生摘要 PDF。
- *
- * @returns 產生的 PDF blob (供呼叫端預覽 / 檢查)
  */
 export async function downloadSummaryPdf(
   rows: StudentSummaryRow[],
   options: PdfOptions,
 ): Promise<void> {
-  // dynamic import → 只在真的要下載 PDF 時才載入 jspdf (避免拖慢頁面載入)
-  const [{ jsPDF: JsPDF }, { default: autoTableFn }] = await Promise.all([
-    import('jspdf'),
-    import('jspdf-autotable'),
-  ]);
-
-  const doc = new JsPDF({
+  const doc = new jsPDF({
     orientation: 'landscape',
     unit: 'pt',
     format: 'a4',
@@ -55,7 +47,7 @@ export async function downloadSummaryPdf(
   }
 
   // 表格
-  autoTableFn(doc, {
+  autoTable(doc, {
     startY: options.subtitle ? 50 : 38,
     head: [Array.from(SUMMARY_HEADERS)],
     body: rows.map((r) => rowToCells(r).map((c) => (c === null ? '' : String(c)))),
