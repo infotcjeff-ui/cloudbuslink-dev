@@ -33,7 +33,6 @@ import {
   CheckCircle2,
   Archive,
   Phone,
-  Copy,
   Hash,
   Bus as BusIcon,
   Calendar,
@@ -42,7 +41,11 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
+import { generatePersonKey } from '@/lib/academic-year';
+import { filterByAcademicYear } from '@/lib/academic-year';
+import { useAcademicYear } from '../../AcademicYearProvider';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import { useAuthClientId } from '@/lib/use-client-id';
 import { markPendingPatch } from '@/lib/storage';
 import { Pill, Dot } from './primitives';
@@ -67,6 +70,7 @@ import {
   PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
 } from './design-tokens';
+import { isSystemSchool } from '@/lib/schools';
 
 /* -------------------------------------------------------------------------- */
 /*  Constants — tab / tone mapping                                              */
@@ -246,6 +250,8 @@ export function StudentsConsoleContent({
   initiallyLoading = false,
 }: StudentsConsoleContentProps) {
   const toast = useToast();
+  // 學年範圍 (學年化後, 學生清單依學年隔離; 唯讀時停用編輯)
+  const { selectedYear, isReadOnly: yearReadOnly, readOnlyMessage } = useAcademicYear();
   const [tab, setTab] = React.useState<StudentTab>('active');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
@@ -289,7 +295,11 @@ export function StudentsConsoleContent({
   /* -------- Filter -------- */
   const filtered = React.useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    return students.filter((s) => {
+    // ⚠️ 學年篩選在最前面 ——
+    //    學年化之後, 學生清單只顯示「目前檢視的學年」的那些。
+    //    舊資料 (沒有 academicYear) 會被保留 (見 filterByAcademicYear 的說明)。
+    const byYear = filterByAcademicYear(students, selectedYear);
+    return byYear.filter((s) => {
       if (tab === 'active' && s.status !== 'active') return false;
       if (tab === 'graduated' && s.status === 'active') return false;
       if (tab === 'unassigned' && s.busId) return false;
@@ -297,10 +307,12 @@ export function StudentsConsoleContent({
       return (
         s.name.toLowerCase().includes(q) ||
         s.studentId.toLowerCase().includes(q) ||
-        s.classNumber.toLowerCase().includes(q)
+        s.classNumber.toLowerCase().includes(q) ||
+        (s.schoolName ?? '').toLowerCase().includes(q) ||
+        (s.schoolDistrict ?? '').toLowerCase().includes(q)
       );
     });
-  }, [students, tab, debouncedSearch]);
+  }, [students, tab, debouncedSearch, selectedYear]);
 
   /* -------- Stats (KPIs) -------- */
   const total = students.length;
@@ -366,6 +378,12 @@ export function StudentsConsoleContent({
   }, [authClientId, academicYear]);
 
   const openAdd = React.useCallback(() => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6): 擋在 handler 最前面,
+    //    這樣就算 UI 的按鈕被繞過 (例如鍵盤觸發), 也不會開啟表單。
+    if (yearReadOnly) {
+      toast.warning(readOnlyMessage.hint);
+      return;
+    }
     setFormModal({
       open: true,
       mode: 'add',
@@ -373,9 +391,13 @@ export function StudentsConsoleContent({
       editingId: undefined,
       editingStudentId: undefined,
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const openEdit = React.useCallback((s: Student) => {
+    if (yearReadOnly) {
+      toast.warning(readOnlyMessage.hint);
+      return;
+    }
     setFormModal({
       open: true,
       mode: 'edit',
@@ -385,6 +407,9 @@ export function StudentsConsoleContent({
         phone: s.phone ?? '',
         gender: s.gender ?? 'male',
         dateOfBirth: s.dateOfBirth ?? '',
+        schoolType: s.schoolType ?? '',
+        schoolDistrict: s.schoolDistrict ?? '',
+        schoolName: s.schoolName ?? '',
         emergencyContactName: s.emergencyContactName ?? '',
         emergencyContactPhone: s.emergencyContactPhone ?? '',
         emergencyContactRelationship: s.emergencyContactRelationship ?? '',
@@ -395,29 +420,42 @@ export function StudentsConsoleContent({
       editingId: s.id,
       editingStudentId: s.studentId,
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const handleSave = React.useCallback(
     async (state: StudentFormState) => {
+      // ⚠️ 封存學年 → 唯讀: 就算表單被開著 (例如切換學年時表單還開著),
+      //    儲存時也要擋下來。
+      if (yearReadOnly) {
+        toast.warning(readOnlyMessage.hint);
+        return;
+      }
       setIsSaving(true);
       try {
         let savedName = '';
         if (formModal.mode === 'add') {
-          const { STORAGE } = await import('@/lib/storage');
-          const settings = STORAGE.settings.getByClient('');
-          const ay = settings.academicYear || academicYear;
+          const { STORAGE, resolveWriteAcademicYear } = await import('@/lib/storage');
+          // 學年蓋章: 優先用表單上選的學年, 否則用該 client 的現行學年
+          const ay = resolveWriteAcademicYear(authClientId, academicYear);
           const studentId = STORAGE.students.generateStudentId(authClientId, ay);
           const newId = STORAGE.genId('student');
           const newStudent = {
             id: newId,
             clientId: authClientId,
             studentId,
+            // 學年蓋章: 優先用表單上選的學年, 否則用該 client 的現行學年
+            academicYear: ay,
+            // 跨學年識別碼 — 下一學年複製這筆學生時會沿用同一值
+            personKey: generatePersonKey(authClientId),
             name: state.name.trim(),
             classNumber: state.classNumber.trim(),
             phone: state.phone.trim() || null,
             photo: null,
             gender: state.gender,
             dateOfBirth: state.dateOfBirth || null,
+            schoolType: (state.schoolType || null) as Student['schoolType'],
+            schoolDistrict: state.schoolDistrict.trim() || null,
+            schoolName: state.schoolName.trim() || null,
             emergencyContactName: state.emergencyContactName.trim() || null,
             emergencyContactPhone: state.emergencyContactPhone.trim() || null,
             emergencyContactRelationship:
@@ -448,6 +486,9 @@ export function StudentsConsoleContent({
             phone: state.phone.trim() || null,
             gender: state.gender,
             dateOfBirth: state.dateOfBirth || null,
+            schoolType: (state.schoolType || null) as Student['schoolType'],
+            schoolDistrict: state.schoolDistrict.trim() || null,
+            schoolName: state.schoolName.trim() || null,
             emergencyContactName: state.emergencyContactName.trim() || null,
             emergencyContactPhone: state.emergencyContactPhone.trim() || null,
             emergencyContactRelationship:
@@ -462,9 +503,16 @@ export function StudentsConsoleContent({
           // ⚠️ 家長↔子女的綁定必須記成「待推送」。
           //    這裡是「本機先寫、雲端後推」, 若 push 還在跑時有一次 sync 拉回
           //    雲端舊快照, 綁定會被洗掉 → 家長端立刻看不到子女。
+          //
+          //    學校的 type/district/name 同理記成待推送: 若 live DB 還沒套
+          //    migration 0015 (欄位不存在), push 會被欄位降級機制丟掉那三欄 →
+          //    等 migration 套好後, 這筆 pending 才會被重新推上去。
           markPendingPatch('students', formModal.editingId, {
             parentIds: updates.parentIds,
             primaryParentId: updates.primaryParentId,
+            schoolType: updates.schoolType,
+            schoolDistrict: updates.schoolDistrict,
+            schoolName: updates.schoolName,
           });
 
           // 推回雲端 (背景)
@@ -490,11 +538,17 @@ export function StudentsConsoleContent({
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId, authClientId, academicYear, toast],
+    [formModal.mode, formModal.editingId, authClientId, academicYear, toast, yearReadOnly],
   );
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return;
+    // ⚠️ 封存學年 → 唯讀: 不能刪除歷史資料
+    if (yearReadOnly) {
+      toast.warning(readOnlyMessage.hint);
+      setDeleteTarget(null);
+      return;
+    }
     setIsDeleting(true);
     try {
       const { STORAGE } = await import('@/lib/storage');
@@ -519,7 +573,7 @@ export function StudentsConsoleContent({
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget, toast]);
+  }, [deleteTarget, toast, yearReadOnly]);
 
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
@@ -530,12 +584,26 @@ export function StudentsConsoleContent({
         .map((id) => parents.find((p) => p.id === id)?.name)
         .filter(Boolean)
         .join('、');
+      // 自訂 (非 CHSC 系統名單) 的學校 → 加註「(自訂)」方便辨識
+      const isSystem = isSystemSchool(
+        s.schoolDistrict ?? '',
+        s.schoolType ?? '',
+        s.schoolName ?? '',
+      );
+      const schoolLabel = s.schoolName
+        ? isSystem
+          ? s.schoolName
+          : `${s.schoolName} (自訂)`
+        : '';
       return {
         '學號': s.studentId,
         '姓名': s.name,
         '班別': s.classNumber,
         '電話': s.phone ?? '',
         '狀態': s.status === 'active' ? '在學' : s.status === 'suspended' ? '停學' : '畢業',
+        '學校類型': s.schoolType === 'primary' ? '小學' : s.schoolType === 'secondary' ? '中學' : '',
+        '區域': s.schoolDistrict ?? '',
+        '學校': schoolLabel,
         '家長': ps,
         '綁定校巴': bus?.plateNumber ?? '未指派',
         '建立日期': formatSystemAdminDate(s.createdAt),
@@ -545,6 +613,7 @@ export function StudentsConsoleContent({
     // 設定欄寬
     ws['!cols'] = [
       { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 8 },
+      { wch: 10 }, { wch: 10 }, { wch: 24 },
       { wch: 18 }, { wch: 14 }, { wch: 12 },
     ];
     const wb = XLSX.utils.book_new();
@@ -652,6 +721,12 @@ export function StudentsConsoleContent({
             size="sm"
             startIcon={<UserPlus width={12} height={12} />}
             onClick={openAdd}
+            disabled={yearReadOnly}
+            title={
+              yearReadOnly
+                ? '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增'
+                : '新增學生'
+            }
           >
             新增學生
           </Button>
@@ -736,6 +811,7 @@ export function StudentsConsoleContent({
                 onView={(s) => setViewing(s)}
                 onEdit={openEdit}
                 onDelete={(s) => setDeleteTarget(s)}
+                readOnly={yearReadOnly}
               />
             )}
           </AnimatePresence>
@@ -895,6 +971,7 @@ function DataTable({
   onView,
   onEdit,
   onDelete,
+  readOnly = false,
 }: {
   rows: Student[];
   parents: Parent[];
@@ -902,6 +979,8 @@ function DataTable({
   onView: (s: Student) => void;
   onEdit: (s: Student) => void;
   onDelete: (s: Student) => void;
+  /** 封存學年 → 唯讀模式 (不能編輯/刪除) */
+  readOnly?: boolean;
 }) {
   const parentsById = React.useMemo(() => {
     const m = new Map<string, Parent>();
@@ -928,6 +1007,9 @@ function DataTable({
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             家長
+          </th>
+          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
+            學校
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             校巴
@@ -976,20 +1058,12 @@ function DataTable({
 
               {/* 學號 (copyable chip) */}
               <td className="px-3 py-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                      navigator.clipboard.writeText(s.studentId).catch(() => {});
-                    }
-                  }}
+                <CopyChip
+                  value={s.studentId}
                   title="複製學號"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                >
-                  <Hash width={9} height={9} />
-                  {s.studentId}
-                  <Copy width={9} height={9} />
-                </button>
+                  label="學號"
+                  icon={<Hash width={9} height={9} />}
+                />
               </td>
 
               {/* 家長 (pill stack — 主要聯繫人加 ★ 標記) */}
@@ -1025,6 +1099,58 @@ function DataTable({
                 )}
               </td>
 
+              {/* 學校 (就讀學校 + 區域) */}
+              <td className="px-3 py-2.5">
+                {s.schoolName ? (
+                  <div className="min-w-0">
+                    <p
+                      className={cn(
+                        'text-[11.5px] font-medium truncate max-w-[180px]',
+                        // 自訂 (非 CHSC 系統名單) 的學校 → 紫色字, 與系統值區分
+                        isSystemSchool(
+                          s.schoolDistrict ?? '',
+                          s.schoolType ?? '',
+                          s.schoolName,
+                        )
+                          ? 'text-slate-800 dark:text-slate-200'
+                          : 'text-violet-600 dark:text-violet-300',
+                      )}
+                      title={
+                        isSystemSchool(
+                          s.schoolDistrict ?? '',
+                          s.schoolType ?? '',
+                          s.schoolName,
+                        )
+                          ? s.schoolName
+                          : `${s.schoolName} (自訂)`
+                      }
+                    >
+                      {s.schoolName}
+                    </p>
+                    {s.schoolDistrict && (
+                      <p
+                        className={cn(
+                          'text-[10px]',
+                          isSystemSchool(
+                            s.schoolDistrict,
+                            s.schoolType ?? '',
+                            s.schoolName,
+                          )
+                            ? 'text-slate-500 dark:text-slate-400'
+                            : 'text-violet-500/80 dark:text-violet-400/80',
+                        )}
+                      >
+                        {s.schoolDistrict}
+                        {s.schoolType === 'primary' && ' · 小學'}
+                        {s.schoolType === 'secondary' && ' · 中學'}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-slate-400 dark:text-slate-500">—</span>
+                )}
+              </td>
+
               {/* 校巴 */}
               <td className="px-3 py-2.5">
                 {bus ? (
@@ -1054,13 +1180,19 @@ function DataTable({
                   <IconButton onClick={() => onView(s)} title="檢視詳情">
                     <Eye width={13} height={13} />
                   </IconButton>
-                  <IconButton onClick={() => onEdit(s)} title="編輯學生">
+                  {/* ⚠️ 封存學年 → 唯讀: 只能檢視, 不能編輯/刪除 (決策 D6) */}
+                  <IconButton
+                    onClick={() => onEdit(s)}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能編輯' : '編輯學生'}
+                    disabled={readOnly}
+                  >
                     <Pencil width={13} height={13} />
                   </IconButton>
                   <IconButton
                     onClick={() => onDelete(s)}
-                    title="刪除學生"
+                    title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能刪除' : '刪除學生'}
                     variant="danger"
+                    disabled={readOnly}
                   >
                     <Trash2 width={13} height={13} />
                   </IconButton>

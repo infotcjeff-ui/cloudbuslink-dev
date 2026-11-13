@@ -12,6 +12,12 @@ export interface StudentFormState {
   phone: string;
   gender: StudentGender;
   dateOfBirth: string;          // yyyy-mm-dd, '' 表示未填
+  /** 就讀學校類型 — 'primary' (小學) / 'secondary' (中學), '' 表示未填 */
+  schoolType: string;
+  /** 就讀學校所在區域 (18 區之一), '' 表示未填 */
+  schoolDistrict: string;
+  /** 就讀學校名稱, '' 表示未填 */
+  schoolName: string;
   emergencyContactName: string;
   emergencyContactPhone: string;
   /** 緊急聯絡人與學生關係 — ParentRelationship 或 '' 表示未指定 */
@@ -28,6 +34,9 @@ export const EMPTY_STUDENT_FORM: StudentFormState = {
   phone: '',
   gender: 'male',
   dateOfBirth: '',
+  schoolType: '',
+  schoolDistrict: '',
+  schoolName: '',
   emergencyContactName: '',
   emergencyContactPhone: '',
   emergencyContactRelationship: '',

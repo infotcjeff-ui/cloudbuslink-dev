@@ -10,7 +10,7 @@
  * 內容分三塊:
  *   1. 環境 / 連線狀態 (Supabase + env vars)
  *   2. 本地快取筆數 (各表)
- *   3. 整合狀態 (GPS 裝置配對 / Push / Email)
+ *   3. 整合狀態 → API 密鑰狀態 (GPS 裝置配對 / Push / Email)
  */
 
 import { STORAGE } from '@/lib/storage';
@@ -50,6 +50,12 @@ export type GpsStatus = {
   paired: number;
   provider: GpsProvider;
   providerSource: ConfigSource;
+  /** 808 GPS (OneFleet) 登入帳號 */
+  account: string;
+  accountSource: ConfigSource;
+  /** 808 GPS 登入密碼 (遮罩顯示, 只存本機) */
+  password: string;
+  passwordSource: ConfigSource;
   apiKey: string;
   apiKeySource: ConfigSource;
   endpoint: string;
@@ -117,6 +123,10 @@ export function readGpsStatus(): GpsStatus {
       paired: 0,
       provider: resolved.gps.provider,
       providerSource: resolved.gps.providerSource,
+      account: resolved.gps.account,
+      accountSource: resolved.gps.accountSource,
+      password: resolved.gps.password,
+      passwordSource: resolved.gps.passwordSource,
       apiKey: resolved.gps.apiKey,
       apiKeySource: resolved.gps.apiKeySource,
       endpoint: resolved.gps.endpoint,
@@ -129,6 +139,10 @@ export function readGpsStatus(): GpsStatus {
     paired: buses.filter((b) => !!b.gpsDeviceId).length,
     provider: resolved.gps.provider,
     providerSource: resolved.gps.providerSource,
+    account: resolved.gps.account,
+    accountSource: resolved.gps.accountSource,
+    password: resolved.gps.password,
+    passwordSource: resolved.gps.passwordSource,
     apiKey: resolved.gps.apiKey,
     apiKeySource: resolved.gps.apiKeySource,
     endpoint: resolved.gps.endpoint,

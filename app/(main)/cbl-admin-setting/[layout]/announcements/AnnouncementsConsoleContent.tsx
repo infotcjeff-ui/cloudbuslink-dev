@@ -36,6 +36,8 @@ import {
   EyeOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { filterByAcademicYear } from '@/lib/academic-year';
+import { useAcademicYear } from '../../AcademicYearProvider';
 import { useToast } from '@/components/ui/toast';
 import { Pill, Dot } from '../students/primitives';
 import {
@@ -50,10 +52,12 @@ import {
 import { AnnouncementFormModal } from './AnnouncementFormModal';
 import {
   EMPTY_ANNOUNCEMENT_FORM,
+  PAYMENT_CONTENT_PLACEHOLDER,
+  getPaymentDefaultDates,
   type AnnouncementFormState,
   type AnnouncementTab,
 } from './types';
-import type { Announcement } from '@/lib/types';
+import type { Announcement, Parent } from '@/lib/types';
 import {
   ANIMATION_EASE,
   PAGE_FADE_DURATION,
@@ -122,10 +126,13 @@ function ToggleSwitch({
   checked,
   onChange,
   title,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: () => void;
   title?: string;
+  /** 停用 (例: 封存學年 → 唯讀) */
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -133,12 +140,14 @@ function ToggleSwitch({
       role="switch"
       aria-checked={checked}
       title={title}
+      disabled={disabled}
       onClick={onChange}
       className={cn(
         'relative inline-flex h-[22px] w-[40px] shrink-0 cursor-pointer rounded-full transition-colors duration-200 ease-out focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
         checked
           ? 'bg-blue-600 dark:bg-blue-500'
           : 'bg-slate-200 dark:bg-slate-700',
+        disabled && 'opacity-40 cursor-not-allowed pointer-events-none',
       )}
     >
       <span className="sr-only">{title ?? (checked ? '停用' : '啟用')}</span>
@@ -161,16 +170,20 @@ function InlineToggle({
   checked,
   onToggle,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   onToggle: () => void;
   label?: string;
+  /** 停用 (例: 封存學年 → 唯讀) */
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-center gap-2">
       <ToggleSwitch
         checked={checked}
         onChange={onToggle}
+        disabled={disabled}
         title={label ?? (checked ? '點擊停用' : '點擊啟用')}
       />
       {checked ? (
@@ -276,27 +289,24 @@ function ConfirmDeleteModal({
 
 export interface AnnouncementsConsoleContentProps {
   announcements: Announcement[];
-  clientId: string;
+   clientId: string;
   /** Initial loading flag */
   initiallyLoading?: boolean;
   /**
-   * 目前使用者是否為 super_admin。
-   * super_admin 沒有自己的 clientId, 看得到所有機構的公告,
-   * 發佈時也必須指定「目標機構」 (cbl_announcements.client_id 有 FK 約束)。
+   * 家長清單 (繳費公告的指定受眾)。
    */
-  isSuperAdmin?: boolean;
-  /** 可發佈的機構清單 (super_admin 用來選目標機構) */
-  clients?: { id: string; name: string }[];
+  parents?: Parent[];
 }
 
 export function AnnouncementsConsoleContent({
   announcements,
   clientId,
   initiallyLoading = false,
-  isSuperAdmin = false,
-  clients = [],
+  parents = [],
 }: AnnouncementsConsoleContentProps) {
   const toast = useToast();
+  // 學年範圍 (公告是分學年的 entity; 封存學年 → 唯讀)
+  const { selectedYear, isReadOnly: yearReadOnly, readOnlyMessage } = useAcademicYear();
   const [tab, setTab] = React.useState<AnnouncementTab>('active');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
@@ -310,12 +320,20 @@ export function AnnouncementsConsoleContent({
     initial: AnnouncementFormState;
     editingId: string | undefined;
     sourceTemplateId: string | null;
+    /**
+     * 開啟時停在哪個步驟。
+     * - 新增 → 'type' (先選受眾類型)
+     * - 編輯 → 'data' (已有受眾)
+     * - 從範本建立 → 'data' (範本已帶受眾 + 內容)
+     */
+    startStep: 'type' | 'data';
   }>({
     open: false,
     mode: 'add',
     initial: EMPTY_ANNOUNCEMENT_FORM,
     editingId: undefined,
     sourceTemplateId: null,
+    startStep: 'type',
   });
   const [isSaving, setIsSaving] = React.useState(false);
 
@@ -343,7 +361,9 @@ export function AnnouncementsConsoleContent({
   /* -------- Filter -------- */
   const filtered = React.useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    return announcements.filter((a) => {
+    // ⚠️ 學年篩選 — 公告是分學年的 entity (每學年各有自己的公告)
+    const byYear = filterByAcademicYear(announcements, selectedYear);
+    return byYear.filter((a) => {
       if (tab === 'active' && !a.isActive) return false;
       if (tab === 'inactive' && a.isActive) return false;
       if (tab === 'templates' && !a.isTemplate) return false;
@@ -354,7 +374,7 @@ export function AnnouncementsConsoleContent({
         (a.templateName && a.templateName.toLowerCase().includes(q))
       );
     });
-  }, [announcements, tab, debouncedSearch]);
+  }, [announcements, tab, debouncedSearch, selectedYear]);
 
   /* -------- Stats -------- */
   const total = announcements.filter((a) => !a.isTemplate).length;
@@ -375,16 +395,27 @@ export function AnnouncementsConsoleContent({
   /* -------- Handlers -------- */
 
   const openAdd = React.useCallback(() => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6)
+    if (yearReadOnly) {
+      toast.warning('目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增或修改資料');
+      return;
+    }
     setFormModal({
       open: true,
       mode: 'add',
       initial: { ...EMPTY_ANNOUNCEMENT_FORM },
       editingId: undefined,
       sourceTemplateId: null,
+      // 新增 → 先選受眾類型 (Step 1)
+      startStep: 'type',
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const openEdit = React.useCallback((a: Announcement) => {
+    if (yearReadOnly) {
+      toast.warning('目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增或修改資料');
+      return;
+    }
     setFormModal({
       open: true,
       mode: 'edit',
@@ -398,16 +429,22 @@ export function AnnouncementsConsoleContent({
         endDate: a.endDate.split('T')[0],
         isTemplate: false,
         templateName: '',
-        // 編輯時保留原本的機構 (super_admin 也可以改發佈機構)
-        targetClientId: a.clientId,
+        scope: a.scope || 'system',
+        targetParentIds: a.targetParentIds || [],
       },
       editingId: a.id,
       sourceTemplateId: null,
+      // 編輯 → 已有受眾, 直接進資料頁
+      startStep: 'data',
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   // 從範本建立新公告
   const openFromTemplate = React.useCallback((a: Announcement) => {
+    if (yearReadOnly) {
+      toast.warning('目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增或修改資料');
+      return;
+    }
     setFormModal({
       open: true,
       mode: 'add',
@@ -421,13 +458,15 @@ export function AnnouncementsConsoleContent({
         endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
         isTemplate: false,
         templateName: '',
-        // 沿用範本所屬機構 (super_admin 可在 form 內改)
-        targetClientId: a.clientId,
+        scope: a.scope || 'system',
+        targetParentIds: a.targetParentIds || [],
       },
       editingId: undefined,
       sourceTemplateId: a.id,
+      // 從範本建立 → 範本已帶受眾 + 內容, 直接進資料頁
+      startStep: 'data',
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   /**
    * 儲存公告。
@@ -447,34 +486,73 @@ export function AnnouncementsConsoleContent({
    */
   const handleSave = React.useCallback(
     async (state: AnnouncementFormState) => {
+      // ⚠️ 封存學年 → 唯讀 (決策 D6)
+      if (yearReadOnly) {
+        toast.warning('目前檢視的學年為唯讀 — 不能儲存變更');
+        return;
+      }
       setIsSaving(true);
       try {
-        const { STORAGE } = await import('@/lib/storage');
+        const { STORAGE, resolveWriteAcademicYear } = await import('@/lib/storage');
         const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
 
-        // 目標機構: super_admin 必須在 form 內指定; 其他角色固定用自己的 clientId
-        const targetClientId = isSuperAdmin
-          ? state.targetClientId
-          : clientId;
+        // 受眾:
+        //   - scope='system'  → 系統公告, 所有用戶都看得到 → clientId 留空
+        //   - scope='payment' → 繳費公告, 只有被選家長看得到 → 用該家長所屬機構
+        const scope = state.scope || 'system';
+        const targetParentIds =
+          scope === 'payment' ? state.targetParentIds : [];
 
-        if (!targetClientId) {
-          toast.error('請先選擇發佈機構');
-          setIsSaving(false);
-          return;
+        // 繳費公告的 clientId 取「被選家長所屬的機構」(第一位的 clientId)
+        let targetClientId = '';
+        if (scope === 'payment') {
+          const firstParent = parents.find((p) => p.id === targetParentIds[0]);
+          targetClientId = firstParent?.clientId || clientId || '';
         }
+
+        // 學年蓋章用的 clientId: 系統公告沒有機構 → 用發佈者自己的機構推導現行學年
+        const yearClientId = targetClientId || clientId || '';
 
         const data = {
           title: state.title.trim(),
-          content: state.content.trim(),
+          // ⚠️ 繳費公告 → 內容由付款記錄帶出 (功能未開發 → 用佔位文案)
+          content:
+            scope === 'payment'
+              ? state.content.trim() || PAYMENT_CONTENT_PLACEHOLDER
+              : state.content.trim(),
           type: state.type,
           displayCount: state.displayCount,
           maxViewsPerUser: state.maxViewsPerUser,
-          startDate: new Date(state.startDate).toISOString(),
-          endDate: new Date(state.endDate).toISOString(),
+          // ⚠️ 繳費公告 → 有效期由帳單週期決定 (功能未開發 → 用長期窗口,
+          //    避免管理員發佈後一個月公告就自動失效、對家長消失)
+          startDate: new Date(
+            scope === 'payment'
+              ? getPaymentDefaultDates().startDate
+              : state.startDate,
+          ).toISOString(),
+          endDate: new Date(
+            scope === 'payment'
+              ? getPaymentDefaultDates().endDate
+              : state.endDate,
+          ).toISOString(),
           isActive: true,
           // 公告本身永遠不是範本 (範本是另一筆獨立資料)
           isTemplate: false,
           templateName: null,
+          // 受眾分類 (2026-11)
+          scope,
+          targetParentIds,
+          // 學年蓋章: 公告屬於「目前正在檢視的學年」
+          // ⚠️ 為什麼用 selectedYear (explicit) 而不是讓 resolveWriteAcademicYear 自己去猜:
+          //    跨機構角色 (super_admin / system_admin) 沒有自己的 clientId
+          //    → resolveWriteAcademicYear('') 只能回傳預設值 '2627'
+          //    → 公告會被寫進錯誤的學年, 然後在 console 的學年篩選裡「消失」。
+          //    明確指定目前檢視的學年 → 公告必定出現在管理員看得到的那一頁。
+          // ⚠️ 編輯時不會覆蓋既有公告的學年 (見下方 update 分支只帶部分欄位)
+          academicYear: resolveWriteAcademicYear(
+            yearClientId,
+            selectedYear,
+          ),
         };
 
         const trimmedTitle = state.title.trim();
@@ -485,6 +563,10 @@ export function AnnouncementsConsoleContent({
           const existing = STORAGE.announcements.getById(formModal.editingId);
           STORAGE.announcements.update(formModal.editingId, {
             ...data,
+            // ⚠️ 編輯既有公告時保留原本的學年 ——
+            //    公告屬於「發佈當下的學年」, 不該因為在 27-28 編輯 26-27 的公告
+            //    就被改掉 (否則 26-27 的公告會「跑進」27-28)。
+            academicYear: existing?.academicYear || data.academicYear,
             clientId: targetClientId,
             currentCount: existing?.currentCount ?? 0,
           });
@@ -524,6 +606,8 @@ export function AnnouncementsConsoleContent({
               isTemplate: sbPayload.isTemplate,
               templateName: sbPayload.templateName,
               clientId: sbPayload.clientId,
+              scope: sbPayload.scope,
+              targetParentIds: sbPayload.targetParentIds,
             })
           : await supabaseAnnouncements.add(sbPayload);
 
@@ -555,6 +639,11 @@ export function AnnouncementsConsoleContent({
             isActive: true,
             isTemplate: true,
             templateName: state.templateName.trim(),
+            // 範本沿用公告的受眾分類
+            scope: data.scope,
+            targetParentIds: data.targetParentIds,
+            // 範本跨學年沿用 → 標上「不限學年」的現行學年值 (篩選時範本不被學年限制)
+            academicYear: data.academicYear,
             createdAt: new Date().toISOString(),
           };
           STORAGE.announcements.add(templatePayload);
@@ -574,12 +663,25 @@ export function AnnouncementsConsoleContent({
         setIsSaving(false);
       }
     },
-    [formModal.mode, formModal.editingId, clientId, isSuperAdmin, toast],
+    [
+      formModal.mode,
+      formModal.editingId,
+      clientId,
+      parents,
+      toast,
+      yearReadOnly,
+      selectedYear,
+    ],
   );
 
   // Toggle enable/disable announcement
   const handleToggleActive = React.useCallback(
     async (announcement: Announcement) => {
+      // ⚠️ 封存學年 → 唯讀 (決策 D6)
+      if (yearReadOnly) {
+        toast.warning('目前檢視的學年為唯讀 — 不能改變公告狀態');
+        return;
+      }
       try {
         const { STORAGE } = await import('@/lib/storage');
         const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
@@ -605,11 +707,17 @@ export function AnnouncementsConsoleContent({
         toast.error(`切換狀態失敗：${msg}`);
       }
     },
-    [toast],
+    [toast, yearReadOnly],
   );
 
   const handleDelete = React.useCallback(async () => {
     if (!deleteTarget) return;
+    // ⚠️ 封存學年 → 唯讀 (決策 D6)
+    if (yearReadOnly) {
+      toast.warning('目前檢視的學年為唯讀 — 不能刪除資料');
+      setDeleteTarget(null);
+      return;
+    }
     setIsDeleting(true);
     try {
       const { STORAGE } = await import('@/lib/storage');
@@ -635,7 +743,7 @@ export function AnnouncementsConsoleContent({
     } finally {
       setIsDeleting(false);
     }
-  }, [deleteTarget, toast]);
+  }, [deleteTarget, toast, yearReadOnly]);
 
   /* -------- Render -------- */
 
@@ -662,7 +770,7 @@ export function AnnouncementsConsoleContent({
               </Pill>
             </div>
             <p className="text-[12px] text-slate-500 mt-0.5 dark:text-slate-400">
-              管理機構公告、範本與全站通知設定。
+              管理系統公告、繳費公告、範本與全站通知設定。
             </p>
           </div>
         </div>
@@ -700,6 +808,12 @@ export function AnnouncementsConsoleContent({
             size="sm"
             startIcon={<Plus width={12} height={12} />}
             onClick={openAdd}
+            disabled={yearReadOnly}
+            title={
+              yearReadOnly
+                ? '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增'
+                : undefined
+            }
           >
             新增公告
           </Button>
@@ -780,6 +894,7 @@ export function AnnouncementsConsoleContent({
                 onEdit={openEdit}
                 onDelete={(a) => setDeleteTarget(a)}
                 onUseTemplate={openFromTemplate}
+                readOnly={yearReadOnly}
               />
             )}
           </AnimatePresence>
@@ -847,8 +962,8 @@ export function AnnouncementsConsoleContent({
         isSaving={isSaving}
         onSave={handleSave}
         onClose={() => setFormModal((p) => ({ ...p, open: false }))}
-        clients={clients}
-        requireTargetClient={isSuperAdmin}
+        parents={parents}
+        startStep={formModal.startStep}
       />
 
       <ConfirmDeleteModal
@@ -936,6 +1051,7 @@ function DataTable({
   onEdit,
   onDelete,
   onUseTemplate,
+  readOnly = false,
 }: {
   rows: Announcement[];
   tab: AnnouncementTab;
@@ -943,6 +1059,8 @@ function DataTable({
   onEdit: (a: Announcement) => void;
   onDelete: (a: Announcement) => void;
   onUseTemplate: (a: Announcement) => void;
+  /** 封存學年 → 唯讀 (停用編輯/刪除/狀態切換) */
+  readOnly?: boolean;
 }) {
   return (
     <table
@@ -954,6 +1072,9 @@ function DataTable({
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             類型
+          </th>
+          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
+            受眾
           </th>
           {tab !== 'templates' && (
             <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
@@ -1010,12 +1131,26 @@ function DataTable({
                 </Pill>
               </td>
 
+              {/* 受眾 (系統公告 / 繳費公告) */}
+              <td className="px-3 py-2.5">
+                {a.scope === 'payment' ? (
+                  <Pill tone="success" size="sm">
+                    繳費 · {(a.targetParentIds || []).length} 位家長
+                  </Pill>
+                ) : (
+                  <Pill tone="info" size="sm">
+                    全體用戶
+                  </Pill>
+                )}
+              </td>
+
               {/* 狀態 (非範本 tab) */}
               {tab !== 'templates' && (
                 <td className="px-3 py-2.5">
                   <InlineToggle
                     checked={a.isActive}
                     onToggle={() => onToggle(a)}
+                    disabled={readOnly}
                   />
                 </td>
               )}
@@ -1049,25 +1184,37 @@ function DataTable({
                         onClick={() => onUseTemplate(a)}
                         startIcon={<Sparkles width={11} height={11} />}
                         className="text-[11px] h-7 px-2"
+                        disabled={readOnly}
+                        title={
+                          readOnly
+                            ? '目前檢視的學年為唯讀 — 不能使用範本建立公告'
+                            : undefined
+                        }
                       >
                         使用
                       </Button>
                       <IconButton
                         onClick={() => onEdit(a)}
-                        title="編輯範本"
+                        title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能編輯' : '編輯範本'}
+                        disabled={readOnly}
                       >
                         <Pencil width={13} height={13} />
                       </IconButton>
                     </>
                   ) : (
                     <>
-                      <IconButton onClick={() => onEdit(a)} title="編輯公告">
+                      <IconButton
+                        onClick={() => onEdit(a)}
+                        title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能編輯' : '編輯公告'}
+                        disabled={readOnly}
+                      >
                         <Pencil width={13} height={13} />
                       </IconButton>
                       <IconButton
                         onClick={() => onDelete(a)}
-                        title="刪除公告"
+                        title={readOnly ? '目前檢視的學年為唯讀 — 不能刪除公告' : '刪除公告'}
                         variant="danger"
+                        disabled={readOnly}
                       >
                         <Trash2 width={13} height={13} />
                       </IconButton>

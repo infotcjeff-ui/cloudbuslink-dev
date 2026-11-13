@@ -31,6 +31,7 @@
 // ============================================================================
 
 import { STORAGE } from './storage';
+import { isTripTombstoned } from './trip-tombstones';
 import type { Nanny, Trip, User } from './types';
 
 /**
@@ -39,13 +40,17 @@ import type { Nanny, Trip, User } from './types';
  * 查找順序 (先到先得):
  *   1. 同一學校內, phone 完全相符
  *   2. 同一學校內, accountName 不分大小寫相符
- *   3. 全域 (跨機構) phone 相符
- *   4. 全域 (跨機構) accountName 相符
+ *   3. 同一學校內, name 不分大小寫相符 (兜底: 電話/帳號改過但人名未改)
+ *   4. 全域 (跨機構) phone 相符
+ *   5. 全域 (跨機構) accountName 相符
+ *   6. 全域 (跨機構) name 相符 (兜底)
  *
  * ⚠️ 為什麼不只靠 phone:
  *   登入支援「帳戶名稱」, 而 cbl_users 與 cbl_nannies 的資料同步時機不同,
  *   帳號的 clientId 也可能與保姆記錄不同 (例如帳號被管理員改過機構)。
  *   所以 phone / accountName 兩種都要試, 且不能只限同一 clientId。
+ *   name 兜底是最後手段: 保姆名 (如 Wendy) 在同校內通常唯一,
+ *   電話換過但名未換時仍能對上人, 避免「歡迎 Wendy 但今日 0 班」的靜默失敗。
  */
 export function findNannyForUser(
   user: User | null | undefined,
@@ -54,25 +59,28 @@ export function findNannyForUser(
 
   const phone = (user.phone || '').trim();
   const account = (user.accountName || '').trim().toLowerCase();
-  if (!phone && !account) return undefined;
+  const name = (user.name || '').trim().toLowerCase();
+  if (!phone && !account && !name) return undefined;
 
   const all = STORAGE.nannies.getAll();
   const clientId = (user.clientId || '').trim();
 
-  const matchPhone = (n: Nanny) => phone && (n.phone || '').trim() === phone;
+  const matchPhone = (n: Nanny) => !!phone && (n.phone || '').trim() === phone;
   const matchAccount = (n: Nanny) =>
-    account && (n.accountName || '').trim().toLowerCase() === account;
+    !!account && (n.accountName || '').trim().toLowerCase() === account;
+  const matchName = (n: Nanny) =>
+    !!name && (n.name || '').trim().toLowerCase() === name;
 
   // 1) 同一學校
   if (clientId) {
     const sameClient = all.filter((n) => n.clientId === clientId);
     const hit =
-      sameClient.find(matchPhone) ?? sameClient.find(matchAccount);
+      sameClient.find(matchPhone) ?? sameClient.find(matchAccount) ?? sameClient.find(matchName);
     if (hit) return hit;
   }
 
   // 2) 跨機構
-  return all.find(matchPhone) ?? all.find(matchAccount);
+  return all.find(matchPhone) ?? all.find(matchAccount) ?? all.find(matchName);
 }
 
 /**
@@ -122,6 +130,8 @@ export function getNannyTrips(
   return STORAGE.trips
     .getAll()
     .filter((t) => {
+      // 已刪班次 (本機墓碑) 一律不顯示 — 防止「刪後又復活」殘留 (見 lib/trip-tombstones.ts)
+      if (isTripTombstoned(t.id)) return false;
       // 租戶隔離: 班次必須屬於保姆 (或登入帳號) 的學校
       if (allowedClients.size > 0 && !allowedClients.has(t.clientId)) {
         return false;

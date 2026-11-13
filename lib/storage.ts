@@ -3,8 +3,12 @@
 
 import type {
   User, UserRole, Client, Company, Driver, Bus, Student, Parent, Nanny,
-  Trip, Attendance, Announcement, SiteSettings, Route
+  Trip, Attendance, Announcement, SiteSettings, Route, IncidentReport,
+  PaymentRecord, PaymentStatus,
 } from './types';
+import type { AcademicYear } from './academic-year';
+import { DEFAULT_ACADEMIC_YEAR, isValidAcademicYear, getAcademicYearForDate, filterByAcademicYear as filterByAcademicYearImpl } from './academic-year';
+import { mergeTripsWithTombstones, retryTripDeletes } from './trip-tombstones';
 
 const STORAGE_KEYS = {
   AUTH: 'cbl_auth',
@@ -64,6 +68,18 @@ const STORAGE_KEYS = {
   //   還是「推上過、但後來在別的裝置被刪 (跟著刪掉)」
   //   這是「本機先寫、雲端後推」流程能安全做全量 pull 的前提。
   SYNCED_ENTITY_IDS: 'cbl_synced_entity_ids',
+  // 學年登錄 (對應 Supabase cbl_academic_years)
+  // value: AcademicYear[] — 本機快取, 雲端為準
+  ACADEMIC_YEARS: 'cbl_academic_years',
+  // 異常回報留底 (對應 Supabase cbl_incident_reports)
+  // value: IncidentReport[] — 本機快取, 雲端為準
+  INCIDENTS: 'cbl_incidents',
+  // 異常回報已讀記錄 (system_admin / super_admin 鈴鐺紅點用)
+  // value: { [userId_clientId]: string[] } 內容為 incident.id
+  INCIDENT_READS: 'cbl_incident_reads',
+  // 付款記錄 (對應 Supabase cbl_payment_records)
+  // value: PaymentRecord[] — 本機快取, 雲端為準
+  PAYMENTS: 'cbl_payments',
 } as const;
 
 // ?????????
@@ -304,9 +320,39 @@ export const busStorage = {
 };
 
 // ============= Students =============
+/**
+ * 由 student_id 前綴推導學年 (stu-2627001 → '2627')。
+ *
+ * ⚠️ 這是「舊本機資料」的相容處理 ——
+ *    localStorage 的資料早於 migration 0017, 沒有 academicYear 欄位。
+ *    但 student_id 裡有學年前綴, 足以準確推導出來 (比 DB 的啟發式可靠)。
+ */
+function deriveYearFromStudentId(studentId: string | undefined): string | null {
+  if (!studentId) return null;
+  const m = studentId.match(/^stu-([0-9]{4})/);
+  return m ? m[1] : null;
+}
+
 export const studentStorage = {
   getAll(): Student[] {
-    return get<Student[]>(STORAGE_KEYS.STUDENTS, []);
+    const rows = get<Student[]>(STORAGE_KEYS.STUDENTS, []);
+    // ⚠️ 舊資料補學年: 在讀取時補, 不寫回 localStorage
+    //    (避免每次讀都產生一次 write, 拖慢整個 app 的啟動)
+    let needsFix = false;
+    const fixed = rows.map((s) => {
+      if (s.academicYear) return s;
+      const derived = deriveYearFromStudentId(s.studentId);
+      if (!derived) return s;
+      needsFix = true;
+      return { ...s, academicYear: derived };
+    });
+    if (needsFix) {
+      // 背景寫回 (不阻塞)
+      setTimeout(() => {
+        try { set(STORAGE_KEYS.STUDENTS, fixed); } catch { /* ignore */ }
+      }, 0);
+    }
+    return fixed;
   },
   getByClient(clientId: string): Student[] {
     return this.getAll().filter(s => s.clientId === clientId);
@@ -431,7 +477,22 @@ export const nannyStorage = {
 // ============= Routes (????) =============
 export const routeStorage = {
   getAll(): Route[] {
-    return get<Route[]>(STORAGE_KEYS.ROUTES, []);
+    const rows = get<Route[]>(STORAGE_KEYS.ROUTES, []);
+    // ⚠️ 舊資料補學年: 由路線編號前綴推導 (2627-001AM → '2627')
+    let needsFix = false;
+    const fixed = rows.map((r) => {
+      if (r.academicYear) return r;
+      const m = r.code?.match(/^([0-9]{4})-/);
+      if (!m) return r;
+      needsFix = true;
+      return { ...r, academicYear: m[1] };
+    });
+    if (needsFix) {
+      setTimeout(() => {
+        try { set(STORAGE_KEYS.ROUTES, fixed); } catch { /* ignore */ }
+      }, 0);
+    }
+    return fixed;
   },
   getByClient(clientId: string): Route[] {
     return this.getAll().filter((r) => r.clientId === clientId);
@@ -463,7 +524,23 @@ export const routeStorage = {
 // ============= Trips =============
 export const tripStorage = {
   getAll(): Trip[] {
-    return get<Trip[]>(STORAGE_KEYS.TRIPS, []);
+    const rows = get<Trip[]>(STORAGE_KEYS.TRIPS, []);
+    // ⚠️ 舊資料補學年: 由班次日期推導 (2027-03-15 → '2627')
+    //    ⚠️ 這是推定值 (學年邊界是學校自訂的), 但比留空好 ——
+    //       留空會讓這筆班次在「依學年篩選」時行為不一致。
+    let needsFix = false;
+    const fixed = rows.map((t) => {
+      if (t.academicYear) return t;
+      if (!t.date) return t;
+      needsFix = true;
+      return { ...t, academicYear: getAcademicYearForDate(t.date) };
+    });
+    if (needsFix) {
+      setTimeout(() => {
+        try { set(STORAGE_KEYS.TRIPS, fixed); } catch { /* ignore */ }
+      }, 0);
+    }
+    return fixed;
   },
   getByClient(clientId: string): Trip[] {
     return this.getAll().filter(t => t.clientId === clientId);
@@ -488,30 +565,38 @@ export const tripStorage = {
    * 合併規則:
    *   1. DB 與 local 都有的 trip → 比較 updatedAt, 較新的勝出
    *      (DB 的 updated_at 由 trigger 維護, 本機的由 storage.update 寫入)
-   *   2. 只有 local 有的 trip → 保留 (可能尚未 push 成功, 或是在別的裝置被刪)
-   *      註: 跨裝置刪除目前不同步回來 — 寧可暫時多留一筆, 也不要讓管理員的班次消失
+   *   2. 只有 local 有的 trip → 保留 (尚未 push 成功)
    *   3. 只有 DB 有的 trip → 使用 (其他裝置新建的)
+   *   4. 帶墓碑 id 的 trip (本機已刪) → 兩邊一律丟掉, 不會復活 (見 lib/trip-tombstones.ts)
    */
   mergeAll(fromDb: Trip[]) {
-    const local = this.getAll();
-    const localById = new Map(local.map((t) => [t.id, t]));
+    const { merged, staleInCloud } = mergeTripsWithTombstones(this.getAll(), fromDb);
+    // 跨裝置刪除傳遞: 曾經推上過雲端、但這次雲端快照已無此 id → 在別處被刪, 跟著刪
+    // (trips 之前完全無此機制 → A 裝置刪了, B 裝置(保姆手機)永遠留著, 即本次 bug)
     const dbIds = new Set(fromDb.map((t) => t.id));
+    let synced: Set<string>;
+    try {
+      synced = new Set(getSyncedIds('trips'));
+    } catch {
+      synced = new Set<string>();
+    }
+    const filtered = merged.filter((t) => !(synced.has(t.id) && !dbIds.has(t.id)));
+    this.setAll(filtered);
 
-    const merged: Trip[] = fromDb.map((dbItem) => {
-      const localItem = localById.get(dbItem.id);
-      if (!localItem) return dbItem;
-      // 本機較新 → 保留本機 (尚未成功 push 的變更)
-      if (localItem.updatedAt && dbItem.updatedAt &&
-          localItem.updatedAt > dbItem.updatedAt) {
-        return localItem;
-      }
-      return dbItem;
-    });
+    // 記錄這次同步後雲端有的 id (供下次判斷「是否在別處被刪」)
+    try {
+      const map = get<Record<string, string[]>>(STORAGE_KEYS.SYNCED_ENTITY_IDS, {});
+      map.trips = Array.from(dbIds);
+      set(STORAGE_KEYS.SYNCED_ENTITY_IDS, map);
+    } catch { /* ignore */ }
 
-    // 只存在於本機的 (尚未 push / 雲端已刪)
-    const localOnly = local.filter((t) => !dbIds.has(t.id));
-
-    this.setAll([...merged, ...localOnly]);
+    // 雲端還在但本機已刪 → 上次雲端刪除失敗, 背景重試
+    if (staleInCloud.length > 0) {
+      console.warn(
+        `[Supabase] ${staleInCloud.length} 筆班次在雲端仍存在, 重試刪除: ${staleInCloud.join(', ')}`,
+      );
+      void retryTripDeletes(staleInCloud);
+    }
   },
   getById(id: string): Trip | undefined {
     return this.getAll().find(t => t.id === id);
@@ -560,6 +645,14 @@ export const tripStorage = {
       ...tpl,
       ...overrides,
       id: genId('trip'),
+      // 複製出的新班次要重新蓋章 (快照也要重取 — 新班次對應當下的校巴綁定)
+      academicYear: overrides.academicYear ?? resolveWriteAcademicYear(tpl.clientId),
+      driverIdSnapshot:
+        overrides.driverIdSnapshot ??
+        (overrides.busId ? busStorage.getById(overrides.busId)?.driverId ?? null : tpl.driverIdSnapshot ?? null),
+      busPlateNumberSnapshot:
+        overrides.busPlateNumberSnapshot ??
+        (overrides.busId ? busStorage.getById(overrides.busId)?.plateNumber ?? null : tpl.busPlateNumberSnapshot ?? null),
       status: 'scheduled',
       actualStartTime: null,
       actualEndTime: null,
@@ -703,33 +796,192 @@ export const attendanceStorage = {
 //   - 其他角色   → 只看得見自己 clientId 的公告
 export const announcementStorage = {
   getAll(): Announcement[] {
-    return get<Announcement[]>(STORAGE_KEYS.ANNOUNCEMENTS, []);
+    const rows = get<Announcement[]>(STORAGE_KEYS.ANNOUNCEMENTS, []);
+    // ⚠️ 舊資料補學年: 用該 client 的現行學年 (公告沒有編號前綴可推)
+    //    範本 (isTemplate) 也補 — 範本跨學年沿用, 但需要一個值。
+    // ⚠️ 舊資料補受眾 (scope / targetParentIds):
+    //    這兩個欄位是 2026-11 新增的, 舊公告一律視為「系統公告」
+    //    (所有用戶都看得到) —— 這是最保守的預設 (不會讓公告消失)。
+    let needsFix = false;
+    const fixed = rows.map((a) => {
+      const scopeOk = a.scope === 'system' || a.scope === 'payment';
+      const parentsOk = Array.isArray(a.targetParentIds);
+      // ⚠️ clientId 可能是 null — 從 Supabase 讀回來的系統公告 (client_id = NULL)
+      //    經 camelize 後就是 null。統一正規化成 '' (代表「不限機構」)。
+      const clientId = a.clientId || '';
+      if (a.academicYear && scopeOk && parentsOk && clientId === a.clientId) {
+        return a;
+      }
+      needsFix = true;
+      return {
+        ...a,
+        clientId,
+        academicYear: a.academicYear || resolveWriteAcademicYear(clientId),
+        scope: scopeOk ? a.scope : ('system' as const),
+        targetParentIds: parentsOk ? a.targetParentIds : [],
+      };
+    });
+    if (needsFix) {
+      setTimeout(() => {
+        try { set(STORAGE_KEYS.ANNOUNCEMENTS, fixed); } catch { /* ignore */ }
+      }, 0);
+    }
+    return fixed;
   },
   getByClient(clientId: string): Announcement[] {
     return this.getAll().filter(a => a.clientId === clientId);
   },
   /**
-   * 依「可見範圍」取得公告。
+   * 依「可見範圍」取得公告 (管理層 — 後台 console / 設定頁用)。
+   *
+   * ⚠️ 語意 (2026-11 起):
+   *   公告不再綁「發佈機構」→ 全域公告 (clientId 為空) 對所有管理員可見;
+   *   舊的「機構專屬」公告 (clientId 有值) 仍然只對該機構可見。
+   *   繳費公告 (scope='payment') → 只要「被選家長中有屬於本機構的人」就可见,
+   *   (跨機構選人時, 每間受影響的機構管理員都看得到)。
+   *
    * @param clientId 目前使用者的 clientId (super_admin 可能是 null/'')
    * @param isSuperAdmin true = 跨機構, 看得到全部公告
    */
   getVisible(clientId: string, isSuperAdmin = false): Announcement[] {
     if (isSuperAdmin) return this.getAll();
-    return this.getByClient(clientId);
+    const cid = clientId || '';
+    const all = this.getAll();
+
+    // 本機構的家長 id 集合 (一次讀取, 全程重用)
+    // ⚠️ 不要在 filter 迴圈裡重複讀 localStorage — 家長幾百位時會慢到卡住。
+    const myParentIds = new Set(
+      parentStorage
+        .getAll()
+        .filter((p) => p.clientId === cid)
+        .map((p) => p.id),
+    );
+
+    return all.filter((a) => {
+      const scope = a.scope || 'system';
+
+      // 繳費公告 → 受眾名單裡只要有一位屬於本機構的家長就算看得見
+      // ⚠️ 這條規則必須「無條件」套用 (不能因為 a.clientId === cid 就提早 return true):
+      //    跨機構選人時 a.clientId 只會是「第一位家長所屬的機構」,
+      //    其餘受影響機構的 clientId 對不上 → 必須靠家長名單判斷。
+      //    → 與 getActive() 的 client 管理員分支保持一致,
+      //      不會出現「後台看得到、但鈴鐺不彈」或反過來的矛盾。
+      if (scope === 'payment') {
+        const ids = a.targetParentIds || [];
+        if (ids.length === 0) return false;
+        return ids.some((id) => myParentIds.has(id));
+      }
+
+      // 系統公告:
+      //   - clientId 為空 → 全域 (所有管理員都看得到)
+      //   - clientId 有值 → 舊資料, 仍綁該機構
+      if (!a.clientId || a.clientId === cid) return true;
+      return false;
+    });
   },
   getTemplates(clientId: string, isSuperAdmin = false): Announcement[] {
     return this.getVisible(clientId, isSuperAdmin).filter(a => a.isTemplate);
   },
   /**
-   * 取得「生效中且在有效期內」的公告。
-   * 範例外: isTemplate 的公告不算 (範本只是草稿, 不發佈)。
+   * 判定某則公告是否應該出現在「某個用戶」面前。
+   *
+   * ⚠️ 受眾規則 (2026-11):
+   *   - scope = 'system'  → 所有用戶都看得到 (跨機構、跨角色)
+   *   - scope = 'payment' → 只有被選中的家長看得到 (管理員除外)
    */
-  getActive(clientId: string, isSuperAdmin = false): Announcement[] {
+  matchesAudience(
+    a: Announcement,
+    ctx: { role?: string; parentIds?: Set<string> },
+  ): boolean {
+    const role = ctx.role || '';
+    const isAdmin =
+      role === 'super_admin' || role === 'system_admin' || role === 'client';
+    if (isAdmin) return true;
+
+    const scope = a.scope || 'system';
+    if (scope === 'system') return true;
+
+    // scope === 'payment' → 只有名單內的家長
+    const targets = a.targetParentIds || [];
+    if (targets.length === 0) return false;
+    const ids = ctx.parentIds;
+    if (!ids || ids.size === 0) return false;
+    return targets.some((t) => ids.has(t));
+  },
+  /**
+   * 取得「生效中且在有效期內」且「這個用戶看得到」的公告。
+   *
+   * ⚠️ 受眾規則 (2026-11):
+   *   - scope = 'system'  → 所有用戶都看得到 (跨機構、跨角色)
+   *   - scope = 'payment' → 只有 targetParentIds 內的家長看得到
+   *
+   * ⚠️ 機構範圍 (clientId) 只在「系統公告 + 舊資料」時才會擋人:
+   *   - 新建的系統公告 → clientId = '' → 全域 (任何人看得到)
+   *   - 舊公告 (migration 前建立, 綁在某一間學校) → 仍只對該機構可見
+   *   - 繳費公告 → 受眾由「指定家長」決定, 不受 clientId 限制
+   *     (家長帳號的 clientId 常常是空的 → 被擋掉就永遠看不到)
+   *
+   * @param clientId 目前使用者的 clientId
+   * @param isSuperAdmin 是否為跨機構管理員
+   * @param audience 受眾 (role + 家長 id 集合); 不傳 = 不套用受眾過濾
+   */
+  getActive(
+    clientId: string,
+    isSuperAdmin = false,
+    audience?: { role?: string; parentIds?: Set<string> },
+  ): Announcement[] {
     const now = new Date().toISOString();
-    return this.getVisible(clientId, isSuperAdmin).filter(a =>
-      a.isActive && !a.isTemplate &&
-      a.startDate <= now && a.endDate >= now
-    );
+    const role = audience?.role || '';
+    // 跨機構角色 → 不受機構範圍限制 (看得見所有機構的公告)
+    const crossOrg =
+      isSuperAdmin || role === 'super_admin' || role === 'system_admin';
+    // 機構管理員 (client) → 受眾不過濾, 但仍限自己機構
+    const isClientAdmin = role === 'client';
+
+    // ⚠️ 機構管理員看繳費公告時要查「本機構的家長 id 集合」——
+    //    先算一次 (lazily), 不要在 filter 迴圈裡重複讀 localStorage。
+    let myParentIds: Set<string> | null = null;
+    const getMyParentIds = (): Set<string> => {
+      if (myParentIds) return myParentIds;
+      myParentIds = new Set(
+        parentStorage
+          .getAll()
+          .filter((p) => p.clientId === clientId)
+          .map((p) => p.id),
+      );
+      return myParentIds;
+    };
+
+    return this.getAll().filter(a => {
+      if (!a.isActive || a.isTemplate) return false;
+      if (a.startDate > now || a.endDate < now) return false;
+      // 受眾過濾 (系統公告 → 全部; 繳費公告 → 指定家長; 管理員 → 全部)
+      if (audience && !this.matchesAudience(a, audience)) return false;
+      if (crossOrg) return true;
+
+      const scope = a.scope || 'system';
+      if (scope === 'payment') {
+        // 繳費公告: 受眾 = 指定家長 (matchesAudience 已判定)
+        //   - 機構管理員 (client) → 只能看到「受眾名單中有本機構家長」的公告
+        //     (跨機構選人時, 每間受影響的機構管理員都看得到 → 與 getVisible 一致)
+        //   - 一般用戶 (家長) → 不限機構 (受眾名單才是唯一判準)
+        // ⚠️ 這個判斷要「無條件」套用, 不能因為 a.clientId === cid 就提早 return true:
+        //    跨機構選人時 a.clientId 只記第一位家長的機構,
+        //    其餘受影響機構的 clientId 對不上 → 必須靠家長名單判斷。
+        if (isClientAdmin) {
+          const ids = a.targetParentIds || [];
+          const mine = getMyParentIds();
+          if (!ids.some((id) => mine.has(id))) return false;
+        }
+        return true;
+      }
+
+      // 系統公告:
+      //   - clientId 為空 → 全域 (所有用戶都看到)
+      //   - clientId 有值 → 舊資料, 仍綁該機構
+      if (a.clientId && a.clientId !== clientId) return false;
+      return true;
+    });
   },
   setAll(announcements: Announcement[]) {
     set(STORAGE_KEYS.ANNOUNCEMENTS, announcements);
@@ -828,9 +1080,10 @@ export const announcementStorage = {
     userId: string,
     clientId: string,
     isSuperAdmin = false,
+    audience?: { role?: string; parentIds?: Set<string> },
   ): Announcement[] {
     const now = new Date().toISOString();
-    return this.getActive(clientId, isSuperAdmin).filter(a => {
+    return this.getActive(clientId, isSuperAdmin, audience).filter(a => {
       // 全域總顯示次數上限
       if ((a.currentCount || 0) >= (a.displayCount || 1)) return false;
       // 每用戶顯示上限
@@ -865,11 +1118,138 @@ export const announcementStorage = {
     userId: string,
     clientId: string,
     isSuperAdmin = false,
+    audience?: { role?: string; parentIds?: Set<string> },
   ): Announcement[] {
     const dismissed = announcementDismissStorage.getDismissed(userId, clientId);
-    return this.getActive(clientId, isSuperAdmin).filter(
+    return this.getActive(clientId, isSuperAdmin, audience).filter(
       (a) => !dismissed.has(a.id),
     );
+  },
+};
+
+// ============= Incident Reports (異常回報留底) =============
+//
+// 保姆主頁 popup「確定送出」即寫一筆; CBL Admin Setting 讀同一個 storage 顯示。
+// 廣播制: 不再指定單一管理員, 所有 system_admin + super_admin 都會收到通知。
+// 跨裝置同步走 Supabase cbl_incident_reports (雲端為準 + 本機先寫保留)。
+export const incidentStorage = {
+  getAll(): IncidentReport[] {
+    return get<IncidentReport[]>(STORAGE_KEYS.INCIDENTS, []);
+  },
+  /** 管理層列表 — 跨機構看全部, 其他角色只看自己 clientId */
+  getVisible(clientId: string, isSuperAdmin = false): IncidentReport[] {
+    const all = this.getAll();
+    if (isSuperAdmin) return [...all].sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    const cid = clientId || '';
+    return all
+      .filter((r) => (r.clientId || '') === cid)
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  },
+  /**
+   * 管理員鈴鐺用 — 待處理 (pending) 的廣播列表。
+   * system_admin / super_admin 看全部, 其他角色只看自己 clientId。
+   */
+  getPendingForAdmins(clientId: string, isAdmin = false): IncidentReport[] {
+    const visible = this.getVisible(clientId, isAdmin);
+    return visible.filter((r) => r.status === 'pending');
+  },
+  setAll(rows: IncidentReport[]) {
+    set(STORAGE_KEYS.INCIDENTS, rows);
+  },
+  getById(id: string): IncidentReport | undefined {
+    return this.getAll().find((r) => r.id === id);
+  },
+  add(row: IncidentReport) {
+    const all = this.getAll();
+    all.push(row);
+    this.setAll(all);
+  },
+  update(id: string, patch: Partial<IncidentReport>) {
+    const all = this.getAll();
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      all[idx] = { ...all[idx], ...patch, updatedAt: new Date().toISOString() };
+      this.setAll(all);
+    }
+  },
+  remove(id: string) {
+    set(STORAGE_KEYS.INCIDENTS, this.getAll().filter((r) => r.id !== id));
+  },
+};
+
+// ============= Payment Records (付款記錄) =============
+//
+// 報表頁 (settings/reports) 的資料來源。
+// 跨裝置同步走 Supabase cbl_payment_records (雲端為準 + 本機先寫保留)。
+export const paymentStorage = {
+  getAll(): PaymentRecord[] {
+    return get<PaymentRecord[]>(STORAGE_KEYS.PAYMENTS, []);
+  },
+  /** 管理層列表 — 跨機構看全部, 其他角色只看自己 clientId */
+  getVisible(clientId: string, isSuperAdmin = false): PaymentRecord[] {
+    const all = this.getAll();
+    if (isSuperAdmin) return [...all].sort((a, b) => (b.dueDate || '').localeCompare(a.dueDate || ''));
+    const cid = clientId || '';
+    return all
+      .filter((r) => (r.clientId || '') === cid)
+      .sort((a, b) => (b.dueDate || '').localeCompare(a.dueDate || ''));
+  },
+  setAll(rows: PaymentRecord[]) {
+    set(STORAGE_KEYS.PAYMENTS, rows);
+  },
+  getById(id: string): PaymentRecord | undefined {
+    return this.getAll().find((r) => r.id === id);
+  },
+  add(row: PaymentRecord) {
+    const all = this.getAll();
+    all.push(row);
+    this.setAll(all);
+  },
+  update(id: string, patch: Partial<PaymentRecord>) {
+    const all = this.getAll();
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      all[idx] = { ...all[idx], ...patch, updatedAt: new Date().toISOString() };
+      this.setAll(all);
+    }
+  },
+  remove(id: string) {
+    set(STORAGE_KEYS.PAYMENTS, this.getAll().filter((r) => r.id !== id));
+  },
+  /**
+   * 批次更新付款狀態 — 報表頁的「多選 → 標記已付 / 取消」用。
+   *
+   * 回傳實際更新了幾筆 (供 toast 回報)。
+   */
+  bulkUpdateStatus(ids: string[], status: PaymentStatus): number {
+    if (ids.length === 0) return 0;
+    const all = this.getAll();
+    let n = 0;
+    all.forEach((r) => {
+      if (ids.includes(r.id)) {
+        Object.assign(r, { status, updatedAt: new Date().toISOString() });
+        n += 1;
+      }
+    });
+    this.setAll(all);
+    return n;
+  },
+  /**
+   * 批次標記「已發送繳費通知」— 報表頁的「發送繳費通知」動作用。
+   */
+  bulkMarkNotified(ids: string[]): number {
+    if (ids.length === 0) return 0;
+    const all = this.getAll();
+    const now = new Date().toISOString();
+    let n = 0;
+    all.forEach((r) => {
+      if (ids.includes(r.id)) {
+        Object.assign(r, { paymentNotifiedAt: now, updatedAt: now });
+        n += 1;
+      }
+    });
+    this.setAll(all);
+    return n;
   },
 };
 
@@ -902,6 +1282,37 @@ export const readAnnouncementStorage = {
   /** ???????? / ??? */
   clearAll(): void {
     writeMap({});
+  },
+};
+
+// ============= Incident Read Tracking (異常回報鈴鐺紅點用) =============
+//
+// 與 announcementReads 同語意: 「看過下拉列表」= 已讀 (per-user, 不影響全域 status)。
+// key 格式沿用 readKey `${userId}::${clientId || ''}` — system_admin / super_admin
+// 的 clientId 為空字串也照常運作。內容為 incident.id。
+const incidentReadMap = () => get<Record<string, string[]>>(STORAGE_KEYS.INCIDENT_READS, {});
+const writeIncidentReadMap = (m: Record<string, string[]>) =>
+  set(STORAGE_KEYS.INCIDENT_READS, m);
+
+export const readIncidentStorage = {
+  /** 取得該用戶已讀的 incident id 集合 */
+  getRead(userId: string, clientId: string): Set<string> {
+    const m = incidentReadMap();
+    return new Set(m[readKey(userId, clientId)] || []);
+  },
+  /** 標記已讀 (idempotent) */
+  markRead(userId: string, clientId: string, ids: string[]): void {
+    if (!userId || ids.length === 0) return;
+    const k = readKey(userId, clientId);
+    const m = incidentReadMap();
+    const cur = new Set(m[k] || []);
+    ids.forEach(id => cur.add(id));
+    m[k] = Array.from(cur);
+    writeIncidentReadMap(m);
+  },
+  /** 清空全部 */
+  clearAll(): void {
+    writeIncidentReadMap({});
   },
 };
 
@@ -1089,6 +1500,65 @@ export const selectedClientStorage = {
     } catch {
       /* ignore */
     }
+  },
+};
+
+// ============= Academic Years (學年登錄) =============
+/**
+ * 學年登錄的本機快取 (對應 Supabase cbl_academic_years)。
+ *
+ * ⚠️ 這是「快取」, 雲端 (cbl_academic_years) 才是權威來源。
+ *    這裡存在的理由:
+ *      1. 讓「寫入蓋章」不必每次都打網路 (同步路徑上是 async 的,
+ *         但「建立班次」這種同步流程需要立刻拿到學年值)
+ *      2. 離線時仍能運作 (降級到 settings.academicYear)
+ */
+export const academicYearStorage = {
+  getAll(): AcademicYear[] {
+    return get<AcademicYear[]>(STORAGE_KEYS.ACADEMIC_YEARS, []);
+  },
+  setAll(years: AcademicYear[]) {
+    set(STORAGE_KEYS.ACADEMIC_YEARS, years);
+  },
+  /** 取得某 client 的所有學年 (新到舊) */
+  getByClient(clientId: string): AcademicYear[] {
+    return this.getAll()
+      .filter((y) => y.clientId === clientId)
+      .sort((a, b) => b.academicYear.localeCompare(a.academicYear));
+  },
+  /** 取得某 client 的現行學年 */
+  getCurrent(clientId: string): AcademicYear | null {
+    if (!clientId) return null;
+    return this.getByClient(clientId).find((y) => y.isCurrent) || null;
+  },
+  /** 取得某 client 的某個特定學年 */
+  getByYear(clientId: string, academicYear: string): AcademicYear | null {
+    return this.getByClient(clientId).find((y) => y.academicYear === academicYear) || null;
+  },
+  /**
+   * 合併雲端資料 (本機優先 — 本機可能還沒推上去的新學年)。
+   * 雲端為準的部分: isCurrent / status (這兩個決定寫入蓋章, 不能本機說了算)。
+   */
+  mergeAll(cloud: AcademicYear[]): void {
+    const local = this.getAll();
+    const cloudById = new Map(cloud.map((y) => [y.id, y]));
+    const merged: AcademicYear[] = [];
+
+    for (const y of local) {
+      const c = cloudById.get(y.id);
+      if (!c) {
+        // 雲端沒有 → 本機的先留著 (可能還沒推上去)
+        merged.push(y);
+        continue;
+      }
+      // 雲端為準
+      merged.push(c);
+      cloudById.delete(y.id);
+    }
+    // 雲端多出來的 → 直接加
+    for (const c of cloudById.values()) merged.push(c);
+
+    this.setAll(merged);
   },
 };
 
@@ -1326,6 +1796,88 @@ export function resolveDataScope(
   return { clientId: first, isSuperAdmin: false };
 }
 
+/* ==========================================================================
+ *  學年解析 — 寫入蓋章的唯一入口
+ *
+ *  為什麼需要這一層:
+ *    「27-28 的新資料要蓋哪個學年?」這個問題有四個可能的答案來源,
+ *    而且在不同情境下應該優先用不同的來源。集中起來才不會各寫各的。
+ *
+ *  優先順序:
+ *    1. 明確指定 (explicit) — 使用者在 UI 上選了學年
+ *    2. 該 client 的現行學年 (cbl_academic_years.is_current) ← 正常情況
+ *    3. 該 client 的站台設定 (settings.academicYear) ← 舊資料相容
+ *    4. 預設值 '2627' ← 最後兜底
+ *
+ *  ⚠️ 為什麼不從日期反推:
+ *    學年邊界是「學校自己訂的」, 不是日曆年。不同學校的開學日可能差幾週。
+ *    從 date 反推會讓「2026-09-01 的班次」在某些情況下落到錯的學年。
+ *    → date 反推只用於「回填既有資料」(見 0018), 不用於「新寫入」。
+ * ========================================================================== */
+
+/**
+ * 解析「寫入時要蓋哪個學年」。
+ *
+ * @param clientId 目標機構 id
+ * @param explicit 使用者明確指定的學年 (UI 上的學年下拉) — 優先採用
+ * @returns 4 位學年代碼 (例 '2627')
+ */
+export function resolveWriteAcademicYear(
+  clientId: string,
+  explicit?: string | null,
+): string {
+  // 1. 明確指定 (且格式合法)
+  if (explicit && isValidAcademicYear(explicit)) return explicit;
+
+  // 2. 現行學年 (學年登錄表 — 權威來源)
+  if (clientId) {
+    const current = academicYearStorage.getCurrent(clientId);
+    if (current && isValidAcademicYear(current.academicYear)) {
+      return current.academicYear;
+    }
+  }
+
+  // 3. 站台設定 (舊資料相容 — 0016 尚未套用時的唯一線索)
+  if (clientId) {
+    const settings = settingsStorage.getByClient(clientId);
+    if (settings.academicYear && isValidAcademicYear(settings.academicYear)) {
+      return settings.academicYear;
+    }
+  }
+
+  // 4. 兜底
+  return DEFAULT_ACADEMIC_YEAR;
+}
+
+/**
+ * 取得某 client 目前「正在檢視」的學年 (用於篩選)。
+ *
+ * ⚠️ 目前還沒有學年切換器 UI (M3 才會有), 所以先讀現行學年。
+ *    介面刻意設計成「之後加一個 selectedYear 狀態就能改」,
+ *    呼叫端不需要大改。
+ */
+export function resolveViewAcademicYear(clientId: string): string {
+  return resolveWriteAcademicYear(clientId);
+}
+
+/**
+ * 依學年篩選資料列。
+ *
+ * ⚠️ 只篩「有 academicYear 欄位」的 entity。
+ *    舊的本機資料可能沒有這個欄位 (localStorage 早於 migration) →
+ *    這些列在篩選時要「保留下來」而不是被無聲移除,
+ *    否則使用者會以為資料不見了。
+ *
+ * ⚠️ 實作已移到 lib/academic-year.ts (filterByAcademicYear) ——
+ *    這裡保留轉呼叫, 讓既有 import 不用改。
+ */
+export function filterByAcademicYear<T extends { academicYear?: string | null }>(
+  rows: T[],
+  academicYear: string,
+): T[] {
+  return filterByAcademicYearImpl(rows, academicYear);
+}
+
 /**
  * 依「資料可見範圍」取得資料列。
  *
@@ -1555,6 +2107,17 @@ export function clearPendingPatch(entityKey: string, id: string): void {
 }
 
 /**
+ * 讀出所有「待推送的本機變更」。
+ *
+ * 用途: 欄位降級 (schema 尚未更新) 導致 push 失敗時, 這些欄位會留在 pending。
+ *   等 schema 更新 (migration 套好) 後, 可以把 pending 重新推上雲端,
+ *   避免使用者填的資料一直卡在本機。
+ */
+export function getPendingPatches(entityKey: string): Record<string, Record<string, unknown>> {
+  return readPending()[entityKey] ?? {};
+}
+
+/**
  * 把「待推送的本機變更」套回雲端資料上。
  *
  * @param entityKey 實體識別 (例如 'students')
@@ -1669,11 +2232,15 @@ export const STORAGE = {
   routes: routeStorage,
   attendances: attendanceStorage,
   announcements: announcementStorage,
+  incidents: incidentStorage,
+  payments: paymentStorage,
   announcementReads: readAnnouncementStorage,
+  incidentReads: readIncidentStorage,
   announcementViews: announcementViewStorage,
   announcementPopupPref: announcementPopupPrefStorage,
   announcementDismiss: announcementDismissStorage,
   settings: settingsStorage,
+  academicYears: academicYearStorage,
   recentBusSearches: recentBusSearchesStorage,
   userFeaturePermissions: userFeaturePermissionStorage,
   isInitialized,

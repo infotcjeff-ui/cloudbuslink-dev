@@ -57,4 +57,27 @@ export const supabaseAttendances = {
     if (error) return { success: false, error: error.message };
     return { success: true };
   },
+
+  async deleteByTripWaypoint(tripId: string, waypointId: string): Promise<{ success: boolean; error?: string }> {
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase
+      .from('cbl_attendances')
+      .delete()
+      .eq('trip_id', tripId)
+      .eq('waypoint_id', waypointId);
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  },
+
+  async deleteByTripWaypointStudent(tripId: string, waypointId: string, studentId: string): Promise<{ success: boolean; error?: string }> {
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase
+      .from('cbl_attendances')
+      .delete()
+      .eq('trip_id', tripId)
+      .eq('waypoint_id', waypointId)
+      .eq('student_id', studentId);
+    if (error) return { success: false, error: error.message };
+    return { success: true };
+  },
 };

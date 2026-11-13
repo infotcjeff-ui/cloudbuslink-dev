@@ -38,13 +38,13 @@ import {
   Hash,
   XCircle,
   Sparkles,
-  Copy,
   UserCheck,
   UserPlus,
   UserCog,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import {
   Pill,
   Dot,
@@ -63,11 +63,6 @@ import {
 } from '../students/design-tokens';
 import { UserFeatureModal } from './UserFeatureModal';
 import { UserAccountFormModal } from './UserAccountFormModal';
-import { ClientFormModal } from '../clients/ClientFormModal';
-import {
-  EMPTY_CLIENT_FORM,
-  type ClientFormState,
-} from '../clients/types';
 import {
   USER_TAB_ACCENT,
   USER_TAB_LABELS,
@@ -82,7 +77,7 @@ import {
   type UserFeatureFormState,
   type UserTab,
 } from './types';
-import type { User, UserRole, Client, Company } from '@/lib/types';
+import type { User, UserRole, Company } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
 /*  Constants — tab / tone mapping                                              */
@@ -234,8 +229,6 @@ export interface UsersConsoleContentProps {
   users: User[];
   /** Initial loading flag — true if we haven't loaded yet on mount. */
   initiallyLoading?: boolean;
-  /** 學校列表 (cbl_clients = 學校表) — 新增帳號時供「所屬學校」下拉選單使用 */
-  clients?: Client[];
   /** 機構/公司列表 (cbl_companies) — 新增帳號時供「所屬機構」下拉選單使用 */
   companies?: Company[];
   /** 目前登入者 id — 用於標示「這是我自己」並防止自我停用 */
@@ -247,7 +240,6 @@ export interface UsersConsoleContentProps {
 export function UsersConsoleContent({
   users,
   initiallyLoading = false,
-  clients = [],
   companies: companiesProp,
   currentUserId,
   currentUserRole,
@@ -299,20 +291,6 @@ export function UsersConsoleContent({
     initial: EMPTY_ACCOUNT_FORM,
   });
   const [isSavingAccount, setIsSavingAccount] = React.useState(false);
-
-  /**
-   * 「＋ 在此新增學校…」— 從「新增登入帳號」modal 內觸發
-   *
-   * 學校建立成功後會把新學校的 id 回填到帳號表單的「所屬學校」,
-   * 使用者不需要關掉 modal 再重新選一次。
-   */
-  const [clientModal, setClientModal] = React.useState<{
-    open: boolean;
-    initial: ClientFormState;
-  }>({ open: false, initial: EMPTY_CLIENT_FORM });
-  const [isSavingClient, setIsSavingClient] = React.useState(false);
-  /** 新機構建立成功後要回填的 clientId */
-  const [pendingClientId, setPendingClientId] = React.useState<string | null>(null);
 
   /* -------- 初始載入 storage 內的權限矩陣 -------- */
   const loadPerms = React.useCallback(async () => {
@@ -437,76 +415,18 @@ export function UsersConsoleContent({
 
   /* -------- 帳號 (新增 / 編輯) handlers -------- */
 
-  /** 從帳號表單開啟「新增學校」modal (疊在帳號 modal 之上) */
-  const openCreateClient = React.useCallback(() => {
-    setClientModal({ open: true, initial: EMPTY_CLIENT_FORM });
-  }, []);
-
   /**
-   * 建立學校 — 寫入 Supabase + localStorage, 然後把新學校回填到帳號表單
+   * 開啟「新增帳號」modal — 預設角色為 client。
    *
-   * 為什麼自己寫而不是直接呼叫 ClientsConsoleContent 的 handleSave:
-   * - 兩個頁面的 client list 來源不同 (這裡是 props.clients, 那邊是 storage)
-   * - 這裡需要的是「建立後回填 clientId」而不是「更新列表」
+   * ⚠️ 所屬學校 (clientId) 已於 2026-11 從 UI 移除 ——
+   *    這裡仍帶入「目前登入者的 clientId」當預設值, 讓新帳號自動落在
+   *    管理員自己的學校底下 (資料隔離根), 而不是讓使用者手動指定。
+   *    跨機構角色 (super_admin / system_admin) 沒有 clientId → 留 null
+   *    (cbl_users.client_id 可空, 刻意不屬於任何學校)。
    */
-  const handleSaveClient = React.useCallback(
-    async (state: ClientFormState) => {
-      setIsSavingClient(true);
-      try {
-        const { STORAGE } = await import('@/lib/storage');
-        const { supabaseClients } = await import('@/lib/supabase-clients');
-
-        const now = new Date().toISOString();
-        const newClient: Client = {
-          id: STORAGE.genId('client'),
-          name: state.name,
-          email: state.email,
-          phone: state.phone,
-          address: state.address,
-          logo: state.logo || null,
-          primaryColor: state.primaryColor,
-          academicYear: state.academicYear,
-          status: state.status,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        const result = await supabaseClients.add(newClient);
-        if (!result.success) {
-          console.error('[UsersConsole] supabaseClients.add failed:', result.error);
-          toast.error(`新增學校失敗：${result.error ?? '未知錯誤'}`);
-          return;
-        }
-
-        STORAGE.clients.add(newClient);
-        window.dispatchEvent(new CustomEvent('cbl-clients-refresh'));
-
-        // 回填到帳號表單的「所屬學校」
-        setPendingClientId(newClient.id);
-        setAccountModal((p) => ({
-          ...p,
-          initial: { ...p.initial, clientId: newClient.id },
-        }));
-
-        setClientModal((p) => ({ ...p, open: false }));
-        toast.success(`學校 ${state.name} 新增成功！`);
-      } catch (err) {
-        console.error('[UsersConsole] handleSaveClient error:', err);
-        const msg = err instanceof Error ? err.message : String(err);
-        toast.error(`新增學校失敗: ${msg}`);
-      } finally {
-        setIsSavingClient(false);
-      }
-    },
-    [toast],
-  );
-
-  /** 開啟「新增帳號」modal — 預設角色為 client, 機構預設帶入目前登入者的 clientId */
   const openAddAccount = React.useCallback(() => {
     const defaultClientId =
-      users.find((u) => u.id === currentUserId)?.clientId ??
-      clients[0]?.id ??
-      null;
+      users.find((u) => u.id === currentUserId)?.clientId ?? null;
     setAccountModal({
       open: true,
       mode: 'add',
@@ -516,7 +436,7 @@ export function UsersConsoleContent({
         clientId: defaultClientId,
       },
     });
-  }, [users, currentUserId, clients]);
+  }, [users, currentUserId]);
 
   /** 開啟「編輯帳號」modal — 預填現有密碼 (遮罩顯示，按眼查看，方便核對 Vercel 登入問題) */
   const openEditAccount = React.useCallback((u: User) => {
@@ -527,6 +447,7 @@ export function UsersConsoleContent({
       initial: {
         name: u.name,
         phone: u.phone,
+        contactPhone: u.contactPhone ?? '',
         // 預填現有明碼，modal 內以 type=password 顯示為 ••••，按眼才明文
         password: u.password ?? '',
         email: u.email ?? '',
@@ -584,11 +505,13 @@ export function UsersConsoleContent({
           }
 
           const emailValue = state.email.trim();
+          const contactValue = state.contactPhone.trim();
 
           // localStorage patch — User.email 是 string | undefined (留空 = 不設定)
           const localPatch: Partial<User> = {
             name: state.name,
             phone: state.phone,
+            contactPhone: contactValue || undefined,
             email: emailValue || undefined,
             role: state.role,
             clientId: state.clientId ?? undefined,
@@ -597,10 +520,11 @@ export function UsersConsoleContent({
             ...(password ? { password } : {}),
           };
 
-          // Supabase patch — email / client_id / company_id 欄位可為 null (DB 允許)
+          // Supabase patch — email / client_id / company_id / contact_phone 欄位可為 null (DB 允許)
           const sbPatch = {
             name: state.name,
             phone: state.phone,
+            contactPhone: contactValue || null,
             email: emailValue || null,
             role: state.role,
             clientId: state.clientId ?? null,
@@ -625,11 +549,13 @@ export function UsersConsoleContent({
         } else {
           const newId = STORAGE.genId('user');
           const emailValue = state.email.trim();
+          const contactValue = state.contactPhone.trim();
 
           // localStorage 版本 (email / clientId 為 string | undefined)
           const localPayload: User = {
             id: newId,
             phone: state.phone,
+            contactPhone: contactValue || undefined,
             password: state.password,
             role: state.role,
             name: state.name,
@@ -916,26 +842,12 @@ export function UsersConsoleContent({
         mode={accountModal.mode}
         initial={accountModal.initial}
         existingPhones={users.map((u) => u.phone)}
-        clients={clients}
         companies={companies}
-        onCreateClient={openCreateClient}
-        preselectClientId={pendingClientId}
         currentUserId={currentUserId}
         currentUserRole={currentUserRole}
         isSaving={isSavingAccount}
         onSave={handleSaveAccount}
         onClose={() => setAccountModal((p) => ({ ...p, open: false }))}
-      />
-
-      {/* 「＋ 在此新增學校…」— 疊在帳號 modal 之上 (z-[60]) */}
-      <ClientFormModal
-        open={clientModal.open}
-        mode="add"
-        initial={clientModal.initial}
-        isSaving={isSavingClient}
-        onSave={handleSaveClient}
-        onClose={() => setClientModal((p) => ({ ...p, open: false }))}
-        zIndexClass="z-[60]"
       />
     </div>
   );
@@ -1088,20 +1000,12 @@ function DataTable({
 
               {/* 電話 (登入帳號) — 可複製 */}
               <td className="px-3 py-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                      navigator.clipboard.writeText(u.phone).catch(() => {});
-                    }
-                  }}
+                <CopyChip
+                  value={u.phone}
                   title="複製登入帳號"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                >
-                  <Phone width={9} height={9} />
-                  {u.phone}
-                  <Copy width={9} height={9} />
-                </button>
+                  label="登入帳號"
+                  icon={<Phone width={9} height={9} />}
+                />
               </td>
 
               {/* 已授權功能 chip 摘要 */}

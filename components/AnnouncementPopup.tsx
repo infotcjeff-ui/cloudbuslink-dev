@@ -47,6 +47,8 @@ import { Info, AlertTriangle, AlertCircle, ChevronRight, ChevronLeft } from 'luc
 
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
+import { getAnnouncementAudience } from '@/lib/announcement-audience';
+import { isPersonalizedNannyPath } from '@/lib/nanny-path';
 import type { Announcement } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import {
@@ -83,9 +85,15 @@ const HOME_PATHS_BY_ROLE: Record<string, string[]> = {
  *
  * 為什麼不用 startsWith:
  * `/parents/trips` 也以 `/parents` 開頭, 但那不是主頁 — 进入班次頁不應該彈公告。
+ * 保姆已改為個人化路徑 (/{slug}/route, slug = accountName, 如 /wendy/route),
+ * 舊版 /nanny 保留相容 (登入後會 redirect 過去, 但直接進舊路徑也要能彈公告)。
  */
 function isHomePath(role: string | undefined, pathname: string): boolean {
   if (!role) return false;
+  if (role === 'nanny') {
+    if (pathname === '/nanny' || pathname === '/nanny/portal') return true;
+    return isPersonalizedNannyPath(pathname) && /\/route\/?$/.test(pathname);
+  }
   const paths = HOME_PATHS_BY_ROLE[role];
   if (!paths) return false;
   return paths.includes(pathname);
@@ -142,6 +150,12 @@ export default function AnnouncementPopup() {
   const isSuperAdmin = user?.role === 'super_admin';
   const clientId = user?.clientId || '';
 
+  // 受眾上下文 (系統公告 → 全部看得到; 繳費公告 → 只有被選家長看得到)
+  const audience = React.useMemo(
+    () => getAnnouncementAudience(user, isSuperAdmin),
+    [user, isSuperAdmin],
+  );
+
   // dialog 是否正在開啟 (ref — 避免 stale closure, 也讓 load() 能即時判斷)
   const openRef = React.useRef(false);
   React.useEffect(() => { openRef.current = open; }, [open]);
@@ -182,7 +196,7 @@ export default function AnnouncementPopup() {
       setItems([]);
       return;
     }
-    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
+    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin, audience);
     // 新到舊 (startDate DESC)
     const sorted = [...active].sort((a, b) =>
       b.startDate.localeCompare(a.startDate)
@@ -192,7 +206,7 @@ export default function AnnouncementPopup() {
     if (!openRef.current) {
       setItems(sorted);
     }
-  }, [user, clientId, isSuperAdmin]);
+  }, [user, clientId, isSuperAdmin, audience]);
 
   React.useEffect(() => {
     load();
@@ -232,6 +246,7 @@ export default function AnnouncementPopup() {
         user.id,
         clientId,
         isSuperAdmin,
+        audience,
       );
       if (list.length === 0) return;
 
@@ -246,6 +261,7 @@ export default function AnnouncementPopup() {
       user.id,
       clientId,
       isSuperAdmin,
+      audience,
     );
     if (listNow.length > 0) {
       tryAutoShow();
@@ -262,7 +278,7 @@ export default function AnnouncementPopup() {
     return () => {
       cancelled = true;
     };
-  }, [user, clientId, isSuperAdmin, pathname, syncFromDb]);
+  }, [user, clientId, isSuperAdmin, pathname, syncFromDb, audience]);
 
   // 監聽 dropdown 發出的開啟事件。
   React.useEffect(() => {
@@ -275,7 +291,7 @@ export default function AnnouncementPopup() {
       // 優先用 announcement id 定位 (dropdown 的清單是 getActive,
       // popup 的清單可能不同 → index 會對不上)。
       if (detail.id) {
-        const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
+        const active = STORAGE.announcements.getActive(clientId, isSuperAdmin, audience);
         const sorted = [...active].sort((a, b) =>
           b.startDate.localeCompare(a.startDate)
         );
@@ -297,7 +313,7 @@ export default function AnnouncementPopup() {
     };
     window.addEventListener(OPEN_EVENT, onOpen);
     return () => window.removeEventListener(OPEN_EVENT, onOpen);
-  }, [load, clientId, isSuperAdmin]);
+  }, [load, clientId, isSuperAdmin, audience]);
 
   // 監聽公告資料更新事件 (來自 cbl-admin-setting/announcements 頁面)
   React.useEffect(() => {

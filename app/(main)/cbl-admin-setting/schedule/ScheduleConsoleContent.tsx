@@ -31,6 +31,9 @@ import {
   Sun,
   Sunset,
   Sparkles,
+  History,
+  FlaskConical,
+  Eraser,
   FileSpreadsheet,
   ChevronRight,
   AlertTriangle,
@@ -39,10 +42,10 @@ import {
   PowerOff,
   Trash2,
   Clock,
-  Copy,
   Hash,
   User as UserIcon,
   CopyPlus,
+  Lock,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -83,6 +86,7 @@ const TAB_OPTIONS: FilterTabOption<ScheduleTab>[] = [
   { value: 'morning',   label: '早班',     icon: <Sun width={11} height={11} /> },
   { value: 'afternoon', label: '午班',     icon: <Sunset width={11} height={11} /> },
   { value: 'custom',    label: '自訂',     icon: <Sparkles width={11} height={11} /> },
+  { value: 'history',   label: '過往紀錄', icon: <History width={11} height={11} /> },
 ];
 
 const TRIP_TYPE_LABEL: Record<TripType, string> = {
@@ -162,7 +166,6 @@ function describeConflict(c: TripConflict): string {
 /* -------------------------------------------------------------------------- */
 
 export interface ScheduleConsoleContentProps {
-  clientId: string;
   /** 注入 useScheduleTrips 的結果, 由 page.tsx 控制, 提高可測試性 */
   data: {
     trips: TripWithRelations[];
@@ -199,11 +202,17 @@ export interface ScheduleConsoleContentProps {
   onBatchChangeStatus: (ids: string[], status: TripStatus) => void;
   onBatchCancel: (ids: string[]) => void;
   onBatchDuplicate: (ids: string[]) => void;
+  /** 封存學年 → 唯讀 (停用所有會改動資料的按鈕) */
+  readOnly?: boolean;
+  /** 一鍵測試資料 (僅 localStorage, 不推雲端) */
+  onSeedTestData?: () => void;
+  onClearTestData?: () => void;
+  testTripCount?: number;
+  seedingTestData?: boolean;
 }
 
 export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
   const {
-    clientId,
     data,
     filter,
     onFilterChange,
@@ -223,6 +232,11 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
     onBatchChangeStatus,
     onBatchCancel,
     onBatchDuplicate,
+    readOnly = false,
+    onSeedTestData,
+    onClearTestData,
+    testTripCount = 0,
+    seedingTestData = false,
   } = props;
 
   const [page, setPage] = React.useState(1);
@@ -244,9 +258,23 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
     };
   }, [data.trips, data.conflicts.length]);
 
-  /* 排序 */
+  /* 排序 — 過往紀錄 tab: 未完成置頂 / 已完成置底, 同組內日期新→舊, 同日再按早→午→自訂 */
   const sorted = React.useMemo(() => {
     const list = [...data.trips];
+    if (tab === 'history') {
+      const typeOrder: Record<string, number> = { morning: 0, afternoon: 1, custom: 2 };
+      list.sort((a, b) => {
+        const aDone = a.trip.status === 'completed' ? 1 : 0;
+        const bDone = b.trip.status === 'completed' ? 1 : 0;
+        if (aDone !== bDone) return aDone - bDone;
+        if (a.trip.date !== b.trip.date) return b.trip.date.localeCompare(a.trip.date);
+        const ta = typeOrder[a.trip.type] ?? 99;
+        const tb = typeOrder[b.trip.type] ?? 99;
+        if (ta !== tb) return ta - tb;
+        return a.trip.plannedStartTime.localeCompare(b.trip.plannedStartTime);
+      });
+      return list;
+    }
     list.sort((a, b) => {
       switch (sort) {
         case 'start_desc':
@@ -267,7 +295,7 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
       }
     });
     return list;
-  }, [data.trips, sort]);
+  }, [data.trips, sort, tab]);
 
   /* 分頁 */
   const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
@@ -388,6 +416,23 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
         </div>
       </motion.div>
 
+      {/* L1.5. 封存學年提示 (決策 D6: 歷史學年唯讀) */}
+      {readOnly && (
+        <div
+          className="flex items-start gap-2 px-4 py-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-xs dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+          role="status"
+        >
+          <Lock className="w-4 h-4 flex-shrink-0 mt-px" />
+          <div>
+            <p className="font-semibold">目前檢視的學年為唯讀模式</p>
+            <p className="mt-0.5 opacity-80">
+              你可以查看班次、出席記錄並匯出報表, 但不能新增、編輯、刪除或改變班次狀態。
+              切回現行學年即可繼續編輯。
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* L2. Action Toolbar */}
       <div className="flex items-center gap-2 flex-wrap px-5 py-3 rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] dark:bg-slate-900 dark:border-slate-700">
         <Button
@@ -413,6 +458,8 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
               size="sm"
               startIcon={<PowerOff width={12} height={12} />}
               onClick={() => onBatchCancel(selectedIds)}
+              disabled={readOnly}
+              title={readOnly ? '目前檢視的學年為唯讀 — 不能批次取消班次' : undefined}
             >
               批次取消
             </Button>
@@ -421,18 +468,49 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
               size="sm"
               startIcon={<CopyPlus width={12} height={12} />}
               onClick={() => onBatchDuplicate(selectedIds)}
+              disabled={readOnly}
+              title={readOnly ? '目前檢視的學年為唯讀 — 不能複製班次' : undefined}
             >
               批次複製
             </Button>
           </>
         )}
 
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
+          {/* 一鍵測試資料 */}
+          {onSeedTestData && (
+            <Button
+              variant="secondary"
+              size="sm"
+              startIcon={<FlaskConical width={12} height={12} />}
+              onClick={onSeedTestData}
+              disabled={readOnly || seedingTestData}
+              title={readOnly ? '目前檢視的學年為唯讀 — 不能新增測試資料' : '隨機生成 10 個測試班次 (校巴/保姆/學生/打卡, 只存本機不推雲端)'}
+            >
+              {seedingTestData ? '生成中…' : '一鍵新增測試資料'}
+            </Button>
+          )}
+          {onClearTestData && testTripCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              startIcon={<Eraser width={12} height={12} />}
+              onClick={onClearTestData}
+              disabled={readOnly || seedingTestData}
+              title="只刪除 test- 前綴的測試資料, 不碰真實資料"
+            >
+              移除測試資料 ({testTripCount})
+            </Button>
+          )}
           <Button
             variant="primary"
             size="sm"
             startIcon={<Plus width={12} height={12} />}
             onClick={onOpenAdd}
+            disabled={readOnly}
+            title={
+              readOnly ? '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增' : undefined
+            }
           >
             新增班次
           </Button>
@@ -468,8 +546,64 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
           {(() => {
             // 指定 ISO 日期 (非 today/tomorrow/yesterday/past7/all) → 顯示 date input
             const DR = filter.dateRange;
+            const isHistoryTab = tab === 'history';
             const isCustomDate =
               !!DR && !['today', 'tomorrow', 'yesterday', 'past7', 'all'].includes(DR);
+            // 過往紀錄 tab: 日期範圍固定為「所有非今天」, 隱藏日期切換避免誤導
+            if (isHistoryTab) {
+              return (
+                <div className="ml-auto flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500 dark:text-slate-400">
+                    所有非今天班次 · 未完成置頂 / 已完成置底
+                  </span>
+                  {/* 狀態篩選 */}
+                  <select
+                    aria-label="狀態篩選"
+                    value={filter.status ?? 'all'}
+                    onChange={(e) => {
+                      const v = e.target.value as ScheduleFilter['status'];
+                      onFilterChange({ ...filter, status: v === 'all' ? 'all' : v });
+                      setPage(1);
+                    }}
+                    className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                  >
+                    <option value="all">全部狀態</option>
+                    <option value="scheduled">尚未發車</option>
+                    <option value="in_progress">進行中</option>
+                    <option value="completed">已完成</option>
+                    <option value="cancelled">已取消</option>
+                  </select>
+
+                  {/* Search */}
+                  <div className="relative min-w-[220px]">
+                    <Search
+                      width={11}
+                      height={11}
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none"
+                    />
+                    <input
+                      type="text"
+                      value={filter.q}
+                      onChange={(e) => {
+                        onFilterChange({ ...filter, q: e.target.value });
+                        setPage(1);
+                      }}
+                      placeholder="搜尋車牌 / 司機 / 保姆 / 學生 / 站點…"
+                      className="h-8 w-full rounded-md border border-slate-200 bg-white pl-7 pr-7 text-[12px] text-slate-700 placeholder:text-slate-400 cursor-text focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-300 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+                    />
+                    {filter.q && (
+                      <button
+                        onClick={() => onFilterChange({ ...filter, q: '' })}
+                        aria-label="清除搜尋"
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            }
             return (
           <div className="ml-auto flex items-center gap-2">
             {/* 日期快速切換 */}
@@ -510,6 +644,24 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
                 className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
               />
             )}
+
+            {/* 狀態篩選 */}
+            <select
+              aria-label="狀態篩選"
+              value={filter.status ?? 'all'}
+              onChange={(e) => {
+                const v = e.target.value as ScheduleFilter['status'];
+                onFilterChange({ ...filter, status: v === 'all' ? 'all' : v });
+                setPage(1);
+              }}
+              className="h-8 rounded-md border border-slate-200 bg-white px-2 text-[12px] text-slate-700 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
+            >
+              <option value="all">全部狀態</option>
+              <option value="scheduled">尚未發車</option>
+              <option value="in_progress">進行中</option>
+              <option value="completed">已完成</option>
+              <option value="cancelled">已取消</option>
+            </select>
 
             {/* 排序 */}
             <select
@@ -617,6 +769,8 @@ export function ScheduleConsoleContent(props: ScheduleConsoleContentProps) {
                 onDelete={onDelete}
                 onDuplicate={onDuplicate}
                 onChangeStatus={onChangeStatus}
+                readOnly={readOnly}
+                highlightCompleted={tab === 'history'}
               />
             )}
           </AnimatePresence>
@@ -708,6 +862,8 @@ function DataTable({
   onDelete,
   onDuplicate,
   onChangeStatus,
+  readOnly = false,
+  highlightCompleted = false,
 }: {
   rows: TripWithRelations[];
   progress: Record<string, TripProgress>;
@@ -723,6 +879,10 @@ function DataTable({
   onDelete: (t: TripWithRelations) => void;
   onDuplicate: (t: TripWithRelations) => void;
   onChangeStatus: (t: TripWithRelations, status: TripStatus) => void;
+  /** 封存學年 → 唯讀 (停用編輯/複製/刪除) */
+  readOnly?: boolean;
+  /** 過往紀錄 tab → 已完成班次以透綠底色區分 */
+  highlightCompleted?: boolean;
 }) {
   return (
     <table
@@ -757,7 +917,9 @@ function DataTable({
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             出席進度
           </th>
-          {/* 狀態欄暫時隱藏 (需求 #4) — 保留 onChangeStatus / DetailDrawer 邏輯, 只藏 listing */}
+          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
+            狀態
+          </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-right dark:bg-slate-800/95">
             操作
           </th>
@@ -775,9 +937,11 @@ function DataTable({
               key={trip.id}
               className={cn(
                 'border-b border-slate-100 last:border-b-0 transition-colors dark:border-slate-700/80',
-                selected
-                  ? 'bg-violet-50/60 dark:bg-violet-950/20'
-                  : 'hover:bg-slate-50/50 dark:hover:bg-slate-800/50',
+                highlightCompleted && trip.status === 'completed'
+                  ? 'bg-emerald-500/10 hover:bg-emerald-500/15 dark:bg-emerald-400/10 dark:hover:bg-emerald-400/15'
+                  : selected
+                    ? 'bg-violet-50/60 dark:bg-violet-950/20'
+                    : 'hover:bg-slate-50/50 dark:hover:bg-slate-800/50',
                 conflicts.length > 0 && 'bg-rose-50/40 dark:bg-rose-950/20',
               )}
             >
@@ -857,20 +1021,89 @@ function DataTable({
               <td className="px-3 py-2.5">
                 <AttendanceProgressBar prog={prog} />
               </td>
-              {/* 狀態欄暫時隱藏 (需求 #4) — 保留 onChangeStatus / DetailDrawer 邏輯, 只藏 listing */}
+              {/* 狀態 (可直接切換) */}
+              <td className="px-3 py-2.5">
+                <div className="relative w-fit">
+                  <button
+                    type="button"
+                    onClick={() => setStatusMenuFor(statusMenuFor === trip.id ? null : trip.id)}
+                    disabled={readOnly}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 不能改變班次狀態' : '點擊切換狀態'}
+                    className={cn(
+                      'rounded-full px-2 py-0.5 text-[10px] font-medium inline-flex items-center gap-1',
+                      statusPillClass(trip.status),
+                      readOnly ? 'cursor-not-allowed opacity-80' : 'cursor-pointer hover:opacity-80',
+                    )}
+                  >
+                    <span className={cn('h-1.5 w-1.5 rounded-full', {
+                      'bg-slate-500': trip.status === 'scheduled',
+                      'bg-emerald-500': trip.status === 'in_progress',
+                      'bg-blue-500': trip.status === 'completed',
+                      'bg-rose-500': trip.status === 'cancelled',
+                    })} />
+                    {STATUS_LABEL[trip.status]}
+                  </button>
+                  {statusMenuFor === trip.id && !readOnly && (
+                    <>
+                      <div
+                        className="fixed inset-0 z-20"
+                        onClick={() => setStatusMenuFor(null)}
+                      />
+                      <div className="absolute left-0 top-full z-30 mt-1 w-28 overflow-hidden rounded-md border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-900">
+                        {(['scheduled', 'in_progress', 'completed', 'cancelled'] as TripStatus[]).map((s) => (
+                          <button
+                            key={s}
+                            type="button"
+                            onClick={() => {
+                              setStatusMenuFor(null);
+                              if (s !== trip.status) onChangeStatus(row, s);
+                            }}
+                            className={cn(
+                              'flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] hover:bg-slate-50 dark:hover:bg-slate-800',
+                              s === trip.status ? 'font-semibold text-slate-900 dark:text-slate-100' : 'text-slate-600 dark:text-slate-300',
+                            )}
+                          >
+                            <span className={cn('h-1.5 w-1.5 rounded-full', {
+                              'bg-slate-500': s === 'scheduled',
+                              'bg-emerald-500': s === 'in_progress',
+                              'bg-blue-500': s === 'completed',
+                              'bg-rose-500': s === 'cancelled',
+                            })} />
+                            {STATUS_LABEL[s]}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </td>
               {/* 操作 */}
               <td className="px-3 py-2.5">
                 <div className="flex items-center justify-end gap-1 opacity-80">
                   <IconButton onClick={() => onView(row)} title="檢視 / 編輯班次">
                     <Eye width={13} height={13} />
                   </IconButton>
-                  <IconButton onClick={() => onEdit(row)} title="編輯班次">
+                  {/* ⚠️ 封存學年 → 唯讀 (決策 D6) */}
+                  <IconButton
+                    onClick={() => onEdit(row)}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能編輯' : '編輯班次'}
+                    disabled={readOnly}
+                  >
                     <Pencil width={13} height={13} />
                   </IconButton>
-                  <IconButton onClick={() => onDuplicate(row)} title="複製到其他日期">
+                  <IconButton
+                    onClick={() => onDuplicate(row)}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 不能複製班次' : '複製到其他日期'}
+                    disabled={readOnly}
+                  >
                     <CopyPlus width={13} height={13} />
                   </IconButton>
-                  <IconButton onClick={() => onDelete(row)} title="刪除班次" variant="danger">
+                  <IconButton
+                    onClick={() => onDelete(row)}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 不能刪除班次' : '刪除班次'}
+                    variant="danger"
+                    disabled={readOnly}
+                  >
                     <Trash2 width={13} height={13} />
                   </IconButton>
                 </div>
@@ -963,8 +1196,10 @@ function EmptyState({
   dateRange: string;
   onAdd: () => void;
 }) {
+  const isHistory = tab === 'history';
   const dateLabel =
-    dateRange === 'today' ? '今日'
+    isHistory ? ''
+    : dateRange === 'today' ? '今日'
     : dateRange === 'tomorrow' ? '明日'
     : dateRange === 'yesterday' ? '昨日'
     : dateRange === 'past7' ? '過去 7 天'

@@ -14,7 +14,7 @@
  * 路由:
  *   /system-admin-setting                     → 概覽
  *   /system-admin-setting/connection          → 連線 (Supabase + 環境變數)
- *   /system-admin-setting/integrations        → 整合 (GPS / 推送 / 郵件)
+ *   /system-admin-setting/integrations        → API 密鑰 (GPS / 推送 / 郵件, server-only)
  *   /system-admin-setting/sync                → 同步與快取
  *   /system-admin-setting/accounts            → 帳號 (system_admin 管理)
  */
@@ -22,16 +22,14 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-  LayoutDashboard, Database, Satellite, RefreshCw, ShieldAlert,
+  LayoutDashboard, KeyRound, ShieldAlert,
 } from 'lucide-react';
 import { AdminShell, type AdminTabItem } from '@/components/admin/AdminShell';
 import { useAuth } from '@/lib/hooks';
 
 const TABS: AdminTabItem[] = [
   { id: 'overview',      label: '概覽',       path: '/system-admin-setting',              icon: LayoutDashboard },
-  { id: 'connection',    label: '連線',       path: '/system-admin-setting/connection',    icon: Database },
-  { id: 'integrations',  label: '整合',       path: '/system-admin-setting/integrations',  icon: Satellite },
-  { id: 'sync',          label: '同步與快取', path: '/system-admin-setting/sync',          icon: RefreshCw },
+  { id: 'integrations',  label: 'API 密鑰',    path: '/system-admin-setting/integrations',  icon: KeyRound },
   { id: 'accounts',      label: '帳號',       path: '/system-admin-setting/accounts',      icon: ShieldAlert },
 ];
 

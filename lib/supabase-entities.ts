@@ -25,7 +25,7 @@
 
 import { camelize, snakify } from './supabase-case';
 import { alignPayloadClientId } from './supabase-client-id';
-import { markSynced, unmarkSynced, clearPendingPatch } from './storage';
+import { markSynced, unmarkSynced, clearPendingPatch, markPendingPatch, getPendingPatches } from './storage';
 import type { Student, Parent, Nanny, Route } from './types';
 
 /** entityKey — 對應 lib/storage.ts 的 STORAGE 屬性名 (同步記錄用) */
@@ -59,9 +59,10 @@ async function rowExists(table: string, id: string): Promise<boolean> {
 async function insertWithColumnFallback(
   table: string,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; dropped?: string[] }> {
   const { supabase } = await import('./supabase');
   let payload = body;
+  const dropped: string[] = [];
 
   // ⚠️ client_id 有 FK → cbl_clients(id), 而且這些表的 client_id 是 NOT NULL。
   //    空字串 '' 一定撞 FK (例: cbl_parents_client_id_fkey) → 整筆 insert 失敗。
@@ -70,11 +71,18 @@ async function insertWithColumnFallback(
 
   for (let attempt = 0; attempt < 12; attempt++) {
     const { error } = await supabase.from(table).insert(payload);
-    if (!error) return { success: true };
+    if (!error) {
+      if (dropped.length > 0) {
+        console.warn(
+          `[Supabase] ${table}.insert 已略過 live schema 沒有的欄位: ${dropped.join(', ')}`,
+        );
+      }
+      return { success: true, dropped };
+    }
 
     const code = (error as { code?: string }).code;
     // 23505 = unique violation → 已經存在, 視為成功
-    if (code === '23505') return { success: true };
+    if (code === '23505') return { success: true, dropped };
 
     // 42703 = undefined column → 移除該欄位再試
     if (code === '42703') {
@@ -84,6 +92,7 @@ async function insertWithColumnFallback(
         const next = { ...payload };
         delete next[colName];
         payload = next;
+        dropped.push(colName);
         continue;
       }
       console.warn(`[Supabase] insert ${table} failed (unknown column):`, error.message);
@@ -150,7 +159,7 @@ async function updateWithColumnFallback(
   table: string,
   id: string,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; dropped?: string[] }> {
   const { supabase } = await import('./supabase');
   let payload = body;
   const dropped: string[] = [];
@@ -185,7 +194,7 @@ async function updateWithColumnFallback(
           `[Supabase] ${table}.update 已略過 live schema 沒有的欄位: ${dropped.join(', ')}`,
         );
       }
-      return { success: true };
+      return { success: true, dropped };
     }
 
     const colName = parseMissingColumn(error);
@@ -285,7 +294,7 @@ export const supabaseStudents = {
   },
 
   /** 新增學生 (會先確保 bus 存在) */
-  async add(student: Student): Promise<{ success: boolean; error?: string }> {
+  async add(student: Student): Promise<{ success: boolean; error?: string; dropped?: string[] }> {
     await ensureBusExists(student.busId);
 
     const { clientId, id, ...rest } = student;
@@ -294,14 +303,38 @@ export const supabaseStudents = {
       id,
       client_id: clientId,
     });
-    if (res.success) markSynced('students', id);
-    return res;
+    if (!res.success) return res;
+
+    // ⚠️ 若欄位被降級丟掉 (例: migration 0015 還沒套 → school_type 不存在),
+    //   雲端其實沒收到那些欄位 → 記成「待推送」, 等 schema 更新後再補推。
+    const dropped = res.dropped ?? [];
+    if (dropped.length > 0) {
+      const droppedSet = new Set(dropped);
+      const pending: Record<string, unknown> = {};
+      if (droppedSet.has('school_type')) pending.schoolType = student.schoolType;
+      if (droppedSet.has('school_district')) pending.schoolDistrict = student.schoolDistrict;
+      if (droppedSet.has('school_name')) pending.schoolName = student.schoolName;
+      // 學年欄位 (migration 0017) — 同樣記成待推送, 等 schema 更新後自動補推。
+      // ⚠️ 這很重要: 沒有補推的話, 這筆學生在雲端會是「不屬於任何學年」的孤兒。
+      if (droppedSet.has('academic_year')) pending.academicYear = student.academicYear;
+      if (droppedSet.has('person_key')) pending.personKey = student.personKey;
+      if (Object.keys(pending).length > 0) {
+        markPendingPatch('students', id, pending);
+      }
+      console.warn(
+        `[Supabase] student ${id} 有欄位沒寫進雲端 (schema 尚未更新), 已記為待推送: ${dropped.join(', ')}`,
+      );
+      return { success: true, dropped };
+    }
+
+    markSynced('students', id);
+    return { success: true };
   },
 
   async update(
     id: string,
     patch: Partial<Student>,
-  ): Promise<{ success: boolean; error?: string }> {
+  ): Promise<{ success: boolean; error?: string; dropped?: string[] }> {
     if (patch.busId !== undefined) await ensureBusExists(patch.busId);
 
     const res = await updateWithColumnFallback(
@@ -312,6 +345,17 @@ export const supabaseStudents = {
     if (!res.success) {
       console.error('[Supabase] Failed to update student:', res.error);
       return res;
+    }
+    // ⚠️ 只有「所有欄位都真的寫進去了」才能清除待推送紀錄。
+    //   若 live DB 還沒有某個欄位 (例: migration 0015 還沒套 → school_type 不存在),
+    //   欄位降級機制會把那欄丟掉 → 雲端其實沒收到。
+    //   → 這時必須保留 pending, 等 migration 套好後才能重推, 否則資料會遺失。
+    const dropped = res.dropped ?? [];
+    if (dropped.length > 0) {
+      console.warn(
+        `[Supabase] student ${id} 有欄位沒寫進雲端 (schema 尚未更新), 保留待推送紀錄: ${dropped.join(', ')}`,
+      );
+      return { success: true, dropped };
     }
     markSynced('students', id);
     // push 成功 → 這筆的「待推送變更」可以清掉了
@@ -331,6 +375,54 @@ export const supabaseStudents = {
     return { success: true };
   },
 };
+
+/* -------------------------------------------------------------------------- */
+/*  重推「待推送的本機變更」                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 把學生身上「待推送」的欄位重新推到雲端。
+ *
+ * 為什麼需要:
+ *   欄位降級機制 (insertWithColumnFallback / updateWithColumnFallback) 會在
+ *   live DB 還沒有該欄位時把它丟掉 — 例如 migration 0015 還沒套,
+ *   cbl_students 就沒有 school_type / school_district / school_name。
+ *
+ *   那時使用者填的學校資料會留在「待推送」紀錄裡 (pending patch)。
+ *   等 migration 套好之後, 這個 function 會把它們補推上去 ——
+ *   否則使用者填的資料會永遠卡在本機, 換裝置就看不到了。
+ *
+ * 回傳: 實際成功補推的筆數。
+ */
+export async function repushPendingStudentPatches(): Promise<number> {
+  const pending = getPendingPatches('students');
+  const ids = Object.keys(pending);
+  if (ids.length === 0) return 0;
+
+  let pushed = 0;
+  for (const id of ids) {
+    const patch = pending[id];
+    if (!patch || Object.keys(patch).length === 0) continue;
+
+    const res = await updateWithColumnFallback(
+      'cbl_students',
+      id,
+      snakify(patch) as Record<string, unknown>,
+    );
+
+    // 仍然有欄位被丟掉 → schema 還是沒跟上 → 保留 pending, 下次再試
+    if (!res.success || (res.dropped && res.dropped.length > 0)) continue;
+
+    markSynced('students', id);
+    clearPendingPatch('students', id);
+    pushed++;
+  }
+
+  if (pushed > 0) {
+    console.log(`[Supabase] 已補推 ${pushed} 筆學生的待推送欄位`);
+  }
+  return pushed;
+}
 
 /* -------------------------------------------------------------------------- */
 /*  Parents 家長                                                               */
@@ -542,15 +634,54 @@ export const supabaseRouteRecords = {
     return { success: true };
   },
 
-  async remove(id: string): Promise<{ success: boolean; error?: string }> {
+  /**
+   * 刪除一筆路線。
+   *
+   * ⚠️ 必須用 .select() 二次驗證有沒有真的刪掉 ——
+   *    PostgREST 對「delete 0 筆」(id 在雲端不存在, 或 RLS 把該 row 過濾掉)
+   *    一樣回傳 200 + 無錯誤, 但實際上什麼都沒刪。
+   *    呼叫端若當成成功 → 雲端那筆還在 → 下一次 sync 又把它拉回來 →
+   *    「刪除後幾秒路線又出現」。
+   *
+   * 所以這裡分成三種結果:
+   *   - 真的刪到 → { success: true, deleted: true }
+   *   - 雲端本來就沒有這筆 → { success: true, deleted: true } (達成目的)
+   *   - 刪不掉 (RLS / FK / 其他) → { success: false, error }
+   */
+  async remove(id: string): Promise<{ success: boolean; deleted?: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
-    const { error } = await supabase.from('cbl_routes').delete().eq('id', id);
+    const { data, error } = await supabase
+      .from('cbl_routes')
+      .delete()
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
     if (error) {
       console.error('[Supabase] Failed to delete route:', error);
-      return { success: false, error: error.message };
+      return { success: false, deleted: false, error: error.message };
+    }
+    if (!data) {
+      // 刪了 0 筆 → 確認雲端是否本來就沒有這筆
+      const { data: existing } = await supabase
+        .from('cbl_routes')
+        .select('id')
+        .eq('id', id)
+        .maybeSingle();
+      if (existing) {
+        // 還在 → DELETE 被 RLS / 規則擋掉 (回傳成功但沒刪)
+        console.warn(`[Supabase] cbl_routes.delete 沒有刪掉 (id=${id}) — 可能被 RLS 擋住`);
+        return {
+          success: false,
+          deleted: false,
+          error: `雲端刪除被拒 (RLS / 權限不足): ${id}`,
+        };
+      }
+      // 雲端本來就沒有 → 目的已達成
+      unmarkSynced('routes', id);
+      return { success: true, deleted: true };
     }
     unmarkSynced('routes', id);
-    return { success: true };
+    return { success: true, deleted: true };
   },
 };
 

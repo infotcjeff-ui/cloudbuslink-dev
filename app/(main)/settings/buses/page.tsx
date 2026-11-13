@@ -11,6 +11,14 @@ import {
   DialogAnimated as Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from '@/components/ui/empty';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
 import { cn } from '@/lib/utils';
@@ -92,12 +100,8 @@ export default function BusesPage() {
           driverId: form.driverId || null,
           gpsDeviceId: null,
           status: form.status,
-          currentLocation: {
-            latitude: 22.3193,
-            longitude: 114.1694,
-            speed: 0,
-            lastUpdated: new Date().toISOString(),
-          },
+          // 未綁 808 設備前不設假定位 — 主頁只顯示 808 真實定位
+          currentLocation: undefined,
           createdAt: new Date().toISOString(),
         });
         toast.success(`校巴「${plate}」已新增`);
@@ -145,12 +149,26 @@ export default function BusesPage() {
       </div>
 
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-3">
-            <Bus className="w-7 h-7 text-muted-foreground" />
-          </div>
-          <p className="text-sm text-muted-foreground">未有任何校巴</p>
-        </div>
+        <Empty className="border-0 bg-transparent py-10">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Bus className="w-6 h-6" />
+            </EmptyMedia>
+            <EmptyTitle>{search ? '沒有符合條件的校巴' : '未有任何校巴'}</EmptyTitle>
+            <EmptyDescription>
+              {search
+                ? '試試其他車牌號碼, 或清除搜尋條件。'
+                : '新增第一輛校巴後, 這裡會列出所有校巴資料。'}
+            </EmptyDescription>
+          </EmptyHeader>
+          {search && (
+            <EmptyContent>
+              <Button variant="outline" size="sm" onClick={() => setSearch('')}>
+                清除搜尋
+              </Button>
+            </EmptyContent>
+          )}
+        </Empty>
       ) : (
         <div className="space-y-2">
           {filtered.map(b => {
@@ -160,7 +178,7 @@ export default function BusesPage() {
               : STORAGE.students.getByClient(scope.clientId)
             ).filter(s => s.busId === b.id).length;
             return (
-              <Card key={b.id}>
+              <Card key={b.id} className="cursor-pointer active:scale-[0.99] transition" onClick={() => router.push(`/bus/${b.id}`)}>
                 <CardContent className="p-3">
                   <div className="flex items-center gap-3">
                     <div className={cn(
@@ -183,10 +201,10 @@ export default function BusesPage() {
                         <span>🎒 {studentCount} 學生</span>
                       </div>
                     </div>
-                    <button onClick={() => openEdit(b)} className="p-2 rounded-full active:bg-muted">
+                    <button onClick={(e) => { e.stopPropagation(); openEdit(b); }} className="p-2 rounded-full active:bg-muted" aria-label="編輯校巴">
                       <Edit2 className="w-3.5 h-3.5" />
                     </button>
-                    <button onClick={() => setDeleteId(b.id)} className="p-2 rounded-full active:bg-destructive/10 text-destructive">
+                    <button onClick={(e) => { e.stopPropagation(); setDeleteId(b.id); }} className="p-2 rounded-full active:bg-destructive/10 text-destructive" aria-label="刪除校巴">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>

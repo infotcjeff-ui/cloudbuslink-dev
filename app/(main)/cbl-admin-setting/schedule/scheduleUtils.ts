@@ -126,7 +126,10 @@ export function joinTripRelationsWithMaps(
   maps: TripLookupMaps,
 ): TripWithRelations {
   const bus = maps.busById.get(trip.busId);
-  const driver = bus?.driverId ? maps.driverById.get(bus.driverId) : undefined;
+  // 司機: 班次快照優先 (建班時表單所選值, 選車時已按該車綁定自動填入),
+  // 舊班次快照為空才退回現時校巴綁定。
+  const driverId = trip.driverIdSnapshot ?? bus?.driverId;
+  const driver = driverId ? maps.driverById.get(driverId) : undefined;
   // 保姆三級解析: 1) trip.nannyId 精確匹配 → 2) 該校巴已綁定的保姆 fallback
   // (雲端 trips 同步時 nanny 可能被洗掉/不同步, 或舊班次 nannyId 為空)
   const nanny =
@@ -254,13 +257,22 @@ export function summarizeProgress(
 export function applyScheduleFilter(
   items: TripWithRelations[],
   filter: ScheduleFilter,
-  tab: 'all' | 'morning' | 'afternoon' | 'custom',
+  tab: 'all' | 'morning' | 'afternoon' | 'custom' | 'history',
   students: Student[] = [],
 ): TripWithRelations[] {
   const q = filter.q.trim().toLowerCase();
+  const today = todayIso();
   return items.filter((row) => {
     const trip = row.trip;
-    if (tab !== 'all' && trip.type !== tab) return false;
+    // 過往紀錄: 所有非今天的班次 (已完成 / 未完成都收進來), 不分早午自訂
+    if (tab === 'history') {
+      if (trip.date === today) return false;
+    } else {
+      if (tab !== 'all' && trip.type !== tab) return false;
+    }
+    if (filter.status && filter.status !== 'all' && trip.status !== filter.status) return false;
+    // 過往紀錄 tab 不受日期篩選限制 (本身已定義為「所有非今天」)
+    if (tab !== 'history') {
     if (filter.dateRange === 'today' && trip.date !== todayIso()) return false;
     if (filter.dateRange === 'tomorrow' && trip.date !== tomorrowIso()) return false;
     if (filter.dateRange === 'yesterday' && trip.date !== yesterdayIso()) return false;
@@ -278,6 +290,7 @@ export function applyScheduleFilter(
       filter.dateRange !== 'all' &&
       trip.date !== filter.dateRange
     ) return false;
+    }
     if (filter.busId && trip.busId !== filter.busId) return false;
     if (filter.driverId && row.bus?.driverId !== filter.driverId) return false;
     if (filter.nannyId && trip.nannyId !== filter.nannyId) return false;

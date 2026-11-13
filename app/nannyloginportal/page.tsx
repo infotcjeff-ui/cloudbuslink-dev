@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { useAuth } from '@/lib/hooks';
 import { isValidLoginAccount } from '@/lib/auth-lookup';
 import { isSupabaseAvailable } from '@/lib/supabase-data';
+import { nannyHomePath } from '@/lib/nanny-path';
 
 export default function NannyLoginPage() {
   const router = useRouter();
@@ -22,9 +23,9 @@ export default function NannyLoginPage() {
 
   useEffect(() => {
     if (!loading && user) {
-      // 已登入且是保姆 → 去保姆頁, 否則回 login
+      // 已登入且是保姆 → 去個人化保姆頁 (如 /wendy/route), 否則回 login
       if (user.role === 'nanny') {
-        router.replace('/nanny');
+        router.replace(nannyHomePath(user));
       } else {
         router.replace('/');
       }
@@ -74,7 +75,7 @@ export default function NannyLoginPage() {
       setError(result.error || '登入失敗');
       return;
     }
-    router.replace('/nanny');
+    router.replace(nannyHomePath(result.user));
   };
 
   return (

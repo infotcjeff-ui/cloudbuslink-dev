@@ -45,11 +45,23 @@ export const SYSTEM_CONFIG_EVENT = 'cbl-system-config-refresh';
 /* -------------------------------------------------------------------------- */
 
 export const GPS_PROVIDER_LABELS: Record<GpsProvider, string> = {
-  simulated: '模擬 (localStorage)',
+  onefleet808: '808 GPS (OneFleet)',
   mapbox: 'Mapbox',
   google: 'Google Maps',
   custom: '自訂 Endpoint',
 };
+
+/** 808 GPS (OneFleet) 預設服務端點 — 文件見 808 GPS/Web Interface Documentation.html */
+export const DEFAULT_ONEFLEET_ENDPOINT = 'https://console.onefleet.hk';
+
+/** 舊資料相容: 移除前的 'simulated' 一律視為 808 GPS */
+function normalizeProvider(p: string): GpsProvider {
+  if ((p as string) === 'simulated') return 'onefleet808';
+  if (p === 'onefleet808' || p === 'mapbox' || p === 'google' || p === 'custom') {
+    return p as GpsProvider;
+  }
+  return 'onefleet808';
+}
 
 const DEFAULT_REFRESH_SECONDS = 2;
 
@@ -100,6 +112,7 @@ function readEnvLayer(): SystemConfigCloud {
     },
     gps: {
       provider: null,
+      account: null,
       endpoint: null,
       refreshSeconds: null,
     },
@@ -136,8 +149,8 @@ export function clearOverride(): void {
  * 只移除裝置層覆寫中的某個欄位 (「還原預設」按鈕用)。
  *
  * 支援的路徑:
- *   'supabase.url' | 'supabase.anonKey' | 'gps.provider'
- *   'gps.apiKey' | 'gps.endpoint' | 'gps.refreshSeconds'
+ *   'supabase.url' | 'supabase.anonKey' | 'gps.provider' | 'gps.account'
+ *   'gps.password' | 'gps.apiKey' | 'gps.endpoint' | 'gps.refreshSeconds'
  */
 export function clearOverrideField(path: OverrideFieldPath): void {
   const cur = getOverride();
@@ -159,6 +172,12 @@ export function clearOverrideField(path: OverrideFieldPath): void {
     case 'gps.provider':
       next.gps.provider = null;
       break;
+    case 'gps.account':
+      next.gps.account = null;
+      break;
+    case 'gps.password':
+      next.gps.password = null;
+      break;
     case 'gps.apiKey':
       next.gps.apiKey = null;
       break;
@@ -179,6 +198,8 @@ export type OverrideFieldPath =
   | 'supabase.url'
   | 'supabase.anonKey'
   | 'gps.provider'
+  | 'gps.account'
+  | 'gps.password'
   | 'gps.apiKey'
   | 'gps.endpoint'
   | 'gps.refreshSeconds';
@@ -241,13 +262,25 @@ export function resolveSystemConfig(cloud?: SystemConfigCloud | null): ResolvedS
 
   const url = pick(ov?.supabase.url, cl?.supabase.url, env.supabase.url);
   const key = pick(ov?.supabase.anonKey, cl?.supabase.anonKey, env.supabase.anonKey);
-  const provider = pick<GpsProvider>(
-    ov?.gps.provider,
-    cl?.gps.provider,
+  const providerRaw = pick<string>(
+    ov?.gps.provider as string | null | undefined,
+    cl?.gps.provider as string | null | undefined,
     null,
   );
+  const provider: { value: GpsProvider; source: ConfigSource } = {
+    value: normalizeProvider(providerRaw.value || 'onefleet808'),
+    source: providerRaw.source === 'none' ? 'default' : providerRaw.source,
+  };
+  const account = pick(ov?.gps.account, cl?.gps.account, null);
+  const password = pick((ov as SystemConfigOverride | null)?.gps.password, null, null);
   const apiKey = pick(ov?.gps.apiKey, null, null);
-  const endpoint = pick(ov?.gps.endpoint, cl?.gps.endpoint, null);
+  const endpointRaw = pick(ov?.gps.endpoint, cl?.gps.endpoint, null);
+  const endpoint: { value: string; source: ConfigSource } =
+    endpointRaw.value
+      ? endpointRaw
+      : provider.value === 'onefleet808'
+        ? { value: DEFAULT_ONEFLEET_ENDPOINT, source: 'default' }
+        : { value: '', source: 'none' };
   const refresh = pick<number>(
     ov?.gps.refreshSeconds,
     cl?.gps.refreshSeconds,
@@ -262,11 +295,15 @@ export function resolveSystemConfig(cloud?: SystemConfigCloud | null): ResolvedS
       keySource: key.source,
     },
     gps: {
-      provider: provider.value || 'simulated',
+      provider: provider.value,
+      account: account.value,
+      password: password.value,
       apiKey: apiKey.value,
       endpoint: endpoint.value,
       refreshSeconds: refresh.value || DEFAULT_REFRESH_SECONDS,
-      providerSource: provider.source === 'none' ? 'default' : provider.source,
+      providerSource: provider.source,
+      accountSource: account.source,
+      passwordSource: password.source,
       apiKeySource: apiKey.source,
     },
   };
@@ -280,7 +317,7 @@ export function resolveSystemConfig(cloud?: SystemConfigCloud | null): ResolvedS
  * 剝掉機密欄位, 只留可上雲的部分。
  *
  * ⚠️ 這是安全邊界的守門員 — 所有要寫進 Supabase 的 payload 都必須先過這裡。
- * 目前唯一的機密欄位是 gps.apiKey。
+ * 機密欄位: gps.password / gps.apiKey → 只存本機, 永不上雲。
  */
 export function sanitizeForCloud(src: SystemConfigOverride | SystemConfigCloud): SystemConfigCloud {
   return {
@@ -290,6 +327,7 @@ export function sanitizeForCloud(src: SystemConfigOverride | SystemConfigCloud):
     },
     gps: {
       provider: src.gps.provider ?? null,
+      account: src.gps.account ?? null,
       endpoint: src.gps.endpoint ?? null,
       refreshSeconds: src.gps.refreshSeconds ?? null,
     },

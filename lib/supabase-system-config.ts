@@ -57,6 +57,7 @@ export const supabaseSystemConfig = {
           },
           gps: {
             provider: payload.gps?.provider ?? null,
+            account: (payload.gps as { account?: string | null })?.account ?? null,
             endpoint: payload.gps?.endpoint ?? null,
             refreshSeconds: payload.gps?.refreshSeconds ?? null,
           },

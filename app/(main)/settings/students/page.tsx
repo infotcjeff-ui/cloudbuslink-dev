@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { Plus, Search, Edit2, Trash2, IdCard, Filter, ChevronRight } from 'lucide-react';
@@ -16,6 +16,14 @@ import { useAuth } from '@/lib/hooks';
 import { STORAGE, resolveDataScope } from '@/lib/storage';
 import { useToast } from '@/components/ui/toast';
 import { cn } from '@/lib/utils';
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from '@/components/ui/empty';
 import type { Student } from '@/lib/types';
 
 export default function StudentsPage() {
@@ -48,6 +56,8 @@ export default function StudentsPage() {
     if (filterStatus && s.status !== filterStatus) return false;
     return true;
   });
+
+  const hasFilter = !!(search || filterClass || filterStatus);
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -100,12 +110,34 @@ export default function StudentsPage() {
 
       {/* 列表 */}
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-3">
-            <IdCard className="w-7 h-7 text-muted-foreground" />
-          </div>
-          <p className="text-sm text-muted-foreground">未有學生資料</p>
-        </div>
+        <Empty className="border-0 bg-transparent py-10">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <IdCard className="w-6 h-6" />
+            </EmptyMedia>
+            <EmptyTitle>{hasFilter ? '沒有符合條件的學生' : '未有學生資料'}</EmptyTitle>
+            <EmptyDescription>
+              {hasFilter
+                ? '試試清除搜尋或篩選條件, 再查看一次。'
+                : '新增第一位學生後, 這裡會列出所有學生資料。'}
+            </EmptyDescription>
+          </EmptyHeader>
+          {hasFilter && (
+            <EmptyContent>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setSearch('');
+                  setFilterClass('');
+                  setFilterStatus('');
+                }}
+              >
+                清除篩選
+              </Button>
+            </EmptyContent>
+          )}
+        </Empty>
       ) : (
         <div className="space-y-2">
           {filtered.map((s, i) => {

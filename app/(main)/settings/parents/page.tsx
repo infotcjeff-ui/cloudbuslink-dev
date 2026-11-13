@@ -11,6 +11,14 @@ import {
   DialogAnimated as Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter
 } from '@/components/ui/dialog';
 import { Select } from '@/components/ui/select';
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from '@/components/ui/empty';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE, resolveClientId, resolveDataScope, markPendingPatch } from '@/lib/storage';
 import { useAuthClientId } from '@/lib/use-client-id';
@@ -425,12 +433,26 @@ export default function ParentsPage() {
       </div>
 
       {filtered.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mb-3">
-            <Users className="w-7 h-7 text-muted-foreground" />
-          </div>
-          <p className="text-sm text-muted-foreground">未有關係人資料</p>
-        </div>
+        <Empty className="border-0 bg-transparent py-10">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Users className="w-6 h-6" />
+            </EmptyMedia>
+            <EmptyTitle>{search ? '沒有符合條件的家長' : '未有關係人資料'}</EmptyTitle>
+            <EmptyDescription>
+              {search
+                ? '試試其他姓名或電話, 或清除搜尋條件。'
+                : '新增第一位家長後, 這裡會列出所有家長資料。'}
+            </EmptyDescription>
+          </EmptyHeader>
+          {search && (
+            <EmptyContent>
+              <Button variant="outline" size="sm" onClick={() => setSearch('')}>
+                清除搜尋
+              </Button>
+            </EmptyContent>
+          )}
+        </Empty>
       ) : (
         <div className="space-y-2">
           {filtered.map(p => {

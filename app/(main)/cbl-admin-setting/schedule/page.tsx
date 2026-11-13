@@ -12,12 +12,18 @@
  * Step 3 之後: 進度即時、衝突強化、批次操作, ...
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
 import { CalendarClock } from 'lucide-react';
 
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveWriteAcademicYear } from '@/lib/storage';
+import { purgeResidualTestData } from '@/lib/purge-test-data';
+import {
+  seedScheduleTestData,
+  removeScheduleTestData,
+  countScheduleTestTrips,
+} from '@/lib/seed-schedule-test';
 import { useToast } from '@/components/ui/toast';
 import {
   ensureTripParents,
@@ -28,6 +34,7 @@ import { pushTripToCloud as pushTripToCloudShared } from '@/lib/trip-cloud';
 
 import { useScheduleTrips } from './hooks/useScheduleTrips';
 import { ScheduleConsoleContent } from './ScheduleConsoleContent';
+import { useAcademicYear } from '../AcademicYearProvider';
 import { TripFormModal } from './TripFormModal';
 import { TripDetailDrawer } from './TripDetailDrawer';
 import { tomorrowIso, yesterdayIso } from './scheduleUtils';
@@ -96,6 +103,71 @@ export default function CblAdminSchedulePage() {
 
   const data = useScheduleTrips(clientId, filter, tab, isSuperAdmin);
 
+  // 一次性掃尾:清掉舊瀏覽器本機殘留的 test- 測試資料 (功能已移除,只清殘留)
+  useEffect(() => {
+    purgeResidualTestData();
+  }, []);
+
+  // ⚠️ 學年範圍 — 封存的學年是唯讀的 (決策 D6)
+  const { selectedYear, isReadOnly: yearReadOnly } = useAcademicYear();
+  const [seedingTestData, setSeedingTestData] = useState(false);
+  /* 測試資料筆數 (只讀 localStorage 的 test- 前綴, data.trips 變動即重算) */
+  const testTripCount = useMemo(() => countScheduleTestTrips(), [data.trips]);
+
+  /* 一鍵新增 / 移除測試資料 — 只寫 localStorage, 不推雲端 */
+  const handleSeedTestData = useCallback(() => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能新增測試資料');
+      return;
+    }
+    if (!confirm('確定生成 10 個測試班次？含校巴 / 司機 / 保姆 / 學生 / 家長 / 路線 / 打卡 (隨機時段、混合狀態、含髒資料)，只存本機、不推雲端。')) return;
+    setSeedingTestData(true);
+    try {
+      const targetClient =
+        clientId ||
+        STORAGE.selectedClient.get() ||
+        STORAGE.clients.getAll()[0]?.id ||
+        '';
+      if (!targetClient) {
+        toast('error', '找不到學校 (client)，無法生成測試資料');
+        return;
+      }
+      const year = selectedYear || resolveWriteAcademicYear(targetClient);
+      const res = seedScheduleTestData(targetClient, year);
+      [
+        'cbl-trips-refresh', 'cbl-buses-refresh', 'cbl-drivers-refresh',
+        'cbl-nannies-refresh', 'cbl-nannys-refresh', 'cbl-students-refresh',
+        'cbl-routes-refresh', 'cbl-attendance-refresh',
+      ].forEach((e) => window.dispatchEvent(new CustomEvent(e)));
+      toast('success', `已生成測試資料：${res.trips} 班 / 校巴 ${res.buses} / 學生 ${res.students} / 打卡 ${res.attendances}（只存本機）`);
+    } catch (err) {
+      console.error('[Schedule] seed test data error:', err);
+      toast('error', `生成失敗：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSeedingTestData(false);
+    }
+  }, [clientId, selectedYear, yearReadOnly, toast]);
+
+  const handleClearTestData = useCallback(() => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能移除測試資料');
+      return;
+    }
+    if (!confirm('確定移除測試資料？只刪除 test- 前綴的資料，不會碰真實資料。')) return;
+    try {
+      const { removed, trips } = removeScheduleTestData();
+      [
+        'cbl-trips-refresh', 'cbl-buses-refresh', 'cbl-drivers-refresh',
+        'cbl-nannies-refresh', 'cbl-nannys-refresh', 'cbl-students-refresh',
+        'cbl-routes-refresh', 'cbl-attendance-refresh',
+      ].forEach((e) => window.dispatchEvent(new CustomEvent(e)));
+      toast(removed > 0 ? 'success' : 'info', removed > 0 ? `已移除測試資料：${trips} 班，共 ${removed} 筆` : '目前沒有測試資料可移除');
+    } catch (err) {
+      console.error('[Schedule] clear test data error:', err);
+      toast('error', `移除失敗：${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [yearReadOnly, toast]);
+
   /* ---- Drawer / Modal 動作 ---- */
   /**
    * 開啟「新增班次」。
@@ -106,6 +178,11 @@ export default function CblAdminSchedulePage() {
    *   filter.dateRange 為 'today' / 'tomorrow' / 'all' 等非 ISO 值時 → 退回今日。
    */
   const openAdd = useCallback(() => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6): 不能在歷史學年建立班次
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增或修改資料');
+      return;
+    }
     setDetailDrawer({ open: false, row: null });
     const dr = filter.dateRange;
     const isoDate =
@@ -118,9 +195,13 @@ export default function CblAdminSchedulePage() {
       mode: 'add',
       initial: isoDate ? { date: isoDate } : null,
     });
-  }, [filter.dateRange]);
+  }, [filter.dateRange, yearReadOnly, toast]);
 
   const openEdit = useCallback((row: TripWithRelations) => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增或修改資料');
+      return;
+    }
     setDetailDrawer({ open: false, row: null });
     setFormModal({
       open: true,
@@ -133,7 +214,7 @@ export default function CblAdminSchedulePage() {
         plannedStartTime: row.trip.plannedStartTime?.slice(0, 5) ?? '07:30',
         plannedEndTime: row.trip.plannedEndTime?.slice(0, 5) ?? '08:30',
         busId: row.trip.busId,
-        driverId: row.bus?.driverId ?? '',
+        driverId: row.trip.driverIdSnapshot ?? row.bus?.driverId ?? '',
         // 保姆三級解析的寫入側: listing 已用 bound 保姆 fallback 顯示,
         // 編輯時也要帶入同樣的值, 否則表單 nannyId 為空會被 validate 擋下或存成未指派
         nannyId: row.trip.nannyId || row.nanny?.id || '',
@@ -142,7 +223,7 @@ export default function CblAdminSchedulePage() {
         routeId: row.trip.routeId ?? null,
       },
     });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const openView = useCallback((row: TripWithRelations) => {
     setFormModal({ open: false, mode: 'add', initial: null });
@@ -180,6 +261,11 @@ export default function CblAdminSchedulePage() {
   }, []);
 
   const handleSave = useCallback(async (values: TripFormValues) => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6)
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能儲存變更');
+      return;
+    }
     const now = new Date().toISOString();
     // 超管新增時 clientId='' → 用所選校巴 / 路線的學校兜底 (cbl_trips.client_id FK 必填)
     const resolveClientId = () => {
@@ -225,14 +311,22 @@ export default function CblAdminSchedulePage() {
           return;
         }
         const newId = STORAGE.genId('trip');
+        const tripClientId = resolveClientId();
+        const tripBus = STORAGE.buses.getById(values.busId);
         const trip: Trip = {
           id: newId,
-          clientId: resolveClientId(),
+          clientId: tripClientId,
           type: values.type,
           customTypeLabel: values.type === 'custom' ? (values.customTypeLabel?.trim() || null) : null,
           date: values.date,
           busId: values.busId,
           nannyId: values.nannyId,
+          // 學年蓋章: 班次屬於建立當下的現行學年
+          academicYear: resolveWriteAcademicYear(tripClientId),
+          // 司機/車牌快照 —— 建班當下寫死表單所選值 (選車時已按該車綁定自動填入),
+          // 確保日後校巴改綁司機時, 歷史班次仍顯示當時的司機與車牌。
+          driverIdSnapshot: values.driverId || null,
+          busPlateNumberSnapshot: tripBus?.plateNumber ?? null,
           status: 'scheduled',
           plannedStartTime: values.plannedStartTime,
           plannedEndTime: values.plannedEndTime,
@@ -275,6 +369,7 @@ export default function CblAdminSchedulePage() {
           date: values.date,
           busId: values.busId,
           nannyId: values.nannyId,
+          driverIdSnapshot: values.driverId || null,
           plannedStartTime: values.plannedStartTime,
           plannedEndTime: values.plannedEndTime,
           waypoints: values.waypoints,
@@ -299,29 +394,45 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `儲存失敗：${msg}`);
     }
-  }, [clientId, formModal.mode, toast, pushTripToCloud, setFilter]);
+  }, [clientId, formModal.mode, toast, pushTripToCloud, setFilter, yearReadOnly]);
 
   const onDelete = useCallback(async (row: TripWithRelations) => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能刪除資料');
+      return;
+    }
     if (!confirm(`刪除班次 ${row.trip.id.slice(-6)}？此操作無法撤銷。`)) return;
     try {
+      // ⚠️ 先留墓碑再刪 — 與路線刪除同一套 (見 lib/trip-tombstones.ts):
+      //   墓碑會讓這筆在任何一次雲端同步後都不會被拉回來,
+      //   就算雲端刪除失敗也不會「刪除後又復活」。
+      const { markTripTombstoned, markCloudTripDeleted } = await import('@/lib/trip-tombstones');
+      markTripTombstoned(row.trip, row.trip.id);
+
       STORAGE.trips.remove(row.trip.id);
       window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
       toast('success', `班次 ${row.trip.id.slice(-6)} 已刪除`);
       if (detailDrawer.row?.trip.id === row.trip.id) closeDetail();
 
-      // 刪除雲端 (失敗只提示, 本機已刪)
+      // 刪除雲端 (失敗只提示, 本機已刪; 墓碑保留 → 下次同步自動重試)
       const res = await supabaseTrips.delete(row.trip.id);
       if (!res.success) {
-        toast('warning', `已從本機刪除, 但雲端刪除失敗：${res.error ?? '未知錯誤'}`, 6000);
+        toast('warning', `已從本機刪除, 但雲端刪除失敗：${res.error ?? '未知錯誤'} (將自動重試)`, 6000);
+      } else {
+        markCloudTripDeleted(row.trip.id);
       }
     } catch (err) {
       console.error('[Schedule] onDelete error:', err);
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `刪除失敗：${msg}`);
     }
-  }, [toast, detailDrawer.row, closeDetail]);
+  }, [toast, detailDrawer.row, closeDetail, yearReadOnly]);
 
   const onDuplicate = useCallback(async (row: TripWithRelations) => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能新增或修改資料');
+      return;
+    }
     try {
       const copy = STORAGE.trips.duplicate(row.trip.id, { date: row.trip.date });
       if (copy) {
@@ -340,9 +451,14 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `複製失敗：${msg}`);
     }
-  }, [toast, pushTripToCloud]);
+  }, [toast, pushTripToCloud, yearReadOnly]);
 
   const onChangeStatus = useCallback(async (rowOrIds: TripWithRelations | string[], next?: TripStatus) => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6): 不能改變歷史班次的狀態
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能改變班次狀態');
+      return;
+    }
     try {
       if (Array.isArray(rowOrIds)) {
         const ids = rowOrIds;
@@ -382,9 +498,13 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `狀態更新失敗：${msg}`);
     }
-  }, [toast, detailDrawer.row, data.trips, pushTripToCloud]);
+  }, [toast, detailDrawer.row, data.trips, pushTripToCloud, yearReadOnly]);
 
   const onBatchCancel = useCallback(async (ids: string[]) => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能批次取消班次');
+      return;
+    }
     try {
       const n = STORAGE.trips.bulkUpdateStatus(ids, 'cancelled');
       setSelectedIds([]);
@@ -404,9 +524,13 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `批次取消失敗：${msg}`);
     }
-  }, [toast]);
+  }, [toast, yearReadOnly]);
 
   const onBatchDuplicate = useCallback(async (ids: string[]) => {
+    if (yearReadOnly) {
+      toast('warning', '目前檢視的學年為唯讀 — 不能複製班次');
+      return;
+    }
     try {
       const copies: Trip[] = [];
       ids.forEach((id) => {
@@ -423,16 +547,17 @@ export default function CblAdminSchedulePage() {
         const missing: string[] = [];
         for (const c of copies) {
           const bus = STORAGE.buses.getById(c.busId);
+          const cDriverId = c.driverIdSnapshot ?? bus?.driverId ?? null;
           const ensured = await ensureTripParents({
             clientId: c.clientId,
             busId: c.busId,
             nannyId: c.nannyId,
-            driverId: bus?.driverId ?? null,
+            driverId: cDriverId,
             studentIds: c.studentIds,
             routeId: c.routeId ?? null,
             client: STORAGE.clients.getById(c.clientId),
             bus,
-            driver: bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null,
+            driver: cDriverId ? STORAGE.drivers.getById(cDriverId) : null,
             nanny: c.nannyId ? STORAGE.nannies.getById(c.nannyId) : null,
             route: c.routeId ? STORAGE.routes.getById(c.routeId) : null,
             students: STORAGE.students.getAll().filter((s) => c.studentIds.includes(s.id)),
@@ -443,6 +568,8 @@ export default function CblAdminSchedulePage() {
         if (ready.length > 0) {
           const rows = ready.map((c) => ({
             id: c.id, clientId: c.clientId, busId: c.busId, nannyId: c.nannyId,
+            academicYear: c.academicYear, driverIdSnapshot: c.driverIdSnapshot ?? null,
+            busPlateNumberSnapshot: c.busPlateNumberSnapshot ?? null,
             date: c.date, type: c.type, customTypeLabel: c.customTypeLabel ?? null, status: c.status,
             plannedStartTime: c.plannedStartTime, plannedEndTime: c.plannedEndTime,
             actualStartTime: c.actualStartTime, actualEndTime: c.actualEndTime,
@@ -464,7 +591,7 @@ export default function CblAdminSchedulePage() {
       const msg = err instanceof Error ? err.message : String(err);
       toast('error', `批次複製失敗：${msg}`);
     }
-  }, [toast]);
+  }, [toast, yearReadOnly]);
 
   const onJumpToConflict = useCallback((c: import('./types').TripConflict) => {
     const first = c.tripIds[0];
@@ -502,7 +629,6 @@ export default function CblAdminSchedulePage() {
           </span>
         </div>
         <ScheduleConsoleContent
-          clientId={clientId}
           data={data}
           filter={filter}
           onFilterChange={setFilter}
@@ -522,6 +648,11 @@ export default function CblAdminSchedulePage() {
           onBatchChangeStatus={(ids, s) => onChangeStatus(ids, s)}
           onBatchCancel={onBatchCancel}
           onBatchDuplicate={onBatchDuplicate}
+          readOnly={yearReadOnly}
+          onSeedTestData={handleSeedTestData}
+          onClearTestData={handleClearTestData}
+          testTripCount={testTripCount}
+          seedingTestData={seedingTestData}
         />
       </motion.section>
 

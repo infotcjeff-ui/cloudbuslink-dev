@@ -145,6 +145,58 @@
   box-shadow: 0 0 0 6px rgba(156, 163, 175, 0.3), 0 4px 12px rgba(0,0,0,0.2);
 }
 
+/* ── 主頁地圖校巴 pin（四態顏色由 inline style 控制）──────────────────
+   結構: button.bus-pin > span.bus-pin-pulse + span.bus-pin-inner
+   - 箭頭態 (行駛/怠速): inner 內是 MousePointer2, JS 寫 rotate 做行車方向
+   - 圓點態 (靜止/離線): inner 內是圓形 dot, 不旋轉
+   - marker anchor 統一用 center, pulse 絕對置中, 保證 pin 同脈動同 GPS 點三者置中 */
+.bus-pin {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.25));
+}
+.bus-pin-inner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+  transition: transform 200ms ease-out;
+}
+.bus-pin-pulse {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 26px;
+  height: 26px;
+  border-radius: 9999px;
+  transform: translate(-50%, -50%) scale(0.4);
+  opacity: 0;
+  pointer-events: none;
+}
+.bus-pin.is-selected .bus-pin-pulse {
+  animation: bus-pin-ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@keyframes bus-pin-ping {
+  0% {
+    transform: translate(-50%, -50%) scale(0.4);
+    opacity: 0.7;
+  }
+  75%, 100% {
+    transform: translate(-50%, -50%) scale(1.6);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bus-pin.is-selected .bus-pin-pulse {
+    animation: none;
+    opacity: 0;
+  }
+}
+
 /* Safe Area 支援 */
 .safe-bottom {
   padding-bottom: env(safe-area-inset-bottom);
@@ -440,4 +492,109 @@
 }
 .animate-shimmer {
   animation: shimmer 6s ease-in-out infinite;
+}
+
+/* ---------------------------------------------------------------------------
+   複製按鈕 — copy icon 轉成 tick 的動畫
+   ---------------------------------------------------------------------------
+   用 CSS 動畫 (而不是 framer-motion) 的原因:
+   - framer-motion 的 AnimatePresence + mode="wait" 在快速連點 / 狀態切換時
+     會卡住 —— 舊 icon 不退出 → 新 icon 永遠不出現, 使用者看不到打勾。
+   - CSS animation 由 class 切換直接驅動, 每次點擊都一定會重播。
+
+   結構 (見 components/ui/copy-button.tsx):
+     .copy-glyph-layer  三個圖示疊在一起 (copy / tick / error)
+     .copy-glyph-copy   預設顯示
+     .copy-glyph-tick   複製成功時顯示 (勾線由左下往右上「畫」出來)
+     .copy-glyph-error  複製失敗時顯示 (紅色 ✗ + 左右搖)
+   --------------------------------------------------------------------------- */
+@keyframes copy-tick-draw {
+  from { stroke-dashoffset: 1; }
+  to   { stroke-dashoffset: 0; }
+}
+@keyframes copy-pop-in {
+  0%   { opacity: 0; transform: scale(0.3) rotate(-20deg); }
+  60%  { opacity: 1; transform: scale(1.25) rotate(4deg); }
+  100% { opacity: 1; transform: scale(1) rotate(0deg); }
+}
+@keyframes copy-fade-out {
+  from { opacity: 1; transform: scale(1); }
+  to   { opacity: 0; transform: scale(0.5); }
+}
+@keyframes copy-shake {
+  0%   { transform: translateX(0); }
+  20%  { transform: translateX(-4px); }
+  40%  { transform: translateX(4px); }
+  60%  { transform: translateX(-3px); }
+  80%  { transform: translateX(3px); }
+  100% { transform: translateX(0); }
+}
+
+.copy-glyph-layer {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+}
+.copy-glyph-layer > span {
+  position: absolute;
+  inset: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
+}
+
+/* 預設: copy icon */
+.copy-glyph-layer[data-state='idle'] .copy-glyph-copy {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* 複製成功: tick 蓋掉 copy icon, 勾線畫出來 + 彈跳 */
+.copy-glyph-layer[data-state='copied'] .copy-glyph-tick {
+  opacity: 1;
+  transform: scale(1);
+  animation: copy-pop-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.copy-glyph-tick path {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: copy-tick-draw 340ms ease-out both;
+}
+
+/* 複製失敗: 紅色 ✗ + 搖晃 */
+.copy-glyph-layer[data-state='error'] .copy-glyph-error {
+  opacity: 1;
+  transform: scale(1);
+  animation: copy-shake 400ms ease-in-out both;
+}
+
+/* 整顆按鈕在成功時輕輕彈一下 */
+@keyframes copy-btn-pop {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+.copy-btn-copied {
+  animation: copy-btn-pop 340ms cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+.copy-btn-error {
+  animation: copy-shake 400ms ease-in-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .copy-glyph-tick,
+  .copy-glyph-error,
+  .copy-btn-copied,
+  .copy-btn-error {
+    animation-duration: 0.001ms !important;
+  }
+  .copy-glyph-tick path {
+    animation-duration: 0.001ms !important;
+  }
 }

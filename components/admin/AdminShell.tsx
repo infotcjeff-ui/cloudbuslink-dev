@@ -67,6 +67,8 @@ export type AdminShellProps = {
   footerText?: string;
   /** 內容區的 key — 用來觸發 motion 進場動畫; 不給則用 active tab id */
   contentKey?: string;
+  /** header 右側的額外內容 (例: 學年切換器) */
+  headerExtra?: React.ReactNode;
 };
 
 /* ------------------------------------------------------------------ */
@@ -81,6 +83,7 @@ export function AdminShell({
   backLabel = '返回',
   footerText = 'CloudBusLink v1.0.0',
   contentKey,
+  headerExtra,
 }: AdminShellProps) {
   const pathname = usePathname();
   const { user } = useAuth();
@@ -171,12 +174,11 @@ export function AdminShell({
   return (
     <div className={cn('min-h-screen bg-slate-100 dark:bg-slate-900 flex flex-col transition-all duration-300', darkMode && 'dark')}>
       {/* Header
-        z-0 (低於 overlay 的 z-[55] 與 dialog 的 z-[60]):
-        popup 打開時, 遮罩可正確蓋住 header。
-        原本 z-30 在某些 stacking context 邊界情況下 (e.g. body 直接子元素的
-        portal overlay) 仍會顯示在 overlay 之上, 將 z-index 降為 0 確保
-        overlay 一律蓋住 header。 */}
-      <header className="h-16 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-4 lg:px-6 flex-shrink-0 sticky top-0 z-0">
+        z-30 (高於內容區 tab / sticky th 的 z-0~z-10, 低於 overlay 的 z-[55] 與 dialog 的 z-[60+]):
+        popup 打開時, 遮罩可正確蓋住 header + tab;
+        捲動時 tab / 表頭不會蓋住 header。
+        ⚠️ 不要降回 z-0 — FilterTabGroup 按鈕內部有 z-index, z-0 header 會被 tab 蓋住。 */}
+      <header className="h-16 bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between px-4 lg:px-6 flex-shrink-0 sticky top-0 z-30">
         <div className="flex items-center gap-3">
           <Link
             href={backHref}
@@ -191,6 +193,13 @@ export function AdminShell({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* 學年切換器 (學年化後, 後台的所有資料都依學年隔離)
+              ⚠️ 這是 optional slot — /system-admin-setting 是平台層,
+                  沒有「學年」的概念, 所以由呼叫端決定要不要傳。
+                  AdminShell 是共用元件, 所以用 ReactNode 而不是在裡面
+                  直接 import /cbl-admin-setting 的元件 (會造成跨層相依)。 */}
+          {headerExtra}
+
           {/* Search */}
           <div className="hidden md:flex items-center gap-2 bg-slate-100 dark:bg-slate-700 rounded-lg px-3 py-2">
             <Search className="w-4 h-4 text-slate-400" />

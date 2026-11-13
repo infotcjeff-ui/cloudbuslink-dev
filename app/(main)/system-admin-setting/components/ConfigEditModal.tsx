@@ -97,8 +97,8 @@ const SCHEMAS: Record<ConfigGroup, { title: string; subtitle: string; icon: Luci
     ],
   },
   gps: {
-    title: 'GPS / 地圖設定',
-    subtitle: '車輛定位追蹤的 provider 設定',
+    title: '808 GPS 定位設定',
+    subtitle: 'OneFleet 808 GPS 帳號 / 密碼 / API Key — 機密只存本機',
     icon: Plug,
     fields: [
       {
@@ -112,21 +112,38 @@ const SCHEMAS: Record<ConfigGroup, { title: string; subtitle: string; icon: Luci
         })),
       },
       {
-        name: 'apiKey',
-        label: 'API Key',
+        name: 'account',
+        label: '808 GPS 帳號 (ac)',
+        type: 'text',
+        placeholder: '例如 cmsv6',
+        resetPath: 'gps.account',
+        hint: 'OneFleet 登入帳號 — 對應文件 account 參數, 可隨平台設定同步',
+      },
+      {
+        name: 'password',
+        label: '808 GPS 密碼 (pw)',
         type: 'password',
         secret: true,
-        placeholder: 'pk.xxxxx 或 provider key',
+        placeholder: '登入密碼',
+        resetPath: 'gps.password',
+        hint: '機密 — 只存本機瀏覽器, 永不同步到雲端',
+      },
+      {
+        name: 'apiKey',
+        label: 'API Key (如有)',
+        type: 'password',
+        secret: true,
+        placeholder: '選填 — 若平台另發 API Key',
         resetPath: 'gps.apiKey',
         hint: '機密 — 只存本機瀏覽器, 永不同步到雲端',
       },
       {
         name: 'endpoint',
-        label: '自訂 Endpoint',
+        label: '服務端點',
         type: 'text',
-        placeholder: 'https://api.example.com/gps',
+        placeholder: 'https://console.onefleet.hk',
         resetPath: 'gps.endpoint',
-        hint: '僅在 Provider = 自訂時有意義',
+        hint: '預設 OneFleet 主機；僅 Provider = 自訂時需手動填寫',
       },
       {
         name: 'refreshSeconds',
@@ -186,6 +203,9 @@ export function ConfigEditModal({
       next.anonKey = resolved.supabase.anonKey;
     } else {
       next.provider = resolved.gps.provider;
+      next.account = resolved.gps.account;
+      // 密碼與 API Key 為機密: 只帶回長度提示用? 這裡直接帶回明文方便編輯 (僅本機)
+      next.password = resolved.gps.password;
       next.apiKey = resolved.gps.apiKey;
       next.endpoint = resolved.gps.endpoint;
       next.refreshSeconds = String(resolved.gps.refreshSeconds);
@@ -264,6 +284,8 @@ export function ConfigEditModal({
         },
         gps: {
           provider: current?.gps.provider ?? null,
+          account: current?.gps.account ?? null,
+          password: current?.gps.password ?? null,
           endpoint: current?.gps.endpoint ?? null,
           refreshSeconds: current?.gps.refreshSeconds ?? null,
           apiKey: current?.gps.apiKey ?? null,
@@ -276,7 +298,12 @@ export function ConfigEditModal({
         next.supabase.url = (values.url ?? '').trim();
         next.supabase.anonKey = (values.anonKey ?? '').trim();
       } else {
-        next.gps.provider = (values.provider as GpsProvider) ?? 'simulated';
+        const rawProvider = (values.provider as GpsProvider) ?? 'onefleet808';
+        next.gps.provider = rawProvider === ('simulated' as unknown as GpsProvider)
+          ? 'onefleet808'
+          : rawProvider;
+        next.gps.account = (values.account ?? '').trim() || null;
+        next.gps.password = (values.password ?? '').trim() || null;
         next.gps.apiKey = (values.apiKey ?? '').trim() || null;
         next.gps.endpoint = (values.endpoint ?? '').trim() || null;
         const rs = Number(values.refreshSeconds);

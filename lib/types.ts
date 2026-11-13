@@ -18,6 +18,13 @@ export interface User {
    *   - 選填 — 沒填就只能用電話登入 (維持既有行為)
    */
   accountName?: string;
+  /**
+   * 聯絡電話 (WhatsApp) — 對應 DB `contact_phone`。
+   * 保姆「異常回報」時可直接致電 / WhatsApp 此號碼。新增帳號時必填。
+   * 與 `phone` (登入帳號) 分開: super_admin 的登入帳號可以非數字,
+   * 但聯絡電話必須是可撥打的 8 位香港號碼。
+   */
+  contactPhone?: string;
   password: string;
   role: UserRole;
   name: string;
@@ -74,12 +81,20 @@ export interface Bus {
   driverId: string | null;
   gpsDeviceId: string | null;
   status: 'active' | 'maintenance' | 'inactive';
-  // 模擬 GPS 位置
+  // 808 GPS 即時位置 (以 808 為準, 不再模擬)
   currentLocation?: {
     latitude: number;
     longitude: number;
-    speed: number;  // km/h, 模擬用隨機 0-60
+    speed: number;  // km/h, 808 sp / 10
     lastUpdated: string;
+    /** 808 解析地址 (ps) */
+    address?: string | null;
+    /** 808 上傳時間原文 (gt) */
+    gpsTime?: string | null;
+    /** 808 在線狀態 (ol === 1) */
+    online?: boolean;
+    /** 808 行車方向 hx (0-360, 0=正北順時針)，主頁 pin 箭頭優先用佢 */
+    heading?: number | null;
   };
   createdAt: string;
 }
@@ -94,10 +109,26 @@ export interface Location {
 
 export type StudentGender = 'male' | 'female' | 'other';
 
+/** 學校類型 — 小學 / 中學 (對應 CHSC 資料集) */
+export type StudentSchoolType = 'primary' | 'secondary';
+
 export interface Student {
   id: string;
   clientId: string;
   studentId: string; // 學年+序號 stu-2627001
+  /**
+   * 就讀學年 (4 位 code, 例 '2627' = 2026/27)。
+   *
+   * ⚠️ 學生是「分學年」的 entity —— 同一學生每學年被複製成新列
+   *    (因為 unique(client_id, student_id) 且 student_id 含學年前綴)。
+   *    跨學年的同一個人靠 personKey 串連。
+   */
+  academicYear: string;
+  /**
+   * 跨學年延續識別碼 —— 同一學生每學年被複製成新列時沿用同一值。
+   * 為 null 表示未指定 (舊資料 / 未回填)。
+   */
+  personKey?: string | null;
   name: string;
   classNumber: string;
   phone: string | null;
@@ -105,6 +136,18 @@ export interface Student {
   gender: StudentGender;
   /** ISO date string yyyy-mm-dd */
   dateOfBirth: string | null;
+  /**
+   * 就讀學校類型 — 'primary' (小學) / 'secondary' (中學)
+   * 來源: CHSC 小學概覽 / 中學概覽 (見 lib/schools.ts)
+   *
+   * ⚠️ 選填 (optional): 舊資料沒有學校資訊, 不強制回填。
+   *    新增學生時應用層會要求必填。
+   */
+  schoolType?: StudentSchoolType | null;
+  /** 就讀學校所在區域 (18 區之一, 例: '沙田區') */
+  schoolDistrict?: string | null;
+  /** 就讀學校名稱 (例: '聖公會聖馬太小學') */
+  schoolName?: string | null;
   /** 緊急聯絡人姓名 (可不在 parentIds 中, 例如非監護人的親友) */
   emergencyContactName: string | null;
   /** 緊急聯絡人電話 */
@@ -224,6 +267,21 @@ export interface Trip {
   busId: string;
   nannyId: string;
   date: string;
+  /**
+   * 班次所屬學年 (4 位 code, 例 '2627')。
+   * 由建立當下的「作用中學年」蓋章, 不從 date 反推 (date 反推只作為回填時的推導)。
+   */
+  academicYear: string;
+  /**
+   * 建班當下的司機 id 快照 —— 不隨校巴日後改綁而變。
+   * ⚠️ 這是「歷史保真」的關鍵: 27-28 換了司機, 回頭看 26-27 的班次
+   *    仍要顯示當時的司機, 而不是現在綁在車上的那位。
+   */
+  driverIdSnapshot?: string | null;
+  /**
+   * 建班當下的車牌快照 —— 校巴換車牌或退役後, 歷史班次仍顯示當時的車牌。
+   */
+  busPlateNumberSnapshot?: string | null;
   type: TripType;
   /**
    * 自訂班次類型名稱 — 僅 type='custom' 時有意義。
@@ -278,12 +336,92 @@ export interface Attendance {
   updatedAt: string;
 }
 
+/**
+ * 公告受眾類型
+ * ─────────────────
+ * - 'system'  系統公告 — 所有用戶都會看到 (跨機構、跨角色)
+ * - 'payment' 繳費公告 — 只有被選中的家長會看到
+ */
+export type AnnouncementScope = 'system' | 'payment';
+
+/* ==========================================================================
+ *  PaymentRecord 付款記錄 — 報表頁 (settings/reports) 的資料來源
+ *
+ *  為什麼需要這個 entity:
+ *   - 報表頁要支援「多選 → 標記已付 / 取消 / 發送繳費通知」,
+ *     這些動作需要一個「可逐筆標記狀態 + 記錄金額」的資料模型。
+ *   - 之前付款記錄只是 /cbl-admin-setting/parents/payment 的 coming-soon 佔位,
+ *     沒有任何實體 → 報表頁沒東西可操作。
+ *
+ *  設計:
+ *   - 每筆 = 一個學生一期的繳費帳單 (月費 / 學費)。
+ *   - status: pending (未付) / paid (已付) / cancelled (已取消) / overdue (逾期)
+ *   - 一筆帳單對應一個 studentId + 一個 parentId (主要聯繫人)。
+ * ========================================================================== */
+
+/** 付款狀態 */
+export type PaymentStatus = 'pending' | 'paid' | 'cancelled' | 'overdue';
+
+/** 付款方式 */
+export type PaymentMethod = 'cash' | 'fps' | 'bank_transfer' | 'cheque' | 'other';
+
+export interface PaymentRecord {
+  id: string;
+  /** 所屬學校 (cbl_clients.id) */
+  clientId: string;
+  /** 帳單學期/月份 (例: '2026-11' 或 '2026-2027-S1') */
+  period: string;
+  /** 學生 id (cbl_students.id) */
+  studentId: string;
+  /** 學生姓名快照 */
+  studentName: string;
+  /** 家長 id (cbl_parents.id) — 收款對象 */
+  parentId: string;
+  /** 家長姓名快照 */
+  parentName: string;
+  /** 家長電話快照 */
+  parentPhone: string;
+  /** 應繳金額 (港幣) */
+  amount: number;
+  /** 狀態 */
+  status: PaymentStatus;
+  /** 付款方式 (status = 'paid' 時有意義) */
+  method: PaymentMethod | null;
+  /** 實收日期 (YYYY-MM-DD), status = 'paid' 時有意義 */
+  paidDate: string | null;
+  /** 到期日 (YYYY-MM-DD) */
+  dueDate: string;
+  /** 備註 */
+  notes: string | null;
+  /** 是否已發送繳費通知 (send payment 動作的記錄) */
+  paymentNotifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface Announcement {
   id: string;
   clientId: string;
+  /**
+   * 公告所屬學年 (4 位 code, 例 '2627')。
+   * ⚠️ 範本 (isTemplate = true) 不受此限 —— 範本跨學年沿用,
+   *    只有真正發佈的公告才綁學年。
+   */
+  academicYear: string;
   title: string;
   content: string;
   type: 'info' | 'warning' | 'urgent';
+  /**
+   * 受眾類型 (預設 'system')。
+   * - 'system'  → 所有用戶都看得到
+   * - 'payment' → 只有 targetParentIds 內的家長看得到
+   */
+  scope: AnnouncementScope;
+  /**
+   * 繳費公告的指定家長 (cbl_parents.id 清單)。
+   * scope = 'system' 時一律為空陣列。
+   */
+  targetParentIds: string[];
   displayCount: number;
   currentCount: number;
   maxViewsPerUser: number;
@@ -310,8 +448,8 @@ export interface Announcement {
  *  Storage key: cbl_system_config (override) / cbl_system_config_cloud (快取)
  * ========================================================================== */
 
-/** GPS / 追蹤 provider */
-export type GpsProvider = 'simulated' | 'mapbox' | 'google' | 'custom';
+/** GPS / 追蹤 provider — 實際串接以 808 GPS (OneFleet) 為主 */
+export type GpsProvider = 'onefleet808' | 'mapbox' | 'google' | 'custom';
 
 /** 設定值的來源 (用於 UI 顯示 badge) */
 export type ConfigSource = 'override' | 'cloud' | 'env' | 'default' | 'none';
@@ -326,7 +464,9 @@ export interface SystemConfigCloud {
   };
   gps: {
     provider: GpsProvider | null;
-    /** 自訂 endpoint (僅 provider='custom' 時有意義) */
+    /** 808 GPS (OneFleet) 登入帳號 — 非機密, 可隨平台設定同步 */
+    account: string | null;
+    /** 自訂 endpoint (僅 provider='custom' 時有意義；808 固定為服務端點) */
     endpoint: string | null;
     /** 更新頻率 (秒) */
     refreshSeconds: number | null;
@@ -338,7 +478,9 @@ export interface SystemConfigCloud {
 /** 裝置層覆寫 — 只存 localStorage, 可含機密 */
 export interface SystemConfigOverride extends SystemConfigCloud {
   gps: SystemConfigCloud['gps'] & {
-    /** provider API Key — 機密, 永不上雲 */
+    /** 808 GPS 登入密碼 — 機密, 永不上雲 (等同 apiKey 安全等級) */
+    password: string | null;
+    /** provider API Key (如有) — 機密, 永不上雲 */
     apiKey: string | null;
   };
 }
@@ -353,10 +495,16 @@ export interface ResolvedSystemConfig {
   };
   gps: {
     provider: GpsProvider;
+    /** 808 GPS (OneFleet) 登入帳號 */
+    account: string;
+    /** 808 GPS (OneFleet) 登入密碼 — 機密, 只存本機 */
+    password: string;
     apiKey: string;
     endpoint: string;
     refreshSeconds: number;
     providerSource: ConfigSource;
+    accountSource: ConfigSource;
+    passwordSource: ConfigSource;
     apiKeySource: ConfigSource;
   };
 }
@@ -417,6 +565,11 @@ export interface Route {
   clientId: string;
   /** 路線編號 (使用者輸入, e.g. A1-AM, B3-PM) */
   code: string;
+  /**
+   * 路線所屬學年 (4 位 code, 例 '2627')。
+   * 路線是分學年的 entity —— 每學年各有一套路線。
+   */
+  academicYear: string;
   /** 路線名稱 (e.g. 沙田及馬鞍山早上線) */
   name: string;
   /** 行車時段類型 */
@@ -427,8 +580,64 @@ export interface Route {
   driverId: string;
   /** 跟車保姆 */
   nannyId: string;
+  /** 服務日期 (YYYY-MM-DD, 選填) */
+  serviceDate?: string | null;
+  /** 服務時間 (HH:mm, 選填) */
+  serviceTime?: string | null;
   /** 站點時間軸 (已排序, seq 由小到大) */
   stops: RouteStop[];
+  /** 建立時間 (ISO) */
+  createdAt: string;
+  /** 最後更新時間 (ISO) */
+  updatedAt: string;
+}
+
+/* ==========================================================================
+ *  IncidentReport 異常回報 — 保姆主頁「異常回報」popup 送出後留底
+ *  對應 DB: cbl_incident_reports (migration 0022)
+ * ========================================================================== */
+
+/** 異常類型 — 與保姆 popup 的 INCIDENT_TYPES id 對應 */
+export type IncidentKind =
+  | 'traffic'
+  | 'no_show'
+  | 'breakdown'
+  | 'accident'
+  | 'weather'
+  | 'road_closed'
+  | 'sick'
+  | 'other';
+
+/** 處理狀態 */
+export type IncidentStatus = 'pending' | 'acknowledged' | 'resolved';
+
+export interface IncidentReport {
+  id: string;
+  clientId: string;
+  /** 回報保姆 (cbl_nannies.id, 盡量填; 找不到就空字串) */
+  nannyId: string;
+  /** 回報人姓名 (快照, 免 join) */
+  reporterName: string;
+  /** 回報人電話 (快照) */
+  reporterPhone: string;
+  /** 通知邊位管理員 (cbl_users.id) */
+  adminId: string;
+  /** 管理員姓名快照 */
+  adminName: string;
+  /** 管理員聯絡電話快照 */
+  adminPhone: string;
+  /** 異常類型 */
+  kind: IncidentKind;
+  /** 異常中文標籤快照 (例: 塞車中) */
+  kindLabel: string;
+  /** 相關班次 (當天班次 id, 可空 = 未選擇) */
+  tripId: string;
+  /** 班次快照 (例: 11-04 上午班 · NA1234), 免 join */
+  tripLabel: string;
+  /** 班次日期 YYYY-MM-DD (快照, 方便篩選) */
+  tripDate: string;
+  /** 處理狀態 */
+  status: IncidentStatus;
   /** 建立時間 (ISO) */
   createdAt: string;
   /** 最後更新時間 (ISO) */

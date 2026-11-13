@@ -29,6 +29,10 @@ export function getParentPath(pathname: string): string {
   if (pathname === '/trips/new') {
     return '/trips';
   }
+  // ── /bus/[id] -> / (校巴詳情由主頁進入)
+  if (/^\/bus\/[^/]+$/.test(pathname)) {
+    return '/';
+  }
   // ── /trips/[id] -> /trips
   if (/^\/trips\/[^/]+$/.test(pathname)) {
     return '/trips';
@@ -45,6 +49,24 @@ export function getParentPath(pathname: string): string {
   //    (如 /nanny/trips -> /nanny, /parents/portal -> /parents/portal)
   //    注意: /parents/settings 與 /nanny/settings 是它們自己的首頁, 不在此,
   //    因為它們各自有獨立的 layout, 這些頁面不走 (main) 的返回邏輯。
+  //    個人化保姆路徑 (/{slug}/route|trips|settings) 的父路徑見 lib/nanny-path.ts,
+  //    但 getParentPath 也要能處理 (例如 (main) layout 的返回鍵在打卡頁用不到,
+  //    這裡兜底即可)。
+  //    (如 /wendy/trips -> /wendy/route, /wendy/settings/xxx -> /wendy/settings)
+  {
+    const m = /^\/([^/]+)\/(route|trips|settings)(\/.*)?$/.exec(pathname);
+    if (m) {
+      const reserved = new Set(['trips', 'settings', 'parents', 'bus', 'login', 'nannyloginportal', 'parentsloginportal', 'cbl-admin-setting', 'system-admin-setting', 'api', '_next', 'nanny']);
+      if (!reserved.has(m[1])) {
+        const slug = m[1];
+        const sub = m[2];
+        const rest = m[3] || '';
+        if (sub === 'settings' && rest && rest !== '/') return `/${slug}/settings`;
+        if (sub === 'trips' && rest && rest !== '/') return `/${slug}/trips`;
+        return `/${slug}/route`;
+      }
+    }
+  }
   if (/^\/nanny\//.test(pathname) && !/^\/nanny\/settings(?:\/|$)/.test(pathname)) return '/nanny';
   if (/^\/parents\//.test(pathname) && !/^\/parents\/settings(?:\/|$)/.test(pathname)) return '/parents/trips';
 

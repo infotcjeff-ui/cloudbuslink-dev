@@ -11,6 +11,7 @@ import { Select } from '@/components/ui/select';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE, resolveClientId, resolveDataScope } from '@/lib/storage';
 import { formatAcademicYear, parseAcademicYearCode } from '@/lib/utils';
+import { generatePersonKey } from '@/lib/academic-year';
 import { useToast } from '@/components/ui/toast';
 
 // 學生可選的學年清單 (UI 上顯示 '26-27' / '27-28' 等)。
@@ -59,11 +60,16 @@ export default function NewStudentPage() {
     setSaving(true);
     try {
       const studentId = STORAGE.students.generateStudentId(scope.clientId || resolveClientId(user.clientId || null), academicYear);
+      const studentClientId = scope.clientId || resolveClientId(user.clientId || null);
 
       const newStudent = {
         id: STORAGE.genId('student'),
-        clientId: scope.clientId || resolveClientId(user.clientId || null),
+        clientId: studentClientId,
         studentId,
+        // 學年蓋章: 用表單上選的學年 (與 studentId 的前綴一致)
+        academicYear,
+        // 跨學年識別碼 — 下一學年複製這筆學生時會沿用同一值
+        personKey: generatePersonKey(studentClientId),
         name: name.trim(),
         classNumber: classNumber.trim(),
         phone: phone.trim() || null,

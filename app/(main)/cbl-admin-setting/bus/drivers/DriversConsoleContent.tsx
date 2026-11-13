@@ -35,13 +35,13 @@ import {
   Users as UsersAllIcon,
   Bus as BusIcon,
   Hash,
-  Copy,
   FileSpreadsheet,
   Calendar,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import { supabaseDrivers } from '@/lib/supabase-drivers';
 import { supabaseBuses } from '@/lib/supabase-buses';
 import { STORAGE, resolveClientId } from '@/lib/storage';
@@ -1116,20 +1116,12 @@ function DataTable({
 
               {/* 電話 (copyable) */}
               <td className="px-3 py-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                      navigator.clipboard.writeText(d.phone).catch(() => {});
-                    }
-                  }}
+                <CopyChip
+                  value={d.phone}
                   title="複製電話"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                >
-                  <Hash width={9} height={9} />
-                  {d.phone}
-                  <Copy width={9} height={9} />
-                </button>
+                  label="電話"
+                  icon={<Hash width={9} height={9} />}
+                />
               </td>
 
               {/* 駕照號碼 */}

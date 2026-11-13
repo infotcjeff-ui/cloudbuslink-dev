@@ -37,13 +37,14 @@ import {
   WifiOff,
   UserCog,
   Hash,
-  Copy,
   FileSpreadsheet,
   Calendar,
+  RefreshCw,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import { supabaseBuses } from '@/lib/supabase-buses';
 import { dispatchNannyRefresh } from '@/lib/cbl-events';
 import {
@@ -681,6 +682,8 @@ export function BusesConsoleContent({
             driverId: resolvedDriverId,
             gpsDeviceId: state.gpsDeviceId || null,
             status: state.status,
+            // 未綁 808 設備前不設假定位 — 主頁只顯示 808 真實定位
+            currentLocation: undefined,
             createdAt: now,
           };
 
@@ -839,6 +842,93 @@ export function BusesConsoleContent({
     }
   }, [deleteTarget, students, toast]);
 
+  const [isSyncing, setIsSyncing] = React.useState(false);
+
+  /* -------- 從 808 GPS 同步車輛 (以 808 為準) -------- */
+  const handleSyncFrom808 = React.useCallback(async () => {
+    setIsSyncing(true);
+    try {
+      const { syncFrom808, normPlate } = await import('@/lib/onefleet');
+      const { STORAGE } = await import('@/lib/storage');
+      const res = await syncFrom808();
+      if (!res.ok) {
+        toast.error(res.error || '808 同步失敗');
+        return;
+      }
+      const raw = localStorage.getItem('cbl_auth');
+      const u = raw ? JSON.parse(raw) : null;
+      const clientId: string =
+        (u?.clientId as string) || STORAGE.clients.getAll()[0]?.id || '';
+      if (!clientId) {
+        toast.error('找不到學校資料, 請先建立學校');
+        return;
+      }
+      const now = new Date().toISOString();
+      let added = 0;
+      let updated = 0;
+      const existing = STORAGE.buses.getAll();
+      const byPlate = new Map(existing.map((b) => [normPlate(b.plateNumber), b]));
+      const byDevice = new Map(
+        existing.filter((b) => b.gpsDeviceId).map((b) => [b.gpsDeviceId as string, b]),
+      );
+      for (const v of res.vehicles) {
+        const plate = (v.plate || '').toUpperCase().trim();
+        if (!plate) continue;
+        const pos = res.byDeviceId[v.deviceId] || (plate ? res.byPlate[normPlate(plate)] : undefined);
+        const matched = (v.deviceId && byDevice.get(v.deviceId)) || byPlate.get(normPlate(plate));
+        const loc = pos
+          ? {
+              latitude: pos.latitude,
+              longitude: pos.longitude,
+              speed: pos.speed,
+              lastUpdated: now,
+              address: pos.address,
+              gpsTime: pos.gpsTime,
+              online: pos.online,
+            }
+          : undefined;
+        if (matched) {
+          const patch: Partial<Bus> = {};
+          if (v.deviceId && matched.gpsDeviceId !== v.deviceId) patch.gpsDeviceId = v.deviceId;
+          if (matched.status === 'inactive' && pos?.online) patch.status = 'active';
+          if (loc) patch.currentLocation = loc;
+          if (Object.keys(patch).length > 0) {
+            STORAGE.buses.update(matched.id, patch);
+            updated += 1;
+          }
+        } else {
+          STORAGE.buses.add({
+            id: STORAGE.genId('bus'),
+            clientId,
+            plateNumber: plate,
+            model: '未知型號 (808 同步)',
+            capacity: 28,
+            driverId: null,
+            gpsDeviceId: v.deviceId || null,
+            status: pos?.online ? 'active' : 'active',
+            currentLocation: loc,
+            createdAt: now,
+          });
+          added += 1;
+        }
+      }
+      // 重新讀回列表 (超管讀全部)
+      try {
+        const { STORAGE: S2 } = await import('@/lib/storage');
+        const rawU = localStorage.getItem('cbl_auth');
+        const uu = rawU ? JSON.parse(rawU) : null;
+        const superMode = uu?.role === 'super_admin' || uu?.role === 'system_admin';
+        setBuses(superMode ? S2.buses.getAll() : S2.buses.getByClient(clientId));
+      } catch { /* noop */ }
+      window.dispatchEvent(new CustomEvent('cbl-buses-refresh'));
+      toast.success(`808 同步完成: 新增 ${added} 輛, 更新 ${updated} 輛 (共 ${res.vehicles.length} 輛)`);
+    } catch (e) {
+      toast.error(`808 同步失敗: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsSyncing(false);
+    }
+  }, [toast]);
+
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
     if (filtered.length === 0) return;
@@ -950,6 +1040,17 @@ export function BusesConsoleContent({
         )}
 
         <span className="mx-1 h-5 w-px bg-slate-200 dark:bg-slate-700" />
+
+        <Button
+          variant="secondary"
+          size="sm"
+          startIcon={<RefreshCw width={12} height={12} />}
+          onClick={handleSyncFrom808}
+          disabled={isSyncing}
+          title="以 808 GPS 為準: 拉回車輛 + 設備號 + 即時位置"
+        >
+          {isSyncing ? '同步中…' : '從 808 GPS 同步車輛'}
+        </Button>
 
         <Button
           variant="secondary"
@@ -1311,20 +1412,13 @@ function DataTable({
 
               {/* 座位 (copyable chip) */}
               <td className="px-3 py-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                      navigator.clipboard.writeText(b.plateNumber).catch(() => {});
-                    }
-                  }}
+                <CopyChip
+                  value={b.plateNumber}
+                  display={`${b.capacity} 座`}
                   title="複製車牌"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                >
-                  <Hash width={9} height={9} />
-                  {b.capacity} 座
-                  <Copy width={9} height={9} />
-                </button>
+                  label="車牌"
+                  icon={<Hash width={9} height={9} />}
+                />
               </td>
 
               {/* 司機 */}

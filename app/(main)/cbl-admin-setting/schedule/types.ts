@@ -17,13 +17,15 @@ import type {
 } from '@/lib/types';
 
 /** Schedule 主 Console 的 tab */
-export type ScheduleTab = TripType | 'all';
+export type ScheduleTab = TripType | 'all' | 'history';
 
 /** 進階篩選條件 (L1 Filter Bar) */
 export interface ScheduleFilter {
   busId?: string;
   driverId?: string;
   nannyId?: string;
+  /** 狀態篩選: undefined / 'all' = 全部, 否則只顯示該狀態 */
+  status?: TripStatus | 'all';
   /** 'today' | 'tomorrow' | ISO date | 'all' */
   dateRange: string;
   q: string;
@@ -112,6 +114,7 @@ export const SCHEDULE_TABS: { id: ScheduleTab; label: string; color: string }[] 
   { id: 'morning',   label: '早班',     color: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200' },
   { id: 'afternoon', label: '午班',     color: 'bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200' },
   { id: 'custom',    label: '自訂',     color: 'bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-200' },
+  { id: 'history',   label: '過往紀錄', color: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200' },
 ];
 
 export const STATUS_LABEL: Record<TripStatus, string> = {

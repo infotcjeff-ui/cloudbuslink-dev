@@ -6,16 +6,16 @@
  * 這裡只負責「選單定義 + 外殼」, 內頁由 nested route 決定:
  *   /cbl-admin-setting                  → 概覽
  *   /cbl-admin-setting/schedule         → 班次
- *   /cbl-admin-setting/bus              → 校巴
- *   /cbl-admin-setting/bus/trips        → 路線
- *   /cbl-admin-setting/bus/drivers      → 司機
+ *   /cbl-admin-setting/schedule/bus     → 校巴
+ *   /cbl-admin-setting/schedule/routes  → 路線
+ *   /cbl-admin-setting/schedule/drivers → 司機
  *   /cbl-admin-setting/parents          → 家長
  *   /cbl-admin-setting/students         → 學生
  *   /cbl-admin-setting/nannys           → 保姆
  *   /cbl-admin-setting/reports          → 報表
- *   /cbl-admin-setting/user             → 用戶
+ *   /cbl-admin-setting/user             → 用戶 (帳號管理 + 所屬機構)
  *   /cbl-admin-setting/announcements    → 公告
- *   /cbl-admin-setting/site-tool        → 網站設定
+ *   /cbl-admin-setting/site-tool        → 網站設定 (摘要)
  *
  * 外殼 (header / 巢狀 sidebar / dark mode / HK 時間) 已抽到
  * components/admin/AdminShell.tsx, 與 /system-admin-setting 共用。
@@ -24,9 +24,12 @@
 import {
   LayoutDashboard, Users, Bus, UserCheck, Baby,
   BarChart3, Megaphone, Wrench, UserCog,
-  FileSpreadsheet, Receipt, ShieldCheck, CalendarClock
+  FileSpreadsheet, Receipt, ShieldCheck, CalendarClock,
+  Siren
 } from 'lucide-react';
 import { AdminShell, type AdminTabItem } from '@/components/admin/AdminShell';
+import { AcademicYearProvider } from './AcademicYearProvider';
+import { AcademicYearSelector } from './AcademicYearSelector';
 
 // 左側選單設定 — 支援巢狀結構 (parent + 可選 children)
 // 範例:
@@ -41,13 +44,13 @@ const TABS: AdminTabItem[] = [
   // 班次群組 (子頁: 校巴, 路線, 司機)
   // 班次 parent 自身指向 /cbl-admin-setting/schedule (班次總覽 landing)
   // 校巴 / 路線 / 司機 都是同一個領域下的細分, 點 sidebar 校巴 / 路線 / 司機
-  // 會直接打開對應的子頁 (校巴 → /bus landing, 路線 → /bus/trips, 司機 → /bus/drivers)
+  // 會直接打開對應的子頁 (校巴 → /schedule/bus, 路線 → /schedule/routes, 司機 → /schedule/drivers)
   {
     id: 'schedule', label: '班次', path: '/cbl-admin-setting/schedule', icon: CalendarClock,
     children: [
-      { id: 'schedule-bus',     label: '校巴', path: '/cbl-admin-setting/bus',         icon: Bus },
-      { id: 'schedule-trips',   label: '路線', path: '/cbl-admin-setting/bus/trips',   icon: FileSpreadsheet },
-      { id: 'schedule-drivers', label: '司機', path: '/cbl-admin-setting/bus/drivers', icon: UserCog },
+      { id: 'schedule-bus',     label: '校巴', path: '/cbl-admin-setting/schedule/bus',     icon: Bus },
+      { id: 'schedule-trips',   label: '路線', path: '/cbl-admin-setting/schedule/routes',  icon: FileSpreadsheet },
+      { id: 'schedule-drivers', label: '司機', path: '/cbl-admin-setting/schedule/drivers', icon: UserCog },
     ],
   },
 
@@ -68,6 +71,7 @@ const TABS: AdminTabItem[] = [
   { id: 'nannys', label: '保姆', path: '/cbl-admin-setting/nannys', icon: UserCheck },
 
   { id: 'reports',       label: '報表',     path: '/cbl-admin-setting/reports',      icon: BarChart3 },
+  { id: 'incidents',     label: '異常回報', path: '/cbl-admin-setting/incidents',    icon: Siren },
   { id: 'user',          label: '用戶',     path: '/cbl-admin-setting/user',         icon: ShieldCheck },
   { id: 'announcements', label: '公告',     path: '/cbl-admin-setting/announcements', icon: Megaphone },
   { id: 'site-tool',     label: '網站設定', path: '/cbl-admin-setting/site-tool',    icon: Wrench },
@@ -75,14 +79,20 @@ const TABS: AdminTabItem[] = [
 
 export default function CblAdminSettingLayout({ children }: { children: React.ReactNode }) {
   return (
-    <AdminShell
-      title="CBL Admin Setting"
-      tabs={TABS}
-      backHref="/settings"
-      backLabel="返回設定"
-      footerText="CloudBusLink v1.0.0"
-    >
-      {children}
-    </AdminShell>
+    // ⚠️ AcademicYearProvider 必須包在 AdminShell 外層 (而不是內層) ——
+    //    AdminShell 的 header 也要用到學年範圍 (切換器 + 唯讀徽章),
+    //    放內層的話 header 拿不到 context。
+    <AcademicYearProvider>
+      <AdminShell
+        title="CBL Admin Setting"
+        tabs={TABS}
+        backHref="/settings"
+        backLabel="返回設定"
+        footerText="CloudBusLink v1.0.0"
+        headerExtra={<AcademicYearSelector />}
+      >
+        {children}
+      </AdminShell>
+    </AcademicYearProvider>
   );
 }

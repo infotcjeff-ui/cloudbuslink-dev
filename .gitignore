@@ -41,3 +41,6 @@ cdp-screenshot.png
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# CHSC 學校名單的 CSV 快取 (scripts/fetch-schools.mjs 用)
+/.cache/

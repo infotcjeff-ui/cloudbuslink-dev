@@ -604,7 +604,7 @@ export function BusFormModal({
                     label="GPS 裝置 ID (選填)"
                     value={form.gpsDeviceId}
                     onChange={(v) => setForm((p) => ({ ...p, gpsDeviceId: v.trim() }))}
-                    placeholder="例如: GPS-DEV-001"
+                    placeholder="例如: 0880107600011 (808 設備號)"
                     maxLength={40}
                     icon={<Wifi width={12} height={12} />}
                   />

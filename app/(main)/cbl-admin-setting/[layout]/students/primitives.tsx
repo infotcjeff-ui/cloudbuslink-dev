@@ -177,12 +177,15 @@ export function IconButton({
   title,
   variant = 'ghost',
   className = '',
+  disabled = false,
 }: {
   onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void;
   children: React.ReactNode;
   title?: string;
   variant?: IconButtonVariant;
   className?: string;
+  /** 停用 (例: 封存學年 → 唯讀模式, 不能編輯/刪除) */
+  disabled?: boolean;
 }) {
   const variants: Record<IconButtonVariant, string> = {
     ghost:
@@ -203,6 +206,7 @@ export function IconButton({
       type="button"
       title={title}
       aria-label={title}
+      disabled={disabled}
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -211,6 +215,8 @@ export function IconButton({
       className={cn(
         'inline-flex h-7 w-7 items-center justify-center rounded-md cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400',
         variants[variant],
+        // 停用時: 淡化 + 游標改變 + 移除 hover 效果
+        disabled && 'opacity-40 cursor-not-allowed pointer-events-none',
         className,
       )}
     >

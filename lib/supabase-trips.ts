@@ -24,6 +24,20 @@ export interface TripRow {
   busId: string;
   nannyId: string;
   date: string;
+  /**
+   * 班次所屬學年 (4 位 code, 例 '2627') — migration 0017。
+   * 沒有學年邊界, 26-27 與 27-28 的班次會混在一起。
+   */
+  academicYear?: string;
+  /**
+   * 建班當下的司機 id 快照 — migration 0017。
+   * 沒有它, 校巴改綁司機後歷史班次會顯示錯的人。
+   */
+  driverIdSnapshot?: string | null;
+  /**
+   * 建班當下的車牌快照 — migration 0017。
+   */
+  busPlateNumberSnapshot?: string | null;
   type: 'morning' | 'afternoon' | 'custom';
   /** 自訂班次類型名稱 — 僅 type='custom' 時有值, 供預覽 / 清單顯示 (DB 欄位待 migration 0010) */
   customTypeLabel?: string | null;
@@ -286,6 +300,10 @@ export async function ensureTripParents(
 let routeIdColumnCache: boolean | null = null;
 /** custom_type_label 欄位存在與否的快取 (null = 尚未探測, migration 0010) */
 let customTypeLabelColumnCache: boolean | null = null;
+/** academic_year 欄位存在與否的快取 (null = 尚未探測, migration 0017) */
+let academicYearColumnCache: boolean | null = null;
+/** driver_id_snapshot / bus_plate_number_snapshot 欄位存在與否 (migration 0017) */
+let tripSnapshotColumnCache: boolean | null = null;
 
 export const supabaseTrips = {
   async getAll(): Promise<{ data: TripRow[]; error?: string }> {
@@ -350,6 +368,47 @@ export const supabaseTrips = {
     return customTypeLabelColumnCache;
   },
 
+  /**
+   * academic_year 欄位是否存在於 DB (migration 0017)?
+   * 未套用時寫入會剔除該欄 (資料仍可同步, 只是沒有學年邊界)。
+   */
+  async hasAcademicYearColumn(): Promise<boolean> {
+    if (academicYearColumnCache !== null) return academicYearColumnCache;
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase.from('cbl_trips').select('academic_year').limit(1);
+    academicYearColumnCache = !error;
+    if (!academicYearColumnCache) {
+      console.warn(
+        '[Supabase] cbl_trips.academic_year 欄位不存在 — 請到 Supabase SQL Editor 執行 ' +
+        'supabase/migrations/0017_entity_academic_year.sql (班次照常同步, 但沒有學年邊界)',
+      );
+    }
+    return academicYearColumnCache;
+  },
+
+  /**
+   * driver_id_snapshot / bus_plate_number_snapshot 欄位是否存在於 DB (migration 0017)?
+   *
+   * ⚠️ 這兩個欄位是「歷史保真」的關鍵 ——
+   *    沒有它們, 27-28 換了司機後回頭看 26-27 的班次會顯示錯的司機。
+   */
+  async hasTripSnapshotColumns(): Promise<boolean> {
+    if (tripSnapshotColumnCache !== null) return tripSnapshotColumnCache;
+    const { supabase } = await import('./supabase');
+    const { error } = await supabase
+      .from('cbl_trips')
+      .select('driver_id_snapshot,bus_plate_number_snapshot')
+      .limit(1);
+    tripSnapshotColumnCache = !error;
+    if (!tripSnapshotColumnCache) {
+      console.warn(
+        '[Supabase] cbl_trips 快照欄位不存在 — 請執行 ' +
+        'supabase/migrations/0017_entity_academic_year.sql (歷史班次的司機/車牌會隨改綁而變動)',
+      );
+    }
+    return tripSnapshotColumnCache;
+  },
+
   async add(trip: TripRow): Promise<{ success: boolean; error?: string }> {
     const { supabase } = await import('./supabase');
     const payload = snakify(trip);
@@ -362,6 +421,14 @@ export const supabaseTrips = {
     // migration 0010 未套用時, 剔除 custom_type_label (自訂班次名稱僅存本機)
     if (!(await this.hasCustomTypeLabelColumn())) {
       delete payload.custom_type_label;
+    }
+    // migration 0017 未套用時, 剔除學年與快照欄位 (資料仍可同步, 只是沒有學年邊界)
+    if (!(await this.hasAcademicYearColumn())) {
+      delete payload.academic_year;
+    }
+    if (!(await this.hasTripSnapshotColumns())) {
+      delete payload.driver_id_snapshot;
+      delete payload.bus_plate_number_snapshot;
     }
     const { error } = await supabase.from('cbl_trips').insert(payload);
     if (error) return { success: false, error: error.message };
@@ -385,6 +452,17 @@ export const supabaseTrips = {
     // migration 0010 未套用時, 剔除 custom_type_label
     if ('customTypeLabel' in patch && !(await this.hasCustomTypeLabelColumn())) {
       delete payload.custom_type_label;
+    }
+    // migration 0017 未套用時, 剔除學年與快照欄位
+    if ('academicYear' in patch && !(await this.hasAcademicYearColumn())) {
+      delete payload.academic_year;
+    }
+    if (
+      ('driverIdSnapshot' in patch || 'busPlateNumberSnapshot' in patch) &&
+      !(await this.hasTripSnapshotColumns())
+    ) {
+      delete payload.driver_id_snapshot;
+      delete payload.bus_plate_number_snapshot;
     }
     // ⚠️ 必須 .select() 二次驗證 ——
     //   PostgREST 對「update 0 筆」(id 在雲端不存在) 回傳成功 + 無錯誤,
@@ -447,10 +525,17 @@ export const supabaseTrips = {
     const { supabase } = await import('./supabase');
     const hasRouteId = await this.hasRouteIdColumn();
     const hasCustomLabel = await this.hasCustomTypeLabelColumn();
+    const hasAcademicYear = await this.hasAcademicYearColumn();
+    const hasSnapshots = await this.hasTripSnapshotColumns();
     const payload = rows.map((r) => {
       const p = snakify(r) as Record<string, unknown>;
       if (!hasRouteId) delete p.route_id;
       if (!hasCustomLabel) delete p.custom_type_label;
+      if (!hasAcademicYear) delete p.academic_year;
+      if (!hasSnapshots) {
+        delete p.driver_id_snapshot;
+        delete p.bus_plate_number_snapshot;
+      }
       return p;
     });
     const { error } = await supabase.from('cbl_trips').insert(payload);

@@ -3,23 +3,18 @@
 /**
  * RouteStopsTimelineEditor — 上落車地點與時間軸
  *
- * 對應使用者需求第二部分: 「核心」上落車地點與時間軸
+ * 對應使用者需求 (2026-11-03 更新):
  *   1. 站點順序 (Seq No.) — 自動生成數字, 支援滑鼠拖曳上下調整
  *   2. 站點類型 — 起點站 / 分站 / 終點站
  *   3. 大概到站時間 (ETA) — 24h Time Picker
- *   4. 站點名稱 — 文字輸入
- *   5. 地理定位 (GPS) — 暫時可空白
- *   6. 乘客 (學生) — 選取已綁定該車輛的學生
- *   7. 司機/家長備註 — 文字輸入
+ *   4. 站點地址 — 文字輸入 (地圖預覽依此地址自動定位)
+ *   5. 備註 — 司機/家長備註
+ *   6. 確定按鈕 — 按下後收起站點
+ *   7. 地圖路徑預覽 — 依站點地址自動 geocode (OSM Nominatim) + 顯示路線
  *
- * 額外功能:
- *   - 一鍵反轉路線
- *   - 地圖路徑預覽
+ * 已移除: 地理定位 GPS / 乘客 (學生) 欄位。
  *
  * 範圍: 僅 /cbl-admin-setting/bus/trips/ 內使用。
- *
- * 設計語言: 沿用 OneFleet 風格, 跟 /students 的 primitives 一致;
- * 拖曳用 framer-motion Reorder.Group/Item。
  */
 
 import * as React from 'react';
@@ -35,15 +30,10 @@ import {
   Plus,
   Clock,
   MapPin,
-  Users as UsersIcon,
-  Pencil,
   Check,
-  X,
   ChevronDown,
-  ChevronUp,
   Sparkles,
   ArrowRightLeft,
-  Search,
   Route as RouteIcon,
   Info,
 } from 'lucide-react';
@@ -51,11 +41,10 @@ import { cn } from '@/lib/utils';
 import { Button, Pill, Dot, IconButton } from './primitives';
 import { EASE } from './design-tokens';
 import {
-  EMPTY_STOP_DRAFT,
   STOP_KIND_OPTIONS,
   type RouteStopDraft,
 } from './types';
-import type { RouteStop, Student, RouteStopKind } from '@/lib/types';
+import type { RouteStop, RouteStopKind } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
 /*  Helpers                                                                    */
@@ -67,18 +56,6 @@ function stopKindTone(kind: RouteStopKind): 'success' | 'danger' | 'neutral' {
 
 function stopKindLabel(kind: RouteStopKind): string {
   return kind === 'origin' ? '起點' : kind === 'terminal' ? '終點' : '分站';
-}
-
-function draftFromStop(s: RouteStop): RouteStopDraft {
-  return {
-    kind: s.kind,
-    eta: s.eta,
-    name: s.name,
-    latitude: s.latitude,
-    longitude: s.longitude,
-    studentIds: [...s.studentIds],
-    notes: s.notes,
-  };
 }
 
 /** 將現有 RouteStop[] (含 id/seq) 對齊成新順序的 RouteStop[] (重新編號 seq) */
@@ -99,219 +76,23 @@ function reverseStops(stops: RouteStop[]): RouteStop[] {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  StudentMultiSelect — 依第一步選定車輛的綁定學生, 多選                       */
-/* -------------------------------------------------------------------------- */
-
-function StudentMultiSelect({
-  students,
-  selectedIds,
-  onChange,
-}: {
-  students: Student[];
-  selectedIds: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const [open, setOpen] = React.useState(false);
-  const [query, setQuery] = React.useState('');
-
-  const selectedStudents = React.useMemo(
-    () =>
-      selectedIds
-        .map((id) => students.find((s) => s.id === id))
-        .filter((s): s is Student => Boolean(s)),
-    [selectedIds, students],
-  );
-
-  if (students.length === 0) {
-    return (
-      <div className="rounded-md border border-dashed border-slate-200 px-3 py-2.5 text-[11px] text-slate-500 dark:border-slate-700 dark:text-slate-400">
-        此車輛目前沒有綁定任何學生。
-      </div>
-    );
-  }
-
-  const q = query.trim().toLowerCase();
-  const filtered = students
-    .filter((s) => !q || s.name.toLowerCase().includes(q) || s.studentId.toLowerCase().includes(q))
-    .sort((a, b) => a.classNumber.localeCompare(b.classNumber));
-
-  const toggle = (id: string) =>
-    onChange(
-      selectedIds.includes(id) ? selectedIds.filter((sid) => sid !== id) : [...selectedIds, id],
-    );
-
-  const selectAllFiltered = () => {
-    const ids = new Set(selectedIds);
-    filtered.forEach((s) => ids.add(s.id));
-    onChange([...ids]);
-  };
-  const clearAll = () => onChange([]);
-
-  const MAX_CHIPS = 6;
-  const visibleChips = selectedStudents.slice(0, MAX_CHIPS);
-  const hiddenCount = selectedStudents.length - visibleChips.length;
-
-  return (
-    <div className="rounded-md border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700">
-      {/* 摘要列: 永遠可見, 不展開不佔位 */}
-      <div className="px-2.5 pt-2 pb-2">
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200 tabular-nums">
-            已選 {selectedIds.length}/{students.length}
-          </span>
-          {selectedIds.length > 0 && (
-            <button
-              type="button"
-              onClick={clearAll}
-              className="text-[10.5px] text-slate-400 hover:text-rose-500 transition-colors cursor-pointer"
-            >
-              清除
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => setOpen((v) => !v)}
-            aria-expanded={open}
-            className="ml-auto inline-flex items-center gap-1 h-6 px-2 rounded-md text-[11px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-950/40 transition-colors cursor-pointer"
-          >
-            {open ? '收合' : selectedIds.length > 0 ? '增減學生' : '選擇學生'}
-            <motion.span
-              animate={{ rotate: open ? 180 : 0 }}
-              transition={{ duration: 0.14 }}
-              className="block"
-            >
-              <ChevronDown width={12} height={12} />
-            </motion.span>
-          </button>
-        </div>
-        {/* 已選 chips (最多 6 + +N, 超長不撐版) */}
-        {selectedStudents.length > 0 ? (
-          <div className="flex flex-wrap gap-1 mt-1.5">
-            {visibleChips.map((s) => (
-              <span
-                key={s.id}
-                title={`${s.name} · ${s.classNumber} · ${s.studentId}`}
-                className="inline-flex items-center gap-1 max-w-[160px] pl-2 pr-1 py-0.5 rounded-full bg-blue-50 text-blue-800 border border-blue-200/70 text-[11px] dark:bg-blue-950/40 dark:text-blue-200 dark:border-blue-800/50"
-              >
-                <span className="truncate font-medium">{s.name}</span>
-                <button
-                  type="button"
-                  onClick={() => toggle(s.id)}
-                  aria-label={`移除 ${s.name}`}
-                  className="inline-flex h-4 w-4 items-center justify-center rounded-full hover:bg-blue-200/70 dark:hover:bg-blue-800/60 cursor-pointer shrink-0"
-                >
-                  <X width={10} height={10} strokeWidth={3} />
-                </button>
-              </span>
-            ))}
-            {hiddenCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setOpen(true)}
-                title={selectedStudents.map((s) => s.name).join('、')}
-                className="inline-flex items-center h-[22px] px-2 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors cursor-pointer"
-              >
-                +{hiddenCount} 更多
-              </button>
-            )}
-          </div>
-        ) : (
-          <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
-            尚未選擇學生, 撳「選擇學生」勾選此站上/落車名單。
-          </p>
-        )}
-      </div>
-
-      {/* 展開: 搜尋 + 滾動清單 (固定高度, 20-35 人唔會撐版) */}
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            key="student-picker"
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: 'auto', opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.18, ease: EASE }}
-            className="overflow-hidden border-t border-slate-100 dark:border-slate-700/80"
-          >
-            <div className="flex items-center gap-2 px-2.5 py-1.5 border-b border-slate-100 dark:border-slate-700/80">
-              <Search width={11} height={11} className="text-slate-400 shrink-0" />
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜尋學生姓名 / 學號…"
-                className="flex-1 h-6 bg-transparent text-[12px] text-slate-700 placeholder:text-slate-400 focus:outline-none dark:text-slate-200"
-              />
-              <button
-                type="button"
-                onClick={selectAllFiltered}
-                className="text-[10.5px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-300 shrink-0 cursor-pointer"
-              >
-                全選篩選
-              </button>
-            </div>
-            <ul className="max-h-[168px] overflow-y-auto p-1.5 grid grid-cols-2 gap-1 content-start">
-              {filtered.length === 0 ? (
-                <li className="col-span-2 px-2.5 py-2 text-[11px] text-slate-500 dark:text-slate-400">
-                  沒有符合「{query}」的學生
-                </li>
-              ) : (
-                filtered.map((s) => {
-                  const checked = selectedIds.includes(s.id);
-                  return (
-                    <li
-                      key={s.id}
-                      onClick={() => toggle(s.id)}
-                      title={`${s.name} · ${s.classNumber} · ${s.studentId}`}
-                      className={cn(
-                        'flex items-center gap-1.5 px-2 py-1.5 rounded-md cursor-pointer text-[12px] transition-colors min-w-0',
-                        checked
-                          ? 'bg-blue-50/60 text-blue-900 dark:bg-blue-950/40 dark:text-blue-200'
-                          : 'text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800/60',
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          'inline-flex h-4 w-4 items-center justify-center rounded border-2 shrink-0',
-                          checked ? 'border-blue-600 bg-blue-600' : 'border-slate-300 dark:border-slate-600',
-                        )}
-                      >
-                        {checked && <Check width={10} height={10} className="text-white" strokeWidth={3.5} />}
-                      </span>
-                      <span className="font-medium truncate">{s.name}</span>
-                      <span className="text-[9px] leading-tight text-slate-400 dark:text-slate-500 ml-auto shrink-0 tabular-nums">
-                        {s.classNumber} · {s.studentId}
-                      </span>
-                    </li>
-                  );
-                })
-              )}
-            </ul>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
 /*  StopRow — 單一站點的可編輯行                                                  */
 /* -------------------------------------------------------------------------- */
 
 function StopRow({
   stop,
   index,
-  busStudents,
   expanded,
   onToggleExpand,
+  onCollapse,
   onUpdate,
   onRemove,
 }: {
   stop: RouteStop;
   index: number;
-  busStudents: Student[];
   expanded: boolean;
   onToggleExpand: () => void;
+  onCollapse: () => void;
   onUpdate: (patch: Partial<RouteStopDraft>) => void;
   onRemove: () => void;
 }) {
@@ -358,13 +139,13 @@ function StopRow({
           <div className="flex-1 min-w-0">
             <p className="text-[12.5px] font-medium text-slate-900 truncate dark:text-slate-100">
               {stop.name || (
-                <span className="text-slate-400 italic">未命名站點</span>
+                <span className="text-slate-400 italic">未填寫地址</span>
               )}
             </p>
-            {stop.studentIds.length > 0 && (
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1 mt-0.5">
-                <UsersIcon width={9} height={9} />
-                {stop.studentIds.length} 位學生
+            {stop.eta && (
+              <p className="text-[10px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1 mt-0.5 tabular-nums">
+                <Clock width={9} height={9} />
+                {stop.eta}
               </p>
             )}
           </div>
@@ -451,35 +232,10 @@ function StopRow({
                   />
                 </div>
 
-                {/* 地理定位 GPS (地圖預覽用) */}
-                <div>
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    地理定位 GPS
-                  </label>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <input
-                      type="number"
-                      step="any"
-                      value={stop.latitude ?? ''}
-                      onChange={(e) => onUpdate({ latitude: e.target.value === '' ? null : Number(e.target.value) })}
-                      placeholder="緯度 22.38"
-                      className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                    />
-                    <input
-                      type="number"
-                      step="any"
-                      value={stop.longitude ?? ''}
-                      onChange={(e) => onUpdate({ longitude: e.target.value === '' ? null : Number(e.target.value) })}
-                      placeholder="經度 114.17"
-                      className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                    />
-                  </div>
-                </div>
-
-                {/* 站點名稱 */}
+                {/* 站點地址 */}
                 <div className="md:col-span-2">
                   <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
-                    站點名稱 <span className="text-rose-500">*</span>
+                    站點地址 <span className="text-rose-500">*</span>
                   </label>
                   <div className="relative">
                     <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
@@ -495,20 +251,32 @@ function StopRow({
                   </div>
                 </div>
 
-                {/* 學生多選 (依第一步選定車輛) */}
+                {/* 備註 */}
                 <div className="md:col-span-2">
-                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400 inline-flex items-center gap-1.5">
-                    <UsersIcon width={11} height={11} />
-                    乘客 (學生) — 此站上/落車
-                    <span className="text-[10px] text-slate-400 normal-case font-medium">({stop.studentIds.length} 位已選)</span>
+                  <label className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400">
+                    備註
                   </label>
-                  <StudentMultiSelect
-                    students={busStudents}
-                    selectedIds={stop.studentIds}
-                    onChange={(next) => onUpdate({ studentIds: next })}
+                  <input
+                    type="text"
+                    value={stop.notes ?? ''}
+                    onChange={(e) => onUpdate({ notes: e.target.value })}
+                    placeholder="司機 / 家長備註 (選填)"
+                    className="w-full h-9 px-2.5 rounded-md border border-slate-200 bg-white text-[12.5px] font-medium text-slate-700 placeholder:text-slate-400 placeholder:font-normal focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
                   />
                 </div>
 
+                {/* 確定按鈕 — 按下後收起站點 */}
+                <div className="md:col-span-2 flex justify-end pt-1">
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    startIcon={<Check width={12} height={12} />}
+                    onClick={onCollapse}
+                  >
+                    確定
+                  </Button>
+                </div>
               </div>
             </motion.div>
           )}
@@ -519,7 +287,7 @@ function StopRow({
 }
 
 /* -------------------------------------------------------------------------- */
-/*  MapPreview — 地圖路徑預覽 (OpenStreetMap raster + maplibre-gl)               */
+/*  MapPreview — 地圖路徑預覽 (站點地址 → OSM Nominatim 自動定位)                  */
 /* -------------------------------------------------------------------------- */
 
 const OSM_STYLE: unknown = {
@@ -540,34 +308,113 @@ function kindColor(kind: RouteStopKind): string {
   return kind === 'origin' ? '#10b981' : kind === 'terminal' ? '#f43f5e' : '#2563eb';
 }
 
+/** 地址正規化 (去空格 + 小寫) — 用作 geocode cache key */
+function normalizeAddress(addr: string): string {
+  return addr.trim().toLowerCase();
+}
+
+/**
+ * 站點地址 → 座標 (Nominatim)。
+ * 自動補「Hong Kong」偏置, 令「圍方 / 大圍站」呢類本地地址搵得中。
+ */
+async function geocodeAddress(addr: string): Promise<{ lat: number; lon: number } | null> {
+  const q = addr.trim();
+  if (q.length < 2) return null;
+  const hasHK = /香港|hong\s*kong/i.test(q);
+  const query = hasHK ? q : `${q}, Hong Kong`;
+  const url = `https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q=${encodeURIComponent(query)}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{ lat: string; lon: string }>;
+  if (!data || data.length === 0) return null;
+  const lat = Number(data[0].lat);
+  const lon = Number(data[0].lon);
+  if (Number.isNaN(lat) || Number.isNaN(lon)) return null;
+  return { lat, lon };
+}
+
 function MapPreview({ stops }: { stops: RouteStop[] }) {
-  // 用「節點 state」而不是 ref 追蹤容器 ——
-  // ref 只在 mount 時賦值, 若容器是後來才渲染出來 (例如 stops 從空變有資料),
-  // 底下那個 useEffect 依賴 [] 不會重跑, 地圖就永遠不會初始化 (空白框無 pin 無路線)。
   const [container, setContainer] = React.useState<HTMLDivElement | null>(null);
   const mapRef = React.useRef<maplibregl.Map | null>(null);
   const markersRef = React.useRef<maplibregl.Marker[]>([]);
   const [mapReady, setMapReady] = React.useState(false);
+  const [points, setPoints] = React.useState<Record<string, { lat: number; lon: number }>>({});
+  const [locating, setLocating] = React.useState(false);
+  const cacheRef = React.useRef(new Map<string, { lat: number; lon: number }>());
+  const seqRef = React.useRef(0);
+
+  // 所有站點的地址簽名 — 地址改咗先重新定位
+  const addrKey = stops.map((s) => `${s.id}:${s.name.trim()}`).join('|');
+
+  /* 地址 → 座標 (debounced, 有 cache 就唔打 API) */
+  React.useEffect(() => {
+    const mySeq = ++seqRef.current;
+    const timer = window.setTimeout(async () => {
+      const targets = stops.filter((s) => s.name.trim().length >= 2);
+      if (targets.length === 0) {
+        if (seqRef.current === mySeq) setPoints({});
+        return;
+      }
+      // 全部命中 cache → 直接用, 唔閃 locating
+      const missing = targets.filter((s) => !cacheRef.current.has(normalizeAddress(s.name)));
+      if (missing.length === 0) {
+        if (seqRef.current !== mySeq) return;
+        const next: Record<string, { lat: number; lon: number }> = {};
+        targets.forEach((s) => {
+          const hit = cacheRef.current.get(normalizeAddress(s.name));
+          if (hit) next[s.id] = hit;
+        });
+        setPoints(next);
+        return;
+      }
+      if (seqRef.current === mySeq) setLocating(true);
+      const next: Record<string, { lat: number; lon: number }> = {};
+      // 逐個打 Nominatim (遵守 1 req/sec 禮貌間隔)
+      for (const s of targets) {
+        const key = normalizeAddress(s.name);
+        const cached = cacheRef.current.get(key);
+        if (cached) {
+          next[s.id] = cached;
+          continue;
+        }
+        try {
+          const pt = await geocodeAddress(s.name);
+          if (seqRef.current !== mySeq) return;
+          if (pt) {
+            cacheRef.current.set(key, pt);
+            next[s.id] = pt;
+          }
+        } catch {
+          /* 單個地址失敗唔阻其他站點 */
+        }
+        await new Promise((r) => setTimeout(r, 900));
+        if (seqRef.current !== mySeq) return;
+      }
+      if (seqRef.current !== mySeq) return;
+      setPoints(next);
+      setLocating(false);
+    }, 800);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [addrKey]);
 
   const valid = React.useMemo(
     () =>
-      (stops as RouteStop[]).filter(
-        (s) => s.latitude !== null && s.longitude !== null,
-      ),
-    [stops],
+      stops
+        .filter((s) => points[s.id])
+        .map((s) => ({ ...s, latitude: points[s.id].lat, longitude: points[s.id].lon })),
+    [stops, points],
   );
 
-  /* 地圖初始化 — 依賴 container 節點 (節點出現/換掉時才重建) */
+  /* 地圖初始化 — 依賴 container 節點 */
   React.useEffect(() => {
     if (!container) return;
     if (mapRef.current) return;
-
-    const first = valid[0];
     const map = new maplibregl.Map({
       container,
       style: OSM_STYLE as never,
-      center: first ? [first.longitude as number, first.latitude as number] : [114.1694, 22.3193],
-      zoom: first ? 13 : 11,
+      center: [114.1694, 22.3193],
+      zoom: 11,
       attributionControl: { compact: false } as never,
     });
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
@@ -575,7 +422,6 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
     const ready = () => setMapReady(true);
     map.on('load', ready);
     map.on('idle', ready);
-    // 保險: 若 load 事件因故沒觸發 (例如 style 已在 cache), 3 秒後也放行
     const timer = setTimeout(ready, 3000);
     return () => {
       clearTimeout(timer);
@@ -590,19 +436,20 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [container]);
 
-  /* 站點 / GPS 變動 → 重繪 markers + 路線 + 視野 */
+  /* 站點 / 定位變動 → 重繪 markers + 路線 + 視野 */
   React.useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapReady) return;
-
     const draw = () => {
-      // 清舊 markers
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
-
-      // 沒有任何有效站點 → 只清掉舊圖, 不畫線
-      if (valid.length === 0) return;
-
+      if (valid.length === 0) {
+        const src = map.getSource('route') as maplibregl.GeoJSONSource | undefined;
+        if (src) {
+          src.setData({ type: 'FeatureCollection', features: [] } as never);
+        }
+        return;
+      }
       valid.forEach((s) => {
         const el = document.createElement('div');
         const c = kindColor(s.kind);
@@ -619,15 +466,12 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
           .setLngLat([s.longitude as number, s.latitude as number])
           .setPopup(
             new maplibregl.Popup({ offset: 14, closeButton: false }).setText(
-              `${s.seq}. ${s.name || '未命名站點'}`,
+              `${s.seq}. ${s.name || '未填寫地址'}`,
             ),
           )
           .addTo(map);
         markersRef.current.push(marker);
       });
-
-      // 路線 (GeoJSON LineString) — 至少 2 個站點才畫線;
-      // 只有 1 站時送空 FeatureCollection (LineString 至少要 2 個點, 否則 GeoJSON 非法)
       const hasLine = valid.length >= 2;
       const geojson = {
         type: 'FeatureCollection',
@@ -644,10 +488,6 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
             ]
           : [],
       };
-
-      // source / layer 只建立一次, 之後用 setData 更新。
-      // 注意: 就算當下只有 1 個站點 (畫不出線), 也要先把 source 建立好 ——
-      // 否則之後新增第 2 個站點時 source 還沒建立, 線會一直畫不出來。
       const src = map.getSource('route') as maplibregl.GeoJSONSource | undefined;
       if (src) {
         src.setData(geojson as never);
@@ -660,8 +500,6 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
           paint: { 'line-color': '#2563eb', 'line-width': 4, 'line-opacity': 0.9 },
         });
       }
-
-      // 視野: 1 站 → 置中放大; 多站 → fitBounds
       if (valid.length === 1) {
         map.easeTo({
           center: [valid[0].longitude as number, valid[0].latitude as number],
@@ -674,14 +512,13 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
         map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 400 });
       }
     };
-
-    // 用 isStyleLoaded() 而非 loaded() ——
-    // loaded() 會因瓦片載入而反覆 true/false, 一旦錯過 'load' 事件就再也畫不出來。
     if (map.isStyleLoaded()) draw();
     else map.once('style.load', draw);
   }, [valid, mapReady]);
 
-  if (valid.length === 0) {
+  const locatedCount = valid.length;
+
+  if (stops.length === 0 || locatedCount === 0) {
     return (
       <div className="rounded-xl border border-slate-200 bg-white dark:bg-slate-900 dark:border-slate-700 overflow-hidden">
         <div className="px-3 py-2 border-b border-slate-100 dark:border-slate-700/80 flex items-center gap-2">
@@ -696,7 +533,11 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
         <div className="p-5">
           <div className="flex items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
             <Info width={12} height={12} />
-            尚未輸入經緯度, 輸入至少 1 個站點的 GPS 即可在 OSM 地圖預覽。
+            {stops.length === 0
+              ? '尚未新增任何站點, 新增後會按站點地址自動定位預覽。'
+              : locating
+              ? '正按站點地址定位中…'
+              : '輸入站點地址後即可在地圖預覽路線 (未能定位的地址不會顯示)。'}
           </div>
         </div>
       </div>
@@ -713,9 +554,14 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
           <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
             地圖路徑預覽
           </span>
-          <Pill tone="info" size="sm">
-            {valid.length} 站
+          <Pill tone="primary" size="sm">
+            {locatedCount} 站已定位
           </Pill>
+          {locating && (
+            <Pill tone="neutral" size="sm">
+              定位中…
+            </Pill>
+          )}
         </div>
         <span className="text-[10px] text-slate-400 tabular-nums truncate max-w-[45%]">
           {valid[0].name || `站點 ${valid[0].seq}`} → {valid[valid.length - 1].name || `站點 ${valid[valid.length - 1].seq}`}
@@ -727,7 +573,7 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
       <div className="px-3 py-1.5 border-t border-slate-100 dark:border-slate-700/80 flex items-center justify-between">
         <span className="text-[10px] text-slate-400">© OpenStreetMap contributors</span>
         <span className="text-[10px] text-slate-400 tabular-nums">
-          {valid.length} 個站點有 GPS
+          {locatedCount} / {stops.length} 站已定位
         </span>
       </div>
     </div>
@@ -741,18 +587,19 @@ function MapPreview({ stops }: { stops: RouteStop[] }) {
 export interface RouteStopsTimelineEditorProps {
   stops: RouteStop[];
   onChange: (next: RouteStop[]) => void;
-  /** 由 MasterInfo 傳入的車輛 — 學生清單依此篩選 */
-  busId: string;
-  busStudents: Student[];
+  /** 以下為舊 props, 保留可選以兼容舊調用, 已不再使用 */
+  busId?: string;
+  busStudents?: unknown[];
+  defaultEta?: string;
 }
 
 export function RouteStopsTimelineEditor({
   stops,
   onChange,
-  busId,
-  busStudents,
 }: RouteStopsTimelineEditorProps) {
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  // 已按「確定」收起的站點 — 地圖預覽只認已確定的站點, 打字中唔會即刻出現
+  const [confirmed, setConfirmed] = React.useState<Record<string, boolean>>({});
 
   /** 為新加入的 stop 自動挑選 kind:
    *  - 第一個 → origin
@@ -807,6 +654,8 @@ export function RouteStopsTimelineEditor({
       onChange(
         stops.map((s) => (s.id === id ? { ...s, ...patch } : s)),
       );
+      // 改動內容視同未確定 — 要再按確定先会计入地圖
+      setConfirmed((s) => ({ ...s, [id]: false }));
     },
     [stops, onChange],
   );
@@ -814,10 +663,21 @@ export function RouteStopsTimelineEditor({
   const removeStop = React.useCallback(
     (id: string) => {
       onChange(renumberStops(stops.filter((s) => s.id !== id)));
+      setExpanded((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
+      setConfirmed((s) => {
+        const next = { ...s };
+        delete next[id];
+        return next;
+      });
     },
     [stops, onChange],
   );
 
+  /** 拖曳排序: 整個站點卡片跟住搬 (種類 + 名稱 + 時間 + 備註一齊搬) */
   const handleReorder = React.useCallback(
     (next: RouteStop[]) => {
       onChange(renumberStops(next));
@@ -831,7 +691,15 @@ export function RouteStopsTimelineEditor({
   }, [stops, onChange]);
 
   const toggleExpand = (id: string) => {
+    const isExpanded = expanded[id] ?? true;
     setExpanded((s) => ({ ...s, [id]: !s[id] }));
+    // 收起視同確定, 重新展開就要再按確定先會計入地圖
+    setConfirmed((s) => ({ ...s, [id]: isExpanded }));
+  };
+
+  const collapseStop = (id: string) => {
+    setExpanded((s) => ({ ...s, [id]: false }));
+    setConfirmed((s) => ({ ...s, [id]: true }));
   };
 
   /** 自動展開/收合 — 新加入時自動展開, 現有 stops 在數量 < 4 時自動展開 */
@@ -845,10 +713,22 @@ export function RouteStopsTimelineEditor({
       });
       return next;
     });
+    // 載入已有路線 (有地址) 視同已確定; 全新加入 (空白地址) 要按確定先計入地圖
+    setConfirmed((cur) => {
+      const next = { ...cur };
+      stops.forEach((s) => {
+        if (next[s.id] === undefined && cur[s.id] === undefined) {
+          next[s.id] = s.name.trim().length > 0;
+        }
+      });
+      return next;
+    });
   }, [stops.length]);
 
-  const hasOrigin = stops.some((s) => s.kind === 'origin');
-  const hasTerminal = stops.some((s) => s.kind === 'terminal');
+  // 地圖預覽只認已按「確定」的站點 — 打字中 / 未確定的唔会计入
+  const confirmedStops = stops.filter((s) => confirmed[s.id]);
+  const hasOrigin = confirmedStops.some((s) => s.kind === 'origin');
+  const hasTerminal = confirmedStops.some((s) => s.kind === 'terminal');
 
   return (
     <div className="space-y-3">
@@ -904,9 +784,7 @@ export function RouteStopsTimelineEditor({
             尚未新增任何站點
           </p>
           <p className="text-[11px] text-slate-500 dark:text-slate-400 max-w-sm">
-            {busId
-              ? '點擊「新增站點」開始建立路線時間軸, 學生清單將依你選的車輛自動載入。'
-              : '請先到上方「指派車輛」選擇校巴, 這裡才能挑選已綁定該車輛的學生。'}
+            點擊「新增站點」開始建立路線時間軸。
           </p>
         </div>
       ) : (
@@ -922,9 +800,9 @@ export function RouteStopsTimelineEditor({
                 key={stop.id}
                 stop={stop}
                 index={idx}
-                busStudents={busStudents}
                 expanded={expanded[stop.id] ?? true}
                 onToggleExpand={() => toggleExpand(stop.id)}
+                onCollapse={() => collapseStop(stop.id)}
                 onUpdate={(patch) => updateStop(stop.id, patch)}
                 onRemove={() => removeStop(stop.id)}
               />
@@ -933,10 +811,12 @@ export function RouteStopsTimelineEditor({
         </Reorder.Group>
       )}
 
-      {/* 地圖路徑預覽 */}
-      <div className="pt-1">
-        <MapPreview stops={stops} />
-      </div>
+      {/* 地圖路徑預覽 — 已確定的站點有起點 + 終點先出現, 依站點地址自動定位 */}
+      {hasOrigin && hasTerminal && (
+        <div className="pt-1">
+          <MapPreview stops={confirmedStops} />
+        </div>
+      )}
     </div>
   );
 }

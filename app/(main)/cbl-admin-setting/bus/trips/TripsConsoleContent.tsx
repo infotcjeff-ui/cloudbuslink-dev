@@ -25,22 +25,27 @@ import {
   Trash2,
   Eye,
   Search,
-  FolderOpen,
-  CheckCircle2,
-  Bus as BusIcon,
   Users as UsersAllIcon,
   Sun,
   Sunset,
   Sparkles,
   FileSpreadsheet,
   Hash,
-  User as UserIcon,
-  Copy,
   Clock,
+  Archive,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { cn } from '@/lib/utils';
+import { filterByAcademicYear } from '@/lib/academic-year';
+import { useAcademicYear } from '../../AcademicYearProvider';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+} from '@/components/ui/empty';
 import {
   Pill,
   Dot,
@@ -53,10 +58,7 @@ import {
   type FilterTabOption,
 } from './primitives';
 import { TripRouteFormModal } from './TripRouteFormModal';
-import {
-  SHIFT_TYPE_OPTIONS,
-  type RouteTab,
-} from './types';
+import type { RouteTab } from './types';
 import type {
   Route,
   RouteStop,
@@ -68,7 +70,6 @@ import type {
 } from '@/lib/types';
 import {
   ANIMATION_EASE,
-  PAGE_FADE_DURATION,
   TAB_FADE_DURATION,
 } from './design-tokens';
 
@@ -240,6 +241,8 @@ export function TripsConsoleContent({
   initiallyLoading = false,
 }: TripsConsoleContentProps) {
   const toast = useToast();
+  // 學年範圍 (路線是分學年的 entity; 封存學年 → 唯讀)
+  const { selectedYear, isReadOnly: yearReadOnly, readOnlyMessage } = useAcademicYear();
   const [tab, setTab] = React.useState<RouteTab>('all');
   const [search, setSearch] = React.useState('');
   const [debouncedSearch, setDebouncedSearch] = React.useState('');
@@ -257,6 +260,23 @@ export function TripsConsoleContent({
   // Delete confirm state
   const [deleteTarget, setDeleteTarget] = React.useState<Route | null>(null);
   const [isDeleting, setIsDeleting] = React.useState(false);
+
+  // 已刪除路線 (本機備份, 可還原)
+  const [deletedRoutes, setDeletedRoutes] = React.useState<
+    { id: string; deletedAt: string; route: Route | null }[]
+  >([]);
+  const [showDeleted, setShowDeleted] = React.useState(false);
+  const [restoringId, setRestoringId] = React.useState<string | null>(null);
+
+  /** 重新讀取本機備份清單 */
+  const loadDeletedRoutes = React.useCallback(async () => {
+    const { listRestorableRoutes } = await import('@/lib/route-tombstones');
+    setDeletedRoutes(listRestorableRoutes());
+  }, []);
+
+  React.useEffect(() => {
+    void loadDeletedRoutes();
+  }, [loadDeletedRoutes, routes]);
 
   // View stub (edit + view share the same modal in v1)
   const [, setViewing] = React.useState<Route | null>(null);
@@ -281,19 +301,17 @@ export function TripsConsoleContent({
   /* -------- Filter -------- */
   const filtered = React.useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    return routes.filter((r) => {
+    // ⚠️ 學年篩選 — 路線是分學年的 entity, 每學年各有一套路線
+    const byYear = filterByAcademicYear(routes, selectedYear);
+    return byYear.filter((r) => {
       if (tab !== 'all' && r.shiftType !== tab) return false;
       if (!q) return true;
-      const bus = r.busId ? buses.find((b) => b.id === r.busId) : null;
-      const driver = r.driverId ? drivers.find((d) => d.id === r.driverId) : null;
       return (
         r.code.toLowerCase().includes(q) ||
-        r.name.toLowerCase().includes(q) ||
-        bus?.plateNumber.toLowerCase().includes(q) ||
-        driver?.name.toLowerCase().includes(q)
+        r.name.toLowerCase().includes(q)
       );
     });
-  }, [routes, tab, debouncedSearch, buses, drivers]);
+  }, [routes, tab, debouncedSearch, selectedYear]);
 
   /* -------- Stats (KPIs) -------- */
   const total = routes.length;
@@ -313,18 +331,27 @@ export function TripsConsoleContent({
 
   /* -------- Handlers -------- */
   const openAdd = React.useCallback(() => {
+    // ⚠️ 封存學年 → 唯讀 (決策 D6)
+    if (yearReadOnly) {
+      toast.warning(readOnlyMessage.hint);
+      return;
+    }
     setFormModal({ open: true, mode: 'add', editingId: undefined });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const openEdit = React.useCallback((r: Route) => {
+    if (yearReadOnly) {
+      toast.warning(readOnlyMessage.hint);
+      return;
+    }
     setFormModal({ open: true, mode: 'edit', editingId: r.id });
-  }, []);
+  }, [yearReadOnly, toast]);
 
   const handleSave = React.useCallback(
     async (master: import('./types').RouteMasterInfo, stops: RouteStop[]) => {
       setIsSaving(true);
       try {
-        const { STORAGE } = await import('@/lib/storage');
+        const { STORAGE, resolveWriteAcademicYear } = await import('@/lib/storage');
         // 超管新增時若沒有所屬學校 → 掛到第一間學校 (cbl_routes.client_id 有 FK 必填)
         const clientId = (() => {
           try {
@@ -348,11 +375,16 @@ export function TripsConsoleContent({
             id: STORAGE.genId('route'),
             clientId,
             code: master.code.trim(),
+            // 學年蓋章: 路線屬於建立當下的現行學年
+            academicYear: resolveWriteAcademicYear(clientId),
             name: master.name.trim(),
             shiftType: master.shiftType,
-            busId: master.busId,
-            driverId: master.driverId,
-            nannyId: master.nannyId,
+            // 已移除欄位 → 新增一律留空 (舊資料仍保留在 DB, 僅不再顯示/編輯)
+            serviceDate: null,
+            serviceTime: '',
+            busId: '',
+            driverId: '',
+            nannyId: '',
             stops: stops.map((s, idx) => ({ ...s, seq: idx + 1 })),
             createdAt: now,
             updatedAt: now,
@@ -371,9 +403,6 @@ export function TripsConsoleContent({
             code: master.code.trim(),
             name: master.name.trim(),
             shiftType: master.shiftType,
-            busId: master.busId,
-            driverId: master.driverId,
-            nannyId: master.nannyId,
             stops: stops.map((s, idx) => ({ ...s, seq: idx + 1 })),
           };
           STORAGE.routes.update(formModal.editingId, updates);
@@ -410,6 +439,13 @@ export function TripsConsoleContent({
     try {
       const { STORAGE } = await import('@/lib/storage');
       const targetName = deleteTarget.name;
+
+      // ⚠️ 先留墓碑 (含刪除前的完整內容 → 本機備份) 再刪 ——
+      //   墓碑會讓這筆路線在任何一次雲端同步後都不會被拉回來,
+      //   就算雲端刪除失敗 (RLS / 權限不足) 也不會「刪除後幾秒復活」。
+      const { markRouteTombstoned, markCloudRouteDeleted } = await import('@/lib/route-tombstones');
+      markRouteTombstoned(deleteTarget, deleteTarget.id);
+
       STORAGE.routes.remove(deleteTarget.id);
 
       // 推回雲端 (刪除)
@@ -417,7 +453,11 @@ export function TripsConsoleContent({
       const sbRes = await supabaseRouteRecords.remove(deleteTarget.id);
       if (!sbRes.success) {
         console.warn('[TripsConsole] Supabase delete failed:', sbRes.error);
-        toast.warning(`路線已從本機刪除，但雲端同步失敗：${sbRes.error}`);
+        // 墓碑保留 (cloudDeleted=false) → 下次同步會自動重試刪除, 路線不會復活
+        toast.warning(`路線已從本機刪除，但雲端同步失敗（將自動重試）：${sbRes.error}`);
+      } else {
+        // 雲端已確認刪除 → 標記完成, 但「備份」仍留在本機 (可還原)
+        markCloudRouteDeleted(deleteTarget.id);
       }
 
       toast.success(`路線「${targetName}」已刪除`);
@@ -432,29 +472,47 @@ export function TripsConsoleContent({
     }
   }, [deleteTarget, toast]);
 
+  /* -------- 還原已刪除的路線 (本機備份) -------- */
+  const handleRestore = React.useCallback(
+    async (id: string) => {
+      setRestoringId(id);
+      try {
+        const { restoreRouteFromTombstone } = await import('@/lib/route-tombstones');
+        const route = await restoreRouteFromTombstone(id);
+        if (!route) {
+          toast.error('找不到這筆路線的備份');
+          return;
+        }
+        toast.success(`路線「${route.name}」已還原`);
+        await loadDeletedRoutes();
+        window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
+      } catch (err) {
+        console.error('[TripsConsole] handleRestore error:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        toast.error(`還原失敗：${msg}`);
+      } finally {
+        setRestoringId(null);
+      }
+    },
+    [toast, loadDeletedRoutes],
+  );
+
   /* -------- 匯出 Excel -------- */
   const handleExportExcel = React.useCallback(() => {
     if (filtered.length === 0) return;
     const rows: Record<string, string | number>[] = [];
     filtered.forEach((r) => {
-      const bus = r.busId ? buses.find((b) => b.id === r.busId) : null;
-      const driver = r.driverId ? drivers.find((d) => d.id === r.driverId) : null;
-      const nanny = r.nannyId ? nannies.find((n) => n.id === r.nannyId) : null;
       // 一條路線展開成多列 (一列 = 一個站點)
       if (r.stops.length === 0) {
         rows.push({
           '路線編號': r.code,
           '路線名稱': r.name,
           '時段': SHIFT_LABEL[r.shiftType],
-          '車輛': bus?.plateNumber || '未指派',
-          '司機': driver?.name || '未指派',
-          '保姆': nanny?.name || '未指派',
           '站點順序': '',
           '站點類型': '',
           '站點類別': '',
           '到站時間': '',
           '站點名稱': '',
-          '學生數': '',
           '備註': '',
         });
       } else {
@@ -463,15 +521,11 @@ export function TripsConsoleContent({
             '路線編號': r.code,
             '路線名稱': r.name,
             '時段': SHIFT_LABEL[r.shiftType],
-            '車輛': bus?.plateNumber || '未指派',
-            '司機': driver?.name || '未指派',
-            '保姆': nanny?.name || '未指派',
             '站點順序': s.seq,
             '站點類型': stopKindLabel(s.kind),
             '站點類別': s.kind,
             '到站時間': s.eta,
             '站點名稱': s.name,
-            '學生數': s.studentIds.length,
             '備註': s.notes,
           });
         });
@@ -479,15 +533,15 @@ export function TripsConsoleContent({
     });
     const ws = XLSX.utils.json_to_sheet(rows);
     ws['!cols'] = [
-      { wch: 10 }, { wch: 22 }, { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
-      { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 8 }, { wch: 28 }, { wch: 8 }, { wch: 22 },
+      { wch: 12 }, { wch: 22 }, { wch: 10 },
+      { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 8 }, { wch: 28 }, { wch: 22 },
     ];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, '路線');
     const stamp = new Date().toISOString().slice(0, 10);
     const tabLabel = TAB_OPTIONS.find((o) => o.value === tab)?.label ?? '';
     XLSX.writeFile(wb, `routes-${tabLabel}-${stamp}.xlsx`);
-  }, [filtered, buses, drivers, nannies, tab]);
+  }, [filtered, tab]);
 
   /* -------- Render -------- */
 
@@ -520,7 +574,7 @@ export function TripsConsoleContent({
               )}
             </div>
             <p className="text-[12px] text-slate-500 mt-0.5 dark:text-slate-400">
-              管理校巴路線編號、班次時段、車輛 / 司機 / 保姆, 以及上落車站點時間軸。
+              管理校巴路線編號、班次時段, 以及上落車站點時間軸。
             </p>
           </div>
         </div>
@@ -580,17 +634,76 @@ export function TripsConsoleContent({
           匯出 Excel ({filtered.length})
         </Button>
 
+        {/* 已刪除路線 (本機備份, 可還原) */}
+        {deletedRoutes.length > 0 && (
+          <Button
+            variant="secondary"
+            size="sm"
+            startIcon={<Archive width={12} height={12} />}
+            onClick={() => setShowDeleted((v) => !v)}
+            title="查看已刪除的路線 (本機備份)"
+          >
+            已刪除 ({deletedRoutes.length})
+          </Button>
+        )}
+
         <div className="ml-auto">
           <Button
             variant="primary"
             size="sm"
             startIcon={<Plus width={12} height={12} />}
             onClick={openAdd}
+            disabled={yearReadOnly}
+            title={
+              yearReadOnly
+                ? '目前檢視的學年為唯讀 — 只能查看與匯出, 不能新增'
+                : '新增路線'
+            }
           >
             新增路線
           </Button>
         </div>
       </div>
+
+      {/* L2b. 已刪除路線清單 (本機備份) */}
+      {showDeleted && deletedRoutes.length > 0 && (
+        <Card className="shrink-0">
+          <SectionHeader
+            icon={<Archive width={18} height={18} />}
+            title="已刪除的路線"
+            subtitle={`${deletedRoutes.length} 筆 · 雲端已刪除, 但本機保留完整備份, 可隨時還原`}
+            accent="neutral"
+          />
+          <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
+            {deletedRoutes.map((d) => (
+              <div
+                key={d.id}
+                className="flex items-center gap-3 px-5 py-2.5 text-[12px]"
+              >
+                <Trash2 width={13} height={13} className="text-slate-400 shrink-0" />
+                <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  {d.route?.code ?? '—'}
+                </span>
+                <span className="truncate text-slate-600 dark:text-slate-300">
+                  {d.route?.name ?? '（無名稱）'}
+                </span>
+                <span className="ml-auto shrink-0 text-[11px] text-slate-400">
+                  {d.route?.stops?.length ?? 0} 站點 · 刪除於{' '}
+                  {new Date(d.deletedAt).toLocaleString('zh-HK')}
+                </span>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  isLoading={restoringId === d.id}
+                  onClick={() => handleRestore(d.id)}
+                >
+                  還原
+                </Button>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* L3. Table Card */}
       <Card className="flex flex-col flex-1 min-h-0">
@@ -634,7 +747,7 @@ export function TripsConsoleContent({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜尋編號 / 路線名 / 車牌 / 司機…"
+              placeholder="搜尋編號 / 路線名…"
               className="h-8 w-full rounded-md border border-slate-200 bg-white pl-7 pr-7 text-[12px] text-slate-700 placeholder:text-slate-400 cursor-text focus:border-slate-400 focus:outline-none focus:ring-1 focus:ring-slate-300 dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
             />
             {search && (
@@ -664,12 +777,10 @@ export function TripsConsoleContent({
               <DataTable
                 key={`rows-${tab}`}
                 rows={pageItems}
-                buses={buses}
-                drivers={drivers}
-                nannies={nannies}
                 onView={(r) => setViewing(r)}
                 onEdit={openEdit}
                 onDelete={(r) => setDeleteTarget(r)}
+                readOnly={yearReadOnly}
               />
             )}
           </AnimatePresence>
@@ -787,6 +898,14 @@ function EmptyState({
   tab: RouteTab;
   search: string;
 }) {
+  const title = search
+    ? '沒有符合條件的路線'
+    : tab === 'all'
+      ? '尚未新增任何路線'
+      : `目前沒有${SHIFT_OPTIONS_LABEL(tab)}的路線`;
+  const description = search
+    ? '嘗試不同的搜尋字串, 或切換分頁。'
+    : '點擊右上角的「新增路線」按鈕以建立第一條路線。';
   return (
     <motion.div
       key={`empty-${tab}-${search}`}
@@ -794,23 +913,15 @@ function EmptyState({
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: TAB_FADE_DURATION, ease: ANIMATION_EASE }}
     >
-      <div className="flex flex-col items-center gap-2 py-12 px-5">
-        <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-800 dark:text-slate-500">
-          <FolderOpen width={20} height={20} />
-        </div>
-        <p className="text-[13px] font-medium text-slate-700 dark:text-slate-200">
-          {search
-            ? '沒有符合條件的路線'
-            : tab === 'all'
-            ? '尚未新增任何路線'
-            : `目前沒有${SHIFT_OPTIONS_LABEL(tab)}的路線`}
-        </p>
-        <p className="text-[11px] text-slate-500 text-center max-w-sm dark:text-slate-400">
-          {search
-            ? '嘗試不同的搜尋字串, 或切換分頁。'
-            : '點擊右上角的「新增路線」按鈕以建立第一條路線。'}
-        </p>
-      </div>
+      <Empty className="border-0 bg-transparent py-10">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <RouteIcon className="w-6 h-6" />
+          </EmptyMedia>
+          <EmptyTitle>{title}</EmptyTitle>
+          <EmptyDescription>{description}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
     </motion.div>
   );
 }
@@ -828,37 +939,18 @@ function SHIFT_OPTIONS_LABEL(tab: RouteTab): string {
 
 function DataTable({
   rows,
-  buses,
-  drivers,
-  nannies,
   onView,
   onEdit,
   onDelete,
+  readOnly = false,
 }: {
   rows: Route[];
-  buses: Bus[];
-  drivers: Driver[];
-  nannies: Nanny[];
   onView: (r: Route) => void;
   onEdit: (r: Route) => void;
   onDelete: (r: Route) => void;
+  /** 封存學年 → 唯讀模式 (不能編輯/刪除) */
+  readOnly?: boolean;
 }) {
-  const busesById = React.useMemo(() => {
-    const m = new Map<string, Bus>();
-    buses.forEach((b) => m.set(b.id, b));
-    return m;
-  }, [buses]);
-  const driversById = React.useMemo(() => {
-    const m = new Map<string, Driver>();
-    drivers.forEach((d) => m.set(d.id, d));
-    return m;
-  }, [drivers]);
-  const nanniesById = React.useMemo(() => {
-    const m = new Map<string, Nanny>();
-    nannies.forEach((n) => m.set(n.id, n));
-    return m;
-  }, [nannies]);
-
   return (
     <table
       className="w-full">
@@ -874,12 +966,6 @@ function DataTable({
             時段
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
-            車輛 / 司機
-          </th>
-          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
-            保姆
-          </th>
-          <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
             站點
           </th>
           <th className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm px-3 py-2 text-left dark:bg-slate-800/95">
@@ -892,9 +978,6 @@ function DataTable({
       </thead>
       <tbody>
         {rows.map((r) => {
-          const bus = r.busId ? busesById.get(r.busId) : null;
-          const driver = r.driverId ? driversById.get(r.driverId) : null;
-          const nanny = r.nannyId ? nanniesById.get(r.nannyId) : null;
           return (
             <tr
               key={r.id}
@@ -913,30 +996,18 @@ function DataTable({
                     >
                       {r.name}
                     </p>
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 inline-flex items-center gap-1">
-                      <UserIcon width={9} height={9} />
-                      {driver?.name || '— 未指派司機 —'}
-                    </p>
                   </div>
                 </div>
               </td>
 
               {/* 編號 (copyable chip) */}
               <td className="px-3 py-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                      navigator.clipboard.writeText(r.code).catch(() => {});
-                    }
-                  }}
+                <CopyChip
+                  value={r.code}
                   title="複製路線編號"
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                >
-                  <Hash width={9} height={9} />
-                  {r.code}
-                  <Copy width={9} height={9} />
-                </button>
+                  label="路線編號"
+                  icon={<Hash width={9} height={9} />}
+                />
               </td>
 
               {/* 時段 */}
@@ -944,32 +1015,6 @@ function DataTable({
                 <Pill tone={SHIFT_TONE[r.shiftType]} size="sm">
                   {SHIFT_LABEL[r.shiftType]}
                 </Pill>
-              </td>
-
-              {/* 車輛 / 司機 */}
-              <td className="px-3 py-2.5">
-                <div className="flex flex-col gap-0.5">
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] bg-slate-100 text-slate-700 ring-1 ring-inset ring-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:ring-slate-700 w-fit">
-                    <BusIcon width={9} height={9} />
-                    {bus ? `${bus.plateNumber} · ${bus.capacity}座` : '未指派'}
-                  </span>
-                  {driver && (
-                    <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                      {driver.name}
-                    </span>
-                  )}
-                </div>
-              </td>
-
-              {/* 保姆 */}
-              <td className="px-3 py-2.5">
-                {nanny ? (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200/70 dark:bg-emerald-950/40 dark:text-emerald-300 dark:ring-emerald-800/50">
-                    {nanny.name}
-                  </span>
-                ) : (
-                  <span className="text-[11px] text-rose-600 dark:text-rose-400">未指派</span>
-                )}
               </td>
 
               {/* 站點 (起 / 終 / 學生總數) */}
@@ -1018,13 +1063,19 @@ function DataTable({
                   <IconButton onClick={() => onView(r)} title="檢視 / 編輯路線">
                     <Eye width={13} height={13} />
                   </IconButton>
-                  <IconButton onClick={() => onEdit(r)} title="編輯路線">
+                  {/* ⚠️ 封存學年 → 唯讀 (決策 D6) */}
+                  <IconButton
+                    onClick={() => onEdit(r)}
+                    title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能編輯' : '編輯路線'}
+                    disabled={readOnly}
+                  >
                     <Pencil width={13} height={13} />
                   </IconButton>
                   <IconButton
                     onClick={() => onDelete(r)}
-                    title="刪除路線"
+                    title={readOnly ? '目前檢視的學年為唯讀 — 只能查看, 不能刪除' : '刪除路線'}
                     variant="danger"
+                    disabled={readOnly}
                   >
                     <Trash2 width={13} height={13} />
                   </IconButton>

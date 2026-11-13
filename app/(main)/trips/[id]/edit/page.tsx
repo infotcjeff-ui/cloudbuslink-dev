@@ -80,16 +80,27 @@ export default function EditTripPage() {
 
   const handleDelete = () => {
     if (!trip) return;
-    try {
-      STORAGE.trips.remove(trip.id);
-      toast.success(`班次 ${trip.id.slice(-6)} 已刪除`);
-      setConfirmDelete(false);
-      router.push('/trips');
-    } catch (e) {
-      console.error('[Trips/Edit] handleDelete error:', e);
-      const msg = e instanceof Error ? e.message : String(e);
-      toast.error(`刪除失敗：${msg}`);
-    }
+    void (async () => {
+      try {
+        // 與排程頁一致: 先留墓碑再刪, 本機已刪 + 雲端刪除 + 防復活 (見 lib/trip-tombstones.ts)
+        const { markTripTombstoned, markCloudTripDeleted } = await import('@/lib/trip-tombstones');
+        markTripTombstoned(trip, trip.id);
+        STORAGE.trips.remove(trip.id);
+        window.dispatchEvent(new CustomEvent('cbl-trips-refresh'));
+        try {
+          const { supabaseTrips } = await import('@/lib/supabase-trips');
+          const res = await supabaseTrips.delete(trip.id);
+          if (res.success) markCloudTripDeleted(trip.id);
+        } catch { /* 墓碑保留, 下次同步重試 */ }
+        toast.success(`班次 ${trip.id.slice(-6)} 已刪除`);
+        setConfirmDelete(false);
+        router.push('/trips');
+      } catch (e) {
+        console.error('[Trips/Edit] handleDelete error:', e);
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(`刪除失敗：${msg}`);
+      }
+    })();
   };
 
   const setStatusAndDirty = (s: TripStatus) => {

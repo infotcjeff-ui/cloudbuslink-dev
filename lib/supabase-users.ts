@@ -58,6 +58,11 @@ export interface SupabaseUserPayload {
    * 對應 DB 欄位 `account_name`。
    */
   accountName?: string | null;
+  /**
+   * 聯絡電話 (WhatsApp) — 對應 DB `contact_phone`。
+   * 保姆「異常回報」時可直接致電 / WhatsApp 此號碼。
+   */
+  contactPhone?: string | null;
   password: string;
   role: 'system_admin' | 'super_admin' | 'client' | 'parent' | 'nanny';
   name: string;

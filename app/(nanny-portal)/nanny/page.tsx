@@ -8,7 +8,7 @@ import { today } from '@/lib/utils';
 import { resolveTripRoute } from '@/lib/trip-route';
 import { Card, CardContent } from '@/components/ui/card';
 import type { Trip, Student } from '@/lib/types';
-import { Bus, Clock, CheckCircle, MapPin, Route as RouteIcon, Users } from 'lucide-react';
+import { Bus, Clock, CheckCircle, MapPin, Users } from 'lucide-react';
 
 export default function NannyPage() {
   const { user } = useAuth();
@@ -164,22 +164,22 @@ export default function NannyPage() {
                   )}
                 >
                   <CardContent className="p-4 space-y-3">
-                    {/* 班次標題 + 路線名稱 */}
+                    {/* 路線名稱 + 班次標題 */}
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-lg font-bold">{getTripTypeLabel(trip)}</span>
-                          <span className={`text-xs px-2 py-1 rounded-full ${badge.className}`}>
+                        {/* 第一行：狀態 + 路線名稱 */}
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`text-xs px-2 py-1 rounded-full flex-shrink-0 ${badge.className}`}>
                             {badge.label}
                           </span>
-                        </div>
-                        {/* 路線名稱 — 來自套用的路線模板 */}
-                        <p className="text-sm font-semibold text-emerald-700 mt-1 flex items-center gap-1 min-w-0">
-                          <RouteIcon className="w-3.5 h-3.5 flex-shrink-0" />
-                          <span className="truncate">
+                          <p className="text-lg font-bold text-emerald-700 truncate">
                             {route?.name || '沒有套用路線模板'}
-                          </span>
-                        </p>
+                          </p>
+                        </div>
+                        {/* 第二行：班次 */}
+                        <div className="flex items-center gap-2 flex-wrap mt-1">
+                          <span className="text-sm font-semibold">{getTripTypeLabel(trip)}</span>
+                        </div>
                       </div>
                       <div className="flex items-center gap-1 text-muted-foreground flex-shrink-0">
                         <Clock className="w-4 h-4" />

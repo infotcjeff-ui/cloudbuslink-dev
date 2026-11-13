@@ -6,11 +6,13 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Home, Bus, Settings, ArrowLeft, User as UserIcon, Menu as MenuIcon } from 'lucide-react';
 import { useAuth, useSettings } from '@/lib/hooks';
+import { nannyHomePath, nannySettingsPath } from '@/lib/nanny-path';
 import { cn } from '@/lib/utils';
 import { getParentPath } from '@/lib/navigation';
 import { NotificationDropdown } from '@/components/NotificationDropdown';
 import { SideMenu } from '@/components/SideMenu';
 import { ToastProvider } from '@/components/ui/toast';
+import RealtimeSync from '@/components/RealtimeSync';
 
 const navItems = [
   { href: '/', label: '主頁', icon: Home },
@@ -19,10 +21,10 @@ const navItems = [
 ];
 
 /** portal 用戶被拒絕時的落點 (自己的設定頁) */
-const PORTAL_HOME: Record<'parent' | 'nanny', string> = {
-  parent: '/parents/settings',
-  nanny: '/nanny/settings',
-};
+function portalHomeFor(user: { accountName?: string | null; phone?: string | null; name?: string | null } | null | undefined, role: 'parent' | 'nanny'): string {
+  if (role === 'nanny' && user) return nannySettingsPath(user);
+  return role === 'parent' ? '/parents/settings' : '/nanny/settings';
+}
 
 /**
  * portal 用戶 (nanny / parent) 額外放行的 (main) 頁面。
@@ -52,13 +54,16 @@ const PORTAL_EXTRA_PATHS: Record<'parent' | 'nanny', RegExp[]> = {
  *
  * (main) 群組對 portal 用戶預設關閉 —— 這裡放行自己 portal 的設定頁,
  * 加上 PORTAL_EXTRA_PATHS 指定的必要流程頁 (打卡 / 班次詳情),
- * 其餘路徑 (/、/trips、/settings 與其所有子頁...) 全部踢回 PORTAL_HOME。
+ * 其餘路徑 (/、/trips、/settings 與其所有子頁...) 全部踢回個人化 portal 首頁。
  *
- * 註: 家長的 /parents/settings/binding 與保姆的 /nanny 都在各自的 portal 群組,
- *     不經過本 layout, 因此不受此規則影響。
+ * 註: 家長的 /parents/settings/binding 與保姆的個人化路徑 (/{slug}/route 等)
+ *     都在各自的 portal 群組, 不經過本 layout, 因此不受此規則影響。
  */
-function canPortalUserAccess(role: 'parent' | 'nanny', pathname: string): boolean {
-  if (pathname === PORTAL_HOME[role]) return true;
+function canPortalUserAccess(role: 'parent' | 'nanny', pathname: string, user?: { accountName?: string; phone?: string; name?: string } | null): boolean {
+  if (role === 'nanny' && user && pathname === nannySettingsPath(user)) return true;
+  if (role === 'parent' && pathname === '/parents/settings') return true;
+  // 相容舊版 /nanny/settings (未登入時 user 為 null, 先放行避免閃跳; 個人化 layout 會再把關)
+  if (role === 'nanny' && pathname === '/nanny/settings') return true;
   return PORTAL_EXTRA_PATHS[role].some(re => re.test(pathname));
 }
 
@@ -85,8 +90,8 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
     // - parent / nanny 不可進入 (main) 群組的任何頁面, 一律踢回自己的設定頁
     // - 其他角色 (super_admin / client) 自由進出
     if (user.role === 'parent' || user.role === 'nanny') {
-      if (!canPortalUserAccess(user.role, pathname)) {
-        router.replace(PORTAL_HOME[user.role]);
+      if (!canPortalUserAccess(user.role, pathname, user)) {
+        router.replace(portalHomeFor(user, user.role));
       }
       return;
     }
@@ -116,7 +121,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
   // 會先閃一下學生管理畫面)。這裡在 render 階段就擋掉, 杜絕那個閃爍。
   const isPortalUser = user.role === 'parent' || user.role === 'nanny';
   const portalBlocked =
-    isPortalUser && !canPortalUserAccess(user.role as 'parent' | 'nanny', pathname);
+    isPortalUser && !canPortalUserAccess(user.role as 'parent' | 'nanny', pathname, user);
 
   if (portalBlocked) {
     return (
@@ -157,6 +162,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
 
   return (
     <ToastProvider>
+      <RealtimeSync />
       <div className="h-[100dvh] flex flex-col bg-background overflow-hidden">
       {/* Header - h-[61px] (56 + 5) + liquid-glass backdrop + 公告 + burger 按鈕
           CBL Admin Setting 頁面自帶完整 header (有返回鍵 / 搜尋 / 暗色 / 時間),
@@ -169,7 +175,7 @@ export default function MainLayout({ children }: { children: React.ReactNode }) 
               <button
                 onClick={() => router.push(
                   user?.role === 'nanny'
-                    ? '/nanny'
+                    ? nannyHomePath(user)
                     : user?.role === 'parent'
                     ? '/parents/trips'
                     : getParentPath(pathname)

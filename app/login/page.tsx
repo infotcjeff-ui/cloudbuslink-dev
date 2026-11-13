@@ -11,7 +11,8 @@ import { PageLoader } from '@/components/PageLoader';
 import { useAuth } from '@/lib/hooks';
 import { isValidLoginAccount } from '@/lib/auth-lookup';
 import { initWithSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
-import type { UserRole } from '@/lib/types';
+import { nannyHomePath } from '@/lib/nanny-path';
+import type { User, UserRole } from '@/lib/types';
 
 type PortalTab = 'admin' | 'parent' | 'nanny';
 
@@ -24,7 +25,7 @@ interface TabConfig {
   // 允許登入的角色 (留空 = 不限制, 交由後端決定)
   allowedRoles?: UserRole[];
   // 登入成功後跳轉的路徑
-  redirect: (role?: UserRole) => string;
+  redirect: (role?: UserRole, user?: User) => string;
   // 背景漸層
   bg: string;
   iconGradient: string;
@@ -65,7 +66,7 @@ const TABS: TabConfig[] = [
     bg: 'from-emerald-50 via-white to-teal-50',
     iconGradient: 'from-emerald-500 to-teal-500',
     buttonGradient: 'from-emerald-500 to-teal-500',
-    redirect: () => '/nanny',
+    redirect: (_role?: UserRole, user?: User) => nannyHomePath(user),
   },
 ];
 
@@ -116,7 +117,7 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (!loading && user) {
-      router.replace(config.redirect(user.role));
+      router.replace(config.redirect(user.role, user));
     }
   }, [user, loading, router, config]);
 
@@ -182,7 +183,7 @@ export default function LoginPage() {
     // 給目標頁面 hydrate 一點時間, 視覺上也比較有「完成 → 進入」的反饋感。
     // 在這 800ms 內 spinner 仍在轉 (isLoading=true), 但背景已被 PageLoader 蓋住。
     setLoginSuccess(true);
-    const target = config.redirect(result.user?.role);
+    const target = config.redirect(result.user?.role, result.user);
     setTimeout(() => {
       router.replace(target);
     }, 800);

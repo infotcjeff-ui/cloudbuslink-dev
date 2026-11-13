@@ -2,15 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { motion } from 'framer-motion';
 import {
   Bus, Clock, MapPin, Users, Play, CheckCircle2, AlertCircle,
-  Calendar, Phone, ArrowRight, ChevronRight, Edit2, X
+  Calendar, Phone, ArrowRight, X
 } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import { cn, fmtTime, currentTimeStamp, tripStatusLabel, tripTypeLabel, waypointTypeLabel } from '@/lib/utils';
@@ -23,6 +23,7 @@ export default function TripDetailPage() {
   const [trip, setTrip] = useState<Trip | null>(null);
   const [tick, setTick] = useState(0);
   const [confirmAction, setConfirmAction] = useState<'complete' | 'cancel' | null>(null);
+  const [studentOpen, setStudentOpen] = useState(false);
 
   useEffect(() => {
     if (!params.id) return;
@@ -81,94 +82,96 @@ export default function TripDetailPage() {
 
   return (
     <div className="px-4 pt-4 pb-6 space-y-4">
-      {/* 狀態卡片 */}
+      {/* 狀態 + 負責人員(單行) */}
       <Card>
         <CardContent className="p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <Badge variant={statusVariant as any}>{status}</Badge>
-              <Badge variant="outline">{tripTypeLabel(trip.type)}</Badge>
-            </div>
-            {user?.role !== 'parent' && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => router.push(`/trips/${trip.id}/edit`)}
-              >
-                <Edit2 className="w-3.5 h-3.5" />
-              </Button>
-            )}
+          <div className="flex items-center gap-2 mb-3">
+            <Badge variant={statusVariant as any}>{status}</Badge>
+            <Badge variant="outline">{tripTypeLabel(trip.type)}</Badge>
           </div>
 
-          <div className="space-y-2 text-sm">
-            <div className="flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-muted-foreground" />
-              <span>{trip.date}</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-muted-foreground" />
-              <span>
-                計劃: {fmtTime(trip.plannedStartTime)} - {fmtTime(trip.plannedEndTime)}
-              </span>
-            </div>
-            {trip.actualStartTime && (
-              <div className="flex items-center gap-2 text-success">
-                <Play className="w-4 h-4" />
-                <span>實際開始: {fmtTime(trip.actualStartTime)}</span>
+          <div className="flex gap-3 text-sm">
+            <div className="space-y-2 flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-muted-foreground shrink-0" />
+                <span>{trip.date}</span>
               </div>
-            )}
-            {trip.actualEndTime && (
-              <div className="flex items-center gap-2 text-success">
-                <CheckCircle2 className="w-4 h-4" />
-                <span>實際結束: {fmtTime(trip.actualEndTime)}</span>
+              <div className="flex items-center gap-2">
+                <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
+                <span className="whitespace-nowrap">
+                  計劃: {fmtTime(trip.plannedStartTime)} - {fmtTime(trip.plannedEndTime)}
+                </span>
               </div>
-            )}
+            </div>
+            <div className="space-y-2 flex-1 min-w-0">
+              {trip.actualStartTime && (
+                <div className="flex items-center gap-2 text-success">
+                  <Play className="w-4 h-4 shrink-0" />
+                  <span className="whitespace-nowrap">實際開始: {fmtTime(trip.actualStartTime)}</span>
+                </div>
+              )}
+              {trip.actualEndTime && (
+                <div className="flex items-center gap-2 text-success">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span className="whitespace-nowrap">實際結束: {fmtTime(trip.actualEndTime)}</span>
+                </div>
+              )}
+            </div>
           </div>
-        </CardContent>
-      </Card>
 
-      {/* 司機 & 保姆 & 校巴 */}
-      <Card>
-        <CardContent className="p-4 space-y-3">
-          <h3 className="text-sm font-semibold text-muted-foreground mb-2">負責人員</h3>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-              <Bus className="w-5 h-5 text-primary" />
+          {/* 負責人員:一行橫向顯示 */}
+          <div className="mt-3 pt-3 border-t flex items-center gap-2 overflow-x-auto whitespace-nowrap">
+            <div className="flex items-center gap-1.5 shrink-0">
+              <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center">
+                <Bus className="w-4 h-4 text-primary" />
+              </div>
+              <div className="leading-tight">
+                <p className="text-[10px] text-muted-foreground">校巴</p>
+                <p className="text-xs font-semibold max-w-[80px] truncate">{bus?.plateNumber || '未指派'}</p>
+              </div>
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs text-muted-foreground">校巴</p>
-              <p className="text-sm font-semibold truncate">{bus?.plateNumber || '未指派'}</p>
-            </div>
-            <Badge variant="secondary">{bus?.capacity || 0}座</Badge>
+            {driver && (
+              <>
+                <span className="text-border shrink-0">|</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="w-7 h-7 rounded-full bg-primary/10 flex items-center justify-center">
+                    <span className="text-xs font-semibold text-primary">{driver.name.slice(0, 1)}</span>
+                  </div>
+                  <div className="leading-tight">
+                    <p className="text-[10px] text-muted-foreground">司機</p>
+                    <p className="text-xs font-semibold max-w-[64px] truncate">{driver.name}</p>
+                  </div>
+                  <a href={`tel:${driver.phone}`} className="p-1.5 rounded-full bg-success/10 text-success">
+                    <Phone className="w-3 h-3" />
+                  </a>
+                </div>
+              </>
+            )}
+            {nanny && (
+              <>
+                <span className="text-border shrink-0">|</span>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="w-7 h-7 rounded-full bg-warning/10 flex items-center justify-center">
+                    <span className="text-xs font-semibold text-warning">{nanny.name.slice(0, 1)}</span>
+                  </div>
+                  <div className="leading-tight">
+                    <p className="text-[10px] text-muted-foreground">保姆</p>
+                    <p className="text-xs font-semibold max-w-[64px] truncate">{nanny.name}</p>
+                  </div>
+                  {nanny.phone ? (
+                    <a href={`tel:${nanny.phone}`} className="flex items-center gap-1 shrink-0">
+                      <span className="p-1.5 rounded-full bg-success/10 text-success">
+                        <Phone className="w-3 h-3" />
+                      </span>
+                      <span className="text-xs text-muted-foreground whitespace-nowrap">{nanny.phone}</span>
+                    </a>
+                  ) : (
+                    <span className="text-xs text-muted-foreground shrink-0">暫無</span>
+                  )}
+                </div>
+              </>
+            )}
           </div>
-          {driver && (
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-                <span className="text-sm font-semibold text-primary">{driver.name.slice(0, 1)}</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-muted-foreground">司機</p>
-                <p className="text-sm font-semibold">{driver.name}</p>
-              </div>
-              <a href={`tel:${driver.phone}`} className="p-2 rounded-full bg-success/10 text-success">
-                <Phone className="w-4 h-4" />
-              </a>
-            </div>
-          )}
-          {nanny && (
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full bg-warning/10 flex items-center justify-center">
-                <span className="text-sm font-semibold text-warning">{nanny.name.slice(0, 1)}</span>
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-xs text-muted-foreground">保姆</p>
-                <p className="text-sm font-semibold">{nanny.name}</p>
-              </div>
-              <a href={`tel:${nanny.phone}`} className="p-2 rounded-full bg-success/10 text-success">
-                <Phone className="w-4 h-4" />
-              </a>
-            </div>
-          )}
         </CardContent>
       </Card>
 
@@ -190,14 +193,48 @@ export default function TripDetailPage() {
         </CardContent>
       </Card>
 
-      {/* 學生名單 */}
+      {/* 學生名單:一行圓形, 點擊開 popup 看完整資料 */}
       <Card>
         <CardContent className="p-4">
-          <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-            <Users className="w-4 h-4" />
-            學生名單 ({trip.studentIds.length})
-          </h3>
-          <div className="space-y-2">
+          <button
+            type="button"
+            onClick={() => setStudentOpen(true)}
+            className="w-full flex items-center gap-2 text-left"
+          >
+            <h3 className="text-sm font-semibold flex items-center gap-2 shrink-0">
+              <Users className="w-4 h-4" />
+              學生名單 ({trip.studentIds.length})
+            </h3>
+            <div className="flex-1 flex items-center gap-1.5 overflow-hidden">
+              <div className="flex -space-x-2 overflow-hidden">
+                {trip.studentIds.slice(0, 8).map(sid => {
+                  const s = STORAGE.students.getById(sid);
+                  if (!s) return null;
+                  return (
+                    <div
+                      key={sid}
+                      className="w-7 h-7 rounded-full bg-primary/10 border-2 border-background flex items-center justify-center text-xs font-semibold text-primary shrink-0"
+                    >
+                      {s.name.slice(0, 1)}
+                    </div>
+                  );
+                })}
+              </div>
+              {trip.studentIds.length > 8 && (
+                <span className="text-xs text-muted-foreground shrink-0">+{trip.studentIds.length - 8}</span>
+              )}
+            </div>
+            <span className="text-xs text-muted-foreground shrink-0">查看全部 ›</span>
+          </button>
+        </CardContent>
+      </Card>
+
+      <Dialog open={studentOpen} onOpenChange={setStudentOpen}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>學生名單 ({trip.studentIds.length})</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 mt-2">
             {trip.studentIds.map(sid => {
               const student = STORAGE.students.getById(sid);
               if (!student) return null;
@@ -206,7 +243,7 @@ export default function TripDetailPage() {
                   key={sid}
                   className="flex items-center gap-3 p-2.5 bg-muted/40 rounded-xl"
                 >
-                  <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center text-sm font-semibold text-primary">
+                  <div className="w-9 h-9 rounded-full bg-primary/10 flex items-center justify-center text-sm font-semibold text-primary shrink-0">
                     {student.name.slice(0, 1)}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -217,8 +254,8 @@ export default function TripDetailPage() {
               );
             })}
           </div>
-        </CardContent>
-      </Card>
+        </DialogContent>
+      </Dialog>
 
       {/* 操作按鈕 */}
       {canOperate && (

@@ -77,7 +77,11 @@ export function useCblStats(clientId: string | undefined): CblStats {
     const drivers = STORAGE.drivers.getByClient(clientId);
     const nannies = STORAGE.nannies.getByClient(clientId);
     const trips = STORAGE.trips?.getByClient?.(clientId) ?? [];
-    const allAnnouncements = STORAGE.announcements.getByClient(clientId);
+    // ⚠️ 用 getVisible 而不是 getByClient:
+    //    2026-11 起「系統公告」不再綁機構 (clientId 為空) → 所有管理員都看得到,
+    //    所以統計數字要算進去, 否則機構後台會顯示「0 個公告」但管理員明明看得到。
+    //    getVisible 也涵蓋「受眾名單中有本機構家長」的跨機構繳費公告。
+    const allAnnouncements = STORAGE.announcements.getVisible(clientId, false);
     const activeAnnouncements = allAnnouncements.filter((a: any) => !a.isTemplate && a.isActive);
     const announcementTemplates = allAnnouncements.filter((a: any) => a.isTemplate);
 

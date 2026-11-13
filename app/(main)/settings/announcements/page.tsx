@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Plus, Edit2, Trash2, Megaphone, FileText, Sparkles, ArrowRight, BellOff } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
+import { Plus, Edit2, Trash2, Megaphone, FileText, Sparkles, ArrowRight, BellOff, Globe, CreditCard } from 'lucide-react';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -13,10 +13,37 @@ import { Select } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveWriteAcademicYear, resolveClientId } from '@/lib/storage';
 import { cn, fmtDate } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
-import type { Announcement } from '@/lib/types';
+import { getPersistedSelectedYear } from '@/app/(main)/cbl-admin-setting/AcademicYearProvider';
+import {
+  PAYMENT_CONTENT_PLACEHOLDER,
+  getPaymentDefaultDates,
+} from '@/app/(main)/cbl-admin-setting/[layout]/announcements/types';
+import type { Announcement, Parent } from '@/lib/types';
+
+/**
+ * Step 1 的受眾類型選項卡片。
+ *
+ * ⚠️ 兩步驟流程 (2026-11): 先選類型 → 下一步才輸入資料。
+ *    因為「繳費公告」會多出「指定家長」欄位, 讓管理員先決定受眾再填內容。
+ */
+const SCOPE_CARDS = [
+  {
+    value: 'system' as const,
+    label: '系統公告',
+    icon: <Globe className="h-4 w-4" />,
+    desc: '所有用戶都會看到',
+    hint: '家長、保姆、機構員工全部都會看到, 不受機構限制。適合假期安排、系統維護等全站通知。',
+  },
+  {
+    value: 'payment' as const,
+    icon: <CreditCard className="h-4 w-4" />,
+    desc: '只顯示給選定的家長',
+    hint: '只有你在下一步選中的家長會看到這則公告, 其他家長完全看不到。內容、有效期會自動由付款記錄帶出 (該功能開發中)。適合個別帳單、補繳通知。',
+  },
+];
 
 export default function AnnouncementsPage() {
   const { user } = useAuth();
@@ -38,17 +65,37 @@ export default function AnnouncementsPage() {
     startDate: new Date().toISOString().split('T')[0],
     endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
     isTemplate: false, templateName: '',
+    scope: 'system' as Announcement['scope'],
+    targetParentIds: [] as string[],
   });
   const [error, setError] = useState('');
+  // ⚠️ 兩步驟流程: 'type' = 先選受眾類型, 'data' = 再填內容
+  const [step, setStep] = useState<'type' | 'data'>('type');
 
-  // 目標機構 (super_admin 必填 — cbl_announcements.client_id 有 FK 約束)
-  const [targetClientIdInput, setTargetClientIdInput] = useState('');
-  // 可發佈的機構清單
-  const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
+  // 可選的家長 (繳費公告的指定受眾)
+  const [parentOptions, setParentOptions] = useState<Parent[]>([]);
+  // 家長搜尋關鍵字 (跨機構時家長可能上百位 → 沒有搜尋根本找不到人)
+  const [parentQuery, setParentQuery] = useState('');
+
+  // 依搜尋關鍵字過濾家長清單 (姓名 / 電話 / 帳戶名稱)
+  const filteredParentOptions = useMemo(() => {
+    const q = parentQuery.trim().toLowerCase();
+    if (!q) return parentOptions;
+    return parentOptions.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.phone || '').toLowerCase().includes(q) ||
+        (p.accountName || '').toLowerCase().includes(q),
+    );
+  }, [parentOptions, parentQuery]);
 
   useEffect(() => {
-    setClientOptions(STORAGE.clients.getAll().map((c) => ({ id: c.id, name: c.name })));
-  }, []);
+    const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'system_admin';
+    const cid = user?.clientId || '';
+    setParentOptions(
+      isSuperAdmin ? STORAGE.parents.getAll() : STORAGE.parents.getByClient(cid),
+    );
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
@@ -75,8 +122,12 @@ export default function AnnouncementsPage() {
       startDate: new Date().toISOString().split('T')[0],
       endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       isTemplate: false, templateName: '',
+      scope: 'system', targetParentIds: [],
     });
     setError('');
+    // ⚠️ 新增 → 先選受眾類型 (Step 1)
+    setStep('type');
+    setParentQuery('');
     setDialogOpen(true);
   };
 
@@ -93,8 +144,11 @@ export default function AnnouncementsPage() {
       startDate: new Date().toISOString().split('T')[0],
       endDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
       isTemplate: false, templateName: '',
+      scope: tpl.scope || 'system', targetParentIds: tpl.targetParentIds || [],
     });
     setError('');
+    // 從範本建立 → 已有完整內容, 直接進資料頁
+    setStep('data');
     setDialogOpen(true);
   };
 
@@ -106,36 +160,79 @@ export default function AnnouncementsPage() {
       displayCount: a.displayCount, maxViewsPerUser: a.maxViewsPerUser,
       startDate: a.startDate.split('T')[0], endDate: a.endDate.split('T')[0],
       isTemplate: a.isTemplate, templateName: a.templateName || '',
+      scope: a.scope || 'system', targetParentIds: a.targetParentIds || [],
     });
     setError('');
+    // 編輯 → 已有受眾類型, 直接進資料頁
+    setStep('data');
     setDialogOpen(true);
   };
 
   const handleSubmit = async () => {
     setError('');
+    const scope = form.scope || 'system';
     if (!form.title.trim()) { setError('請輸入標題'); return; }
-    if (!form.content.trim()) { setError('請輸入內容'); return; }
+    // ⚠️ 繳費公告 → 內容由付款記錄帶出 (功能未開發) → 不要求管理員填
+    if (scope !== 'payment' && !form.content.trim()) { setError('請輸入內容'); return; }
     if (form.isTemplate && !form.templateName.trim()) { setError('範本請輸入範本名稱'); return; }
 
     // 目標機構: 跨機構角色沒有 clientId, 必須指定 (FK 約束)
-    const isSuperAdmin = user.role === 'super_admin' || user.role === 'system_admin';
-    const targetClientId = isSuperAdmin
-      ? (targetClientIdInput || '')
-      : (user.clientId || '');
-    if (!targetClientId) { setError('請選擇發佈機構'); return; }
+    const targetParentIds = scope === 'payment' ? form.targetParentIds : [];
+    if (scope === 'payment' && targetParentIds.length === 0) {
+      setError('請至少選擇一位家長');
+      return;
+    }
+
+    const firstParent = parentOptions.find((p) => p.id === targetParentIds[0]);
+    const targetClientId =
+      scope === 'payment'
+        ? firstParent?.clientId || user.clientId || ''
+        : '';
+
 
     const data = {
       title: form.title.trim(),
-      content: form.content.trim(),
+      // ⚠️ 繳費公告 → 內容由付款記錄帶出 (功能未開發 → 用佔位文案)
+      content:
+        scope === 'payment'
+          ? form.content.trim() || PAYMENT_CONTENT_PLACEHOLDER
+          : form.content.trim(),
       type: form.type,
       displayCount: form.displayCount,
       maxViewsPerUser: form.maxViewsPerUser,
-      startDate: new Date(form.startDate).toISOString(),
-      endDate: new Date(form.endDate).toISOString(),
+      // ⚠️ 繳費公告 → 有效期由帳單週期決定 (功能未開發 → 用長期窗口,
+      //    避免管理員發佈後一個月公告就自動失效、對家長消失)
+      startDate: new Date(
+        scope === 'payment'
+          ? getPaymentDefaultDates().startDate
+          : form.startDate,
+      ).toISOString(),
+      endDate: new Date(
+        scope === 'payment'
+          ? getPaymentDefaultDates().endDate
+          : form.endDate,
+      ).toISOString(),
       isActive: true,
       // 公告本身永遠不是範本 (範本是另一筆獨立資料)
       isTemplate: false,
       templateName: null,
+      // 受眾分類 (2026-11)
+      scope,
+      targetParentIds,
+      // 學年蓋章: 公告屬於發佈當下的現行學年
+      // ⚠️ 跨機構角色 (super_admin / system_admin) 沒有自己的 clientId
+      //    → resolveWriteAcademicYear('') 只能回傳預設值 '2627'
+      //    (這個頁面沒有學年切換器, 沒有更好的線索可用)
+      // ⚠️ 這個頁面**不在** <AcademicYearProvider> 內 (Provider 只包住
+      //    /cbl-admin-setting), 所以改讀 Provider 寫進 localStorage 的
+      //    「上次選的學年」→ 跟後台看到的是同一個學年。
+      // ⚠️ 讀取的 key 必須跟 Provider 寫入的 key 一致
+      //    (Provider 用 resolveClientId() 當 key), 不能用 targetClientId —
+      //    繳費公告的 targetClientId 是「第一位家長的機構」, 跟 Provider 的 key 不同。
+      academicYear: resolveWriteAcademicYear(
+        targetClientId || user.clientId || '',
+        getPersistedSelectedYear(resolveClientId()),
+      ),
     };
 
     try {
@@ -144,6 +241,8 @@ export default function AnnouncementsPage() {
         const existing = STORAGE.announcements.getById(editId);
         STORAGE.announcements.update(editId, {
           ...data,
+          // 編輯既有公告時保留原本的學年 (公告屬於發佈當下的學年)
+          academicYear: existing?.academicYear || data.academicYear,
           clientId: targetClientId,
           currentCount: existing?.currentCount ?? 0,
         });
@@ -181,6 +280,8 @@ export default function AnnouncementsPage() {
               isTemplate: sbPayload.isTemplate,
               templateName: sbPayload.templateName,
               clientId: sbPayload.clientId,
+              scope: sbPayload.scope,
+              targetParentIds: sbPayload.targetParentIds,
             })
           : await supabaseAnnouncements.add(sbPayload);
         if (!res.success) {
@@ -209,6 +310,9 @@ export default function AnnouncementsPage() {
           isActive: true,
           isTemplate: true,
           templateName: form.templateName.trim(),
+          scope: data.scope,
+          targetParentIds: data.targetParentIds,
+          academicYear: data.academicYear,
           createdAt: new Date().toISOString(),
         };
         STORAGE.announcements.add(templatePayload);
@@ -228,8 +332,8 @@ export default function AnnouncementsPage() {
       return;
     }
     const all = tab === 'templates'
-      ? STORAGE.announcements.getTemplates(user.clientId || '', isSuperAdmin)
-      : STORAGE.announcements.getVisible(user.clientId || '', isSuperAdmin).filter(a => !a.isTemplate);
+      ? STORAGE.announcements.getTemplates(user.clientId || '', user.role === 'super_admin' || user.role === 'system_admin')
+      : STORAGE.announcements.getVisible(user.clientId || '', user.role === 'super_admin' || user.role === 'system_admin').filter(a => !a.isTemplate);
     setAnnouncements(all);
     setDialogOpen(false);
     setEditId(null);
@@ -370,11 +474,23 @@ export default function AnnouncementsPage() {
                       {tab === 'templates' && a.templateName && (
                         <p className="text-[11px] font-medium text-primary mb-0.5">{a.templateName}</p>
                       )}
-                      <div className="flex items-center gap-1.5 mb-1">
+                      <div className="flex items-center gap-1.5 mb-1 flex-wrap">
                         <Badge variant={typeVariant as any} className="text-[10px]">
                           {a.type === 'urgent' ? '緊急' : a.type === 'warning' ? '警告' : '資訊'}
                         </Badge>
                         {a.isTemplate && <Badge variant="secondary" className="text-[10px]">範本</Badge>}
+                        {/* 受眾徽章 (2026-11) — 讓管理員一眼看得出這則公告的受眾範圍 */}
+                        {(a.scope || 'system') === 'payment' ? (
+                          <Badge variant="outline" className="text-[10px] gap-1 border-emerald-300 text-emerald-700 dark:border-emerald-800 dark:text-emerald-300">
+                            <CreditCard className="h-2.5 w-2.5" />
+                            繳費 · {(a.targetParentIds || []).length} 位家長
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className="text-[10px] gap-1 border-sky-300 text-sky-700 dark:border-sky-800 dark:text-sky-300">
+                            <Globe className="h-2.5 w-2.5" />
+                            全體用戶
+                          </Badge>
+                        )}
                       </div>
                       <p className="text-sm font-semibold">{a.title}</p>
                       <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{a.content}</p>
@@ -426,123 +542,279 @@ export default function AnnouncementsPage() {
             <DialogDescription>
               {sourceTemplateId
                 ? '已從範本帶入內容, 可再編輯後保存為新公告'
-                : '填寫公告內容與設定'}
+                : step === 'type'
+                ? '步驟 1 / 2 — 先選擇這則公告的受眾類型'
+                : '步驟 2 / 2 — 填寫公告內容與設定'}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto">
-            {(user.role === 'super_admin' || user.role === 'system_admin') && (
-              <div className="space-y-1.5">
-                <Label>發佈機構 *</Label>
-                <Select
-                  value={targetClientIdInput}
-                  onChange={(e) => setTargetClientIdInput(e.target.value)}
-                >
-                  <option value="">請選擇機構...</option>
-                  {clientOptions.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </Select>
-                <p className="text-[11px] text-muted-foreground">
-                  超級管理員沒有機構, 必須指定發佈機構 (資料庫有 FK 約束)
-                </p>
+
+          {/* ============================ Step 1 — 選類型 ============================ */}
+          {step === 'type' ? (
+            <div className="space-y-3">
+              <p className="text-sm font-medium">這則公告會顯示給誰？</p>
+              <div className="grid grid-cols-1 gap-2">
+                {SCOPE_CARDS.map((opt) => {
+                  const isActive = form.scope === opt.value;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setForm({
+                        ...form,
+                        scope: opt.value,
+                        targetParentIds: opt.value === 'system' ? [] : form.targetParentIds,
+                      })}
+                      className={cn(
+                        'flex items-start gap-3 rounded-xl border p-3 text-left transition-colors',
+                        isActive
+                          ? 'border-primary bg-primary/5'
+                          : 'border-border hover:bg-muted/50',
+                      )}
+                    >
+                      <span className={cn(
+                        'mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
+                        isActive ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
+                      )}>
+                        {opt.icon}
+                      </span>
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold">{opt.label}</span>
+                        <span className="block text-[12px] text-muted-foreground mt-0.5">
+                          {opt.desc}
+                        </span>
+                        <span className="block text-[11.5px] text-muted-foreground mt-1">
+                          {opt.hint}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
-            )}
-            <div className="space-y-1.5">
-              <Label>類型</Label>
-              <Select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as any })}>
-                <option value="info">資訊</option>
-                <option value="warning">警告</option>
-                <option value="urgent">緊急</option>
-              </Select>
+              {error && <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</div>}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => { setDialogOpen(false); setEditId(null); setSourceTemplateId(null); }}>取消</Button>
+                <Button onClick={() => setStep('data')}>下一步</Button>
+              </DialogFooter>
             </div>
-            <div className="space-y-1.5">
-              <Label>標題 *</Label>
-              <Input
-                value={form.title}
-                onChange={(e) => setForm({ ...form, title: e.target.value })}
-                placeholder="標題..."
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>內容 *</Label>
-              <Textarea
-                value={form.content}
-                onChange={(e) => setForm({ ...form, content: e.target.value })}
-                placeholder="公告內容..."
-                rows={4}
-              />
-            </div>
-            {/* 從範本建立時, 不允許再保存為範本 (已是新公告); 否則使用者可勾選保存為範本 */}
-            {!sourceTemplateId && (
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="isTemplate"
-                  checked={form.isTemplate}
-                  onChange={(e) => setForm({ ...form, isTemplate: e.target.checked })}
-                  className="w-4 h-4"
-                />
-                <label htmlFor="isTemplate" className="text-sm">保存為範本</label>
-              </div>
-            )}
-            {form.isTemplate && !sourceTemplateId && (
-              <div className="space-y-1.5">
-                <Label>範本名稱 *</Label>
-                <Input
-                  value={form.templateName}
-                  onChange={(e) => setForm({ ...form, templateName: e.target.value })}
-                  placeholder="例: 雨天通告"
-                />
-              </div>
-            )}
-            {!form.isTemplate && (
-              <>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1.5">
-                    <Label>開始日期</Label>
-                    <Input
-                      type="date"
-                      value={form.startDate}
-                      onChange={(e) => setForm({ ...form, startDate: e.target.value })}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>結束日期</Label>
-                    <Input
-                      type="date"
-                      value={form.endDate}
-                      onChange={(e) => setForm({ ...form, endDate: e.target.value })}
-                    />
-                  </div>
+          ) : (
+            /* ========================= Step 2 — 填資料 ========================= */
+            <>
+              <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+                {/* 受眾摘要 — 從 Step 1 帶過來, 可返回更改 */}
+                <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                  <span className="text-[12px] text-muted-foreground flex-1">
+                    受眾：<span className="font-semibold text-foreground">
+                      {form.scope === 'payment' ? '繳費公告' : '系統公告'}
+                    </span>
+                    {form.scope === 'payment' && ` · 已選 ${form.targetParentIds.length} 位家長`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setStep('type')}
+                    className="text-[11.5px] font-medium text-primary hover:underline shrink-0"
+                  >
+                    更改類型
+                  </button>
                 </div>
-                <div className="grid grid-cols-2 gap-2">
+                {form.scope === 'payment' && (
                   <div className="space-y-1.5">
-                    <Label>總顯示次數 (統計)</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label>指定家長 *</Label>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setForm({
+                            ...form,
+                            targetParentIds: filteredParentOptions.map((p) => p.id),
+                          })}
+                          disabled={filteredParentOptions.length === 0}
+                          className="text-[11px] font-medium text-primary hover:underline disabled:opacity-40 disabled:no-underline"
+                        >
+                          全選
+                        </button>
+                        <span className="text-border">|</span>
+                        <button
+                          type="button"
+                          onClick={() => setForm({ ...form, targetParentIds: [] })}
+                          disabled={form.targetParentIds.length === 0}
+                          className="text-[11px] font-medium text-muted-foreground hover:text-destructive hover:underline disabled:opacity-40 disabled:no-underline"
+                        >
+                          清除
+                        </button>
+                      </div>
+                    </div>
+                    {/* 搜尋 — 家長人數多時 (跨機構時可能上百位) 才找得到人 */}
                     <Input
-                      type="number"
-                      min={1}
-                      value={form.displayCount}
-                      onChange={(e) => setForm({ ...form, displayCount: parseInt(e.target.value) || 1 })}
+                      value={parentQuery}
+                      onChange={(e) => setParentQuery(e.target.value)}
+                      placeholder="搜尋家長姓名 / 電話…"
+                      className="h-8 text-[13px]"
                     />
+                    <div className="max-h-[220px] overflow-y-auto rounded-md border border-border divide-y divide-border/40">
+                      {filteredParentOptions.length === 0 ? (
+                        <p className="text-[12px] text-muted-foreground p-3">
+                          {parentOptions.length === 0 ? '系統內未有家長資料' : '冇符合條件嘅家長'}
+                        </p>
+                      ) : (
+                        filteredParentOptions.map((p) => (
+                          <label
+                            key={p.id}
+                            className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-muted/50"
+                          >
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4 accent-primary"
+                              checked={form.targetParentIds.includes(p.id)}
+                              onChange={(e) => setForm({
+                                ...form,
+                                targetParentIds: e.target.checked
+                                  ? [...form.targetParentIds, p.id]
+                                  : form.targetParentIds.filter((id) => id !== p.id),
+                              })}
+                            />
+                            <span className="text-[13px] flex-1 truncate">{p.name}</span>
+                            <span className="text-[11px] text-muted-foreground font-mono">{p.phone}</span>
+                          </label>
+                        ))
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      已選 {form.targetParentIds.length} 位家長
+                      {parentQuery.trim() && ` · 搜尋結果 ${filteredParentOptions.length} / ${parentOptions.length} 位`}
+                    </p>
                   </div>
+                )}
+                {/* 類型 + 標題 + 內容
+                    ⚠️ 繳費公告 → 類型與內容「由付款記錄帶出」, 管理員不填
+                        → 這兩個欄位不顯示 (改顯示付款記錄綁定面板)。 */}
+                {form.scope !== 'payment' && (
                   <div className="space-y-1.5">
-                    <Label>每用戶上限 (統計)</Label>
-                    <Input
-                      type="number"
-                      min={1}
-                      value={form.maxViewsPerUser}
-                      onChange={(e) => setForm({ ...form, maxViewsPerUser: parseInt(e.target.value) || 1 })}
-                    />
+                    <Label>類型</Label>
+                    <Select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as any })}>
+                      <option value="info">資訊</option>
+                      <option value="warning">警告</option>
+                      <option value="urgent">緊急</option>
+                    </Select>
                   </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label>標題 *</Label>
+                  <Input
+                    value={form.title}
+                    onChange={(e) => setForm({ ...form, title: e.target.value })}
+                    placeholder="標題..."
+                  />
                 </div>
-              </>
-            )}
-          </div>
-          {error && <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</div>}
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setDialogOpen(false); setEditId(null); setSourceTemplateId(null); }}>取消</Button>
-            <Button onClick={handleSubmit}>保存</Button>
-          </DialogFooter>
+                {form.scope !== 'payment' && (
+                  <div className="space-y-1.5">
+                    <Label>內容 *</Label>
+                    <Textarea
+                      value={form.content}
+                      onChange={(e) => setForm({ ...form, content: e.target.value })}
+                      placeholder="公告內容..."
+                      rows={4}
+                    />
+                  </div>
+                )}
+                {/* 從範本建立時, 不允許再保存為範本 (已是新公告); 否則使用者可勾選保存為範本 */}
+                {!sourceTemplateId && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="isTemplate"
+                      checked={form.isTemplate}
+                      onChange={(e) => setForm({ ...form, isTemplate: e.target.checked })}
+                      className="w-4 h-4"
+                    />
+                    <label htmlFor="isTemplate" className="text-sm">保存為範本</label>
+                  </div>
+                )}
+                {form.isTemplate && !sourceTemplateId && (
+                  <div className="space-y-1.5">
+                    <Label>範本名稱 *</Label>
+                    <Input
+                      value={form.templateName}
+                      onChange={(e) => setForm({ ...form, templateName: e.target.value })}
+                      placeholder="例: 雨天通告"
+                    />
+                  </div>
+                )}
+                {/* ⚠️ 繳費公告 → 有效期與次數上限「由付款記錄帶出」, 管理員不填
+                    → 這整段不顯示 (改顯示付款記錄綁定面板)。 */}
+                {!form.isTemplate && form.scope !== 'payment' && (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1.5">
+                        <Label>開始日期</Label>
+                        <Input
+                          type="date"
+                          value={form.startDate}
+                          onChange={(e) => setForm({ ...form, startDate: e.target.value })}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>結束日期</Label>
+                        <Input
+                          type="date"
+                          value={form.endDate}
+                          onChange={(e) => setForm({ ...form, endDate: e.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1.5">
+                        <Label>總顯示次數 (統計)</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          value={form.displayCount}
+                          onChange={(e) => setForm({ ...form, displayCount: parseInt(e.target.value) || 1 })}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>每用戶上限 (統計)</Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          value={form.maxViewsPerUser}
+                          onChange={(e) => setForm({ ...form, maxViewsPerUser: parseInt(e.target.value) || 1 })}
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+                {/* 繳費公告 → 付款記錄綁定面板 (開發中) */}
+                {form.scope === 'payment' && (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 dark:border-amber-900/60 dark:bg-amber-950/30">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-[13px] font-semibold text-amber-900 dark:text-amber-200">
+                        綁定付款記錄
+                      </p>
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-200/70 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-900 dark:bg-amber-900/60 dark:text-amber-200">
+                        開發中
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[12px] leading-relaxed text-amber-800/90 dark:text-amber-300/80">
+                      繳費公告的內容、類型、有效期與提醒次數將自動由
+                      <span className="font-semibold">付款記錄</span>
+                      帶出, 不需人手填寫。
+                    </p>
+                    <a
+                      href="/cbl-admin-setting/parents/payment"
+                      className="mt-1.5 inline-flex items-center gap-1 text-[12px] font-medium text-amber-900 underline underline-offset-2 hover:no-underline dark:text-amber-200"
+                    >
+                      查看付款記錄 (家長 / 付款記錄)
+                    </a>
+                  </div>
+                )}
+              </div>
+              {error && <div className="text-sm text-destructive bg-destructive/10 rounded-lg px-3 py-2">{error}</div>}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setStep('type')}>上一步</Button>
+                <Button onClick={handleSubmit}>保存</Button>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 

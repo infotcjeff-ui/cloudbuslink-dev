@@ -39,7 +39,7 @@ import {
 } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
-import { STORAGE } from '@/lib/storage';
+import { STORAGE, resolveWriteAcademicYear } from '@/lib/storage';
 import { useToast } from '@/components/ui/toast';
 import { Pill, Button, IconButton } from '../[layout]/students/primitives';
 import { MODAL_FADE, MODAL_SLIDE, EASE } from '../[layout]/students/design-tokens';
@@ -48,6 +48,9 @@ import {
   busLabel,
 } from '../components/EntitySelectWithCreate';
 import { InlineMiniFormModal } from '../components/InlineMiniFormModal';
+import { TripRouteFormModal } from '../bus/trips/TripRouteFormModal';
+import type { RouteMasterInfo } from '../bus/trips/types';
+import type { RouteStop } from '@/lib/types';
 import {
   localIsoDate,
   routeStopsToWaypoints,
@@ -170,9 +173,6 @@ export function TripFormModal({
    * 用 state (唔係 ref) 係因為 UI 要隨住 baseline 改變即時重繪。
    */
   const [routeBaseline, setRouteBaseline] = React.useState<{
-    busId: string;
-    driverId: string;
-    nannyId: string;
     studentIds: string[];
     waypointSig: string;
   } | null>(null);
@@ -188,6 +188,10 @@ export function TripFormModal({
   const [driverMiniOpen, setDriverMiniOpen] = React.useState(false);
   // 「乘客 (學生)」popup — 學生名單可能好長 (30+), 主表單只顯示摘要, 點擊開 popup 勾選
   const [studentsPopupOpen, setStudentsPopupOpen] = React.useState(false);
+  // 「在班次流程內直接新增路線模板」— 蓋在 TripFormModal 之上 (z 高一級)
+  const [inlineRoutes, setInlineRoutes] = React.useState<Route[]>([]);
+  const [routeCreatorOpen, setRouteCreatorOpen] = React.useState(false);
+  const [routeCreatorSaving, setRouteCreatorSaving] = React.useState(false);
 
   /** 直接從 STORAGE 讀取全部校巴 (繞過 clientId 過濾) */
   const [storageBuses, setStorageBuses] = React.useState<BusType[]>([]);
@@ -230,6 +234,9 @@ export function TripFormModal({
     setNannyMiniOpen(false);
     setInlineDrivers([]);
     setDriverMiniOpen(false);
+    setInlineRoutes([]);
+    setRouteCreatorOpen(false);
+    setRouteCreatorSaving(false);
     // 新增模式 → 停在第 1 步 (選路線模板); 編輯模式 → 直接顯示表單
     setStep(mode === 'add' ? 'template' : 'form');
   }, [open, initial, mode]);
@@ -257,9 +264,6 @@ export function TripFormModal({
       dropoffTime: end,
     });
     setRouteBaseline({
-      busId: r.busId ?? '',
-      driverId: r.driverId ?? '',
-      nannyId: r.nannyId ?? '',
       studentIds: [...rIds],
       waypointSig: wps
         .map((w) => `${w.type}:${w.location.name}:${w.scheduledTime}:${[...w.studentIds].sort().join(',')}`)
@@ -290,7 +294,11 @@ export function TripFormModal({
   );
 
   /* ---- Phase 2-A: 路線模板 (Route) ---- */
-  const routes = React.useMemo(() => context.routes ?? [], [context.routes]);
+  // inlineRoutes: 在班次流程內即時建立的路線 (未等 cbl-routes-refresh 回來前先顯示, 建完即選)
+  const routes = React.useMemo(
+    () => [...(context.routes ?? []), ...inlineRoutes],
+    [context.routes, inlineRoutes],
+  );
   const selectedRoute = React.useMemo(
     () => routes.find((r) => r.id === routeId),
     [routes, routeId],
@@ -314,18 +322,46 @@ export function TripFormModal({
   }, [routeId, selectedRoute, busStudents, context.students, studentIds]);
 
   /**
-   * C2: 學生區顯示名單 — 有模板時為聯集（綁車學生＋路線獨有學生）。
+   * 編輯既有班次時已選的學生物件 (兜底: 即使佢哋唔再綁呢架車 / 唔在模板, 都要留返俾人睇同改)。
+   *
+   * 為什麼需要:
+   *   截圖個案 — 班次自帶 2 個學生 (trip.studentIds 有值, 站點都有人),
+   *   但佢哋嘅 student.busId 同而家揀緊嘅校巴唔同 (換過車 / 從未綁車),
+   *   導致 busStudents = []、routeOnlyStudents = [] (無模板時必定 []) →
+   *   表單顯示「此校巴目前沒有指派學生」, 已選嘅人都唔見埋。
+   */
+  const selectedStudentObjs = React.useMemo(
+    () => context.students.filter((s) => studentIds.includes(s.id)),
+    [context.students, studentIds],
+  );
+
+  /**
+   * C2: 學生區顯示名單 — 有模板時為聯集（綁車學生＋路線獨有學生＋已選兜底）。
    * 聯集計算用「模板全部學生」（routeStudentIds），而非僅已選，
    * 這樣取消勾選後還能再勾回來，不會消失。
+   * 已選兜底保證：換車 / 解綁後，已選學生唔會憑空消失。
    */
   const displayStudents = React.useMemo(() => {
-    if (!routeId || !selectedRoute) return busStudents;
+    const byId = new Map<string, Student>();
+    busStudents.forEach((s) => byId.set(s.id, s));
+    if (routeId && selectedRoute) {
+      context.students.forEach((s) => {
+        if (!byId.has(s.id) && (selectedRoute.stops ?? []).some((st) => (st.studentIds ?? []).includes(s.id))) {
+          byId.set(s.id, s);
+        }
+      });
+    }
+    selectedStudentObjs.forEach((s) => {
+      if (!byId.has(s.id)) byId.set(s.id, s);
+    });
+    return [...byId.values()];
+  }, [routeId, selectedRoute, busStudents, context.students, selectedStudentObjs]);
+
+  /** 已選但無綁呢架車嘅學生 (無論有冇模板都要提示, 唔好靜靜唔見) */
+  const unboundSelectedStudents = React.useMemo(() => {
     const busIds = new Set(busStudents.map((s) => s.id));
-    const extras = context.students.filter(
-      (s) => !busIds.has(s.id) && (selectedRoute.stops ?? []).some((st) => (st.studentIds ?? []).includes(s.id)),
-    );
-    return [...busStudents, ...extras];
-  }, [routeId, selectedRoute, busStudents, context.students]);
+    return selectedStudentObjs.filter((s) => !busIds.has(s.id));
+  }, [busStudents, selectedStudentObjs]);
 
   /**
    * 單行摘要用的已選學生名單 — 太多只顯示頭幾個 + 「…等 N 位」,
@@ -346,20 +382,17 @@ export function TripFormModal({
    * 用途: 只有當使用者真係改動咗模板帶入嘅欄位時, 才需要提示
    *       「以下改動只適用於今次新增的班次」。冇改過就唔好騷擾用戶。
    *
-   * 比較項目 (全部都係模板帶入嘅 field):
-   *   - 校巴 / 司機 / 保姆
+   * 比較項目 (模板帶入嘅 field):
    *   - 學生名單
    *   - 站點 (位置 + 類型 + 預定時間)
    *   - 開始 / 結束時間
+   *
+   * 人員 (校巴 / 司機 / 保姆) 不再由模板帶入 — 路線已不再綁校巴,
+   * 校巴由人手選擇, 故不列入偏離提示。
    */
   const routeDeviations = React.useMemo(() => {
     if (!routeBaseline) return [] as string[];
     const out: string[] = [];
-
-    if (busId !== routeBaseline.busId) out.push('綁定校巴');
-    // 司機欄顯示值會 fallback 到 bus.driverId, 所以比較實際 state
-    if (driverId !== routeBaseline.driverId) out.push('指派司機');
-    if (nannyId !== routeBaseline.nannyId) out.push('跟車保姆');
 
     // 學生名單 (比較 id 集合, 唔理順序)
     const baseSet = new Set(routeBaseline.studentIds);
@@ -375,7 +408,7 @@ export function TripFormModal({
     if (nowSig !== routeBaseline.waypointSig) out.push('上落車地點與時間');
 
     return out;
-  }, [routeBaseline, busId, driverId, nannyId, studentIds, waypoints]);
+  }, [routeBaseline, studentIds, waypoints]);
 
   /**
    * 此校巴已綁定的保姆 (busId 在 nannies.assignedBusIds 內)
@@ -401,7 +434,7 @@ export function TripFormModal({
           ),
         ]
       : base.filter((n) => n.status === 'active'));
-      // A2: 保底 — 當前已選的保姆一定在選項內（即使綁別台車 / inactive / 來自模板）。
+      // A2: 保底 — 當前已選的保姆一定在選項內（即使綁別台車 / inactive）。
       // 否則 Radix 找不到對應 <SelectItem>，欄位只會顯示 placeholder（空白）。
       if (nannyId && !listed.some((n) => n.id === nannyId)) {
         const cur = base.find((n) => n.id === nannyId);
@@ -412,7 +445,7 @@ export function TripFormModal({
     [context.nannies, busId, boundNannies, inlineNannies, nannyId],
   );
 
-  // A2: 司機同理保底 — 模板帶入的司機若不在 bus.driverId 上，也要保證選項存在。
+  // 司機選項保底 — 當前已選值一定在選項內。
   const driverOptions = React.useMemo(
     () => {
       const base = [...context.drivers, ...inlineDrivers];
@@ -428,19 +461,21 @@ export function TripFormModal({
    * 一鍵把 Route 的 master info + stops 帶入班次:
    *   - 班次類型 (Route.shiftType → Trip.type)
    *   - 起訖時間 (第一站 / 最後一站的 ETA)
-   *   - 校巴 / 司機 / 保姆 (Route 上指派的人)
    *   - 學生 (Route stops 裡出現過的學生)
    *   - 站點 (Route stops → pickup/dropoff waypoints, 依行車方向展開)
+   *
+   * 人員 (校巴 / 司機 / 保姆) 不再由模板帶入 — 路線已不再綁校巴,
+   * 校巴由人手選擇, 司機 / 保姆在選擇校巴時由該車綁定自動填入 (見下方 bus-effect)。
    *
    * ⚠️ 套用後 waypointSourceRef 設為 'route', 之後使用者再改學生/校巴
    *    都不會自動重算站點 (避免模板的站點順序被洗掉)。
    *
    * B1: 首次套用前先存快照（取消模板時還原用）。
-   * C1: 套用同一拍會改 busId，bus-effect 必須跳過一次，
-   *     否則模板的 studentIds 會被 busStudents 覆寫。
    */
-  const applyRouteTemplate = React.useCallback((routeIdToApply: string) => {
-    const r = routes.find((rr) => rr.id === routeIdToApply);
+  const applyRouteTemplate = React.useCallback((routeIdOrRoute: string | Route) => {
+    const r = typeof routeIdOrRoute === 'string'
+      ? routes.find((rr) => rr.id === routeIdOrRoute)
+      : routeIdOrRoute;
     if (!r) return;
     // B1: 只在第一次套用時存快照（連續套 A→B 不覆蓋，取消時回到套用前）
     if (!templateSnapshotRef.current) {
@@ -457,10 +492,7 @@ export function TripFormModal({
         waypointSource: waypointSourceRef.current,
       };
     }
-    // C1: 模板換車時 bus-effect 會跟著觸發，必須跳過一次
-    if (r.busId && r.busId !== busId) {
-      skipNextBusEffectRef.current = true;
-    }
+    // C1: 模板不再改 busId, bus-effect 無需跳過
     setRouteId(r.id);
 
     // 班次類型 + 起訖時間 (跟模板一致, 避免顯示 07:30-08:30 但模板是 07:15-08:40)
@@ -471,11 +503,7 @@ export function TripFormModal({
     if (start) setPlannedStartTime(start);
     if (end) setPlannedEndTime(end);
 
-    // 人員
-    if (r.busId) setBusId(r.busId);
-    if (r.driverId) setDriverId(r.driverId);
-    if (r.nannyId) setNannyId(r.nannyId);
-    busTouchedRef.current = true;
+    // 人員不再由模板帶入 — 校巴人手選, 司機 / 保姆等選車時由該車綁定自動填入
 
     // 學生
     const rIds = routeStudentIds(r);
@@ -493,9 +521,6 @@ export function TripFormModal({
 
     // 記住模板帶入嘅原始值 → 之後可以偵測使用者改咗邊啲欄位
     setRouteBaseline({
-      busId: r.busId ?? '',
-      driverId: r.driverId ?? '',
-      nannyId: r.nannyId ?? '',
       studentIds: [...rIds],
       waypointSig: wps
         .map((w) => `${w.type}:${w.location.name}:${w.scheduledTime}:${[...w.studentIds].sort().join(',')}`)
@@ -504,6 +529,75 @@ export function TripFormModal({
     // Wizard: 套用模板後自動跳到第 2 步 (表單)
     setStep('form');
   }, [routes, type, customTypeLabel, plannedStartTime, plannedEndTime, busId, driverId, nannyId, studentIds, waypoints]);
+
+  /**
+   * 在班次流程內直接新增路線模板 → 存檔後即時套用, 留在班次流程繼續。
+   *
+   * 流程: TripRouteFormModal(onSave) → 寫 STORAGE + 推 Supabase →
+   *       inlineRoutes 暫存 + dispatch refresh → applyRouteTemplate(newId)
+   */
+  const handleInlineRouteSave = React.useCallback(async (master: RouteMasterInfo, stops: RouteStop[]) => {
+    setRouteCreatorSaving(true);
+    try {
+      const resolvedClientId = (() => {
+        try {
+          const raw = localStorage.getItem('cbl_auth');
+          const u = raw ? JSON.parse(raw) : null;
+          if (u?.clientId) return u.clientId as string;
+          const firstBus = STORAGE.buses.getAll()[0];
+          if (firstBus?.clientId) return firstBus.clientId as string;
+          const firstRoute = STORAGE.routes.getAll()[0];
+          if (firstRoute?.clientId) return firstRoute.clientId as string;
+          return STORAGE.clients.getAll()[0]?.id || '';
+        } catch {
+          return STORAGE.clients.getAll()[0]?.id || '';
+        }
+      })();
+      const now = new Date().toISOString();
+      const newRoute: Route = {
+        id: STORAGE.genId('route'),
+        clientId: resolvedClientId,
+        code: master.code.trim(),
+        // 學年蓋章: 路線屬於建立當下的現行學年 (與路線頁 handleSave 一致)
+        academicYear: resolveWriteAcademicYear(resolvedClientId),
+        name: master.name.trim(),
+        shiftType: master.shiftType,
+        serviceDate: null,
+        serviceTime: '',
+        busId: '',
+        driverId: '',
+        nannyId: '',
+        stops: stops.map((s, idx) => ({ ...s, seq: idx + 1 })),
+        createdAt: now,
+        updatedAt: now,
+      };
+      STORAGE.routes.add(newRoute);
+      // 背景推雲端 (不阻擋班次流程)
+      try {
+        const { supabaseRouteRecords } = await import('@/lib/supabase-entities');
+        const sbRes = await supabaseRouteRecords.add(newRoute);
+        if (!sbRes.success) {
+          console.warn('[TripFormModal] inline route cloud push failed:', sbRes.error);
+          toast.warning(`路線已新增，但雲端同步失敗：${sbRes.error}`);
+        }
+      } catch (e) {
+        console.warn('[TripFormModal] inline route cloud push failed:', e);
+      }
+      setInlineRoutes((prev) => [...prev, newRoute]);
+      window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
+      setRouteCreatorOpen(false);
+      // 新增後即時套用 → 自動跳到第 2 步 (表單), 繼續整個新增班次流程
+      // 直接傳 Route 物件 (唔經 routes.find), 避免 setInlineRoutes 未 flush 導致搵唔到
+      applyRouteTemplate(newRoute);
+      toast.success(`路線「${newRoute.name}」已新增並套用 — 請繼續完成班次資料`);
+    } catch (err) {
+      console.error('[TripFormModal] inline route save failed:', err);
+      const msg = err instanceof Error ? err.message : String(err);
+      toast.error(`新增路線失敗：${msg}`);
+    } finally {
+      setRouteCreatorSaving(false);
+    }
+  }, [applyRouteTemplate, toast]);
 
   /**
    * B2: 取消套用路線模板 → 還原套用前的快照（人員＋學生＋時間＋站點）。
@@ -549,10 +643,12 @@ export function TripFormModal({
     setStudentIds((prev) => (prev.includes(id) ? prev.filter((p) => p !== id) : [...prev, id]));
   };
 
-  /* ---- 選校巴後, 自動帶入該校巴已綁的司機 / 保姆 / 學生 ----
+  /* ---- 選校巴後, 自動帶入該校巴已綁的司機 / 保姆 ----
    * 觸發時機: busId 變化時 (使用者切換校巴)。
-   * - 司機: 取 bus.driverId (Bus 對司機是 1 對 1)。
-   * - 保姆: 從 boundNannies 取第一個 (一個保姆可綁多台車, 該校巴只顯示一位自動帶入)。
+   * - 司機: 取 bus.driverId (Bus 對司機是 1 對 1), 直接覆寫 (換車即重帶)。
+   *   若新車無綁定司機則清空, 由人手選擇。
+   * - 保姆: 從 boundNannies 取第一個, 直接覆寫 (換車即重帶)。
+   *   若新車無綁定保姆則清空, 由人手選擇。
    * - 學生: 帶入所有 busStudents (學生跟車是 1 對 1, busStudents 即「這台車的學生」)。
    * - 站點會在下一個 effect 依 studentIds 自動重算, 不需在此處理。
    * - 編輯模式 (initial 已有值) 時, 跳過自動帶入, 保留使用者既有選擇。
@@ -566,8 +662,8 @@ export function TripFormModal({
    *   舊版無條件設成 'auto', 導致「套用路線模板 → 換校巴」的站點被自動重算洗掉,
    *   模板的站點順序全失 (這是 Phase 2-A 實測時發現的 bug)。
    *
-   * C1: 套用 / 還原模板同一拍改了 busId 時，skipNextBusEffectRef 為 true，
-   *     直接跳過（模板已帶入完整 studentIds，不可被 busStudents 覆寫）。
+   * C1: 還原模板同一拍改了 busId 時，skipNextBusEffectRef 為 true，
+   *     直接跳過（快照已帶完整 studentIds，不可被 busStudents 覆寫）。
    */
   React.useEffect(() => {
     // C1: 模板套用 / 還原帶來 busId 變化 → 跳過這一次
@@ -575,17 +671,19 @@ export function TripFormModal({
       skipNextBusEffectRef.current = false;
       return;
     }
-    if (!busId) return;
+    if (!busId) {
+      // 未選車 → 清空司機 / 保姆等人手選 (新增模式開局 busId 本來就係空, 清空係 no-op)
+      // 編輯模式且未郁過車則保留 initial 值
+      if (mode === 'edit' && !busTouchedRef.current) return;
+      setDriverId('');
+      setNannyId('');
+      return;
+    }
     // 編輯模式且 busId 是初始值, 跳過 (避免覆寫 initial 帶入的司機/保姆/學生)
     if (mode === 'edit' && !busTouchedRef.current) return;
-    // 帶入司機 (若尚未手動指定)
-    if (bus?.driverId && driverId !== bus.driverId) {
-      setDriverId(bus.driverId);
-    }
-    // 帶入保姆 (取第一個綁該車的保姆, 僅在尚未選保姆時)
-    if (!nannyId && boundNannies.length > 0) {
-      setNannyId(boundNannies[0].id);
-    }
+    // 選車即按該車綁定覆寫司機 / 保姆 (換車蓋掉已選值; 新車無綁定則清空等人手選)
+    setDriverId(bus?.driverId ?? '');
+    setNannyId(boundNannies[0]?.id ?? '');
     // 學生跟車是 1 對 1 → 切換校巴時, 學生成名單直接換成新校巴的學生
     // C3: 有模板時不覆寫學生（模板名單可能含跨車學生）；只在無模板時才換名單
     if (!routeId) {
@@ -683,6 +781,7 @@ export function TripFormModal({
       e.routeId = '請先套用路線模板, 再調整人員、學生與站點';
     } else {
       if (!busId) e.busId = '請選擇校巴';
+      if (!driverId) e.driverId = '請選擇司機';
       if (!nannyId) e.nannyId = '請選擇保姆';
       if (studentIds.length === 0) e.students = '請選擇至少一位學生';
       if (waypoints.length === 0) e.waypoints = '請安排至少一個站點';
@@ -713,7 +812,7 @@ export function TripFormModal({
         plannedStartTime,
         plannedEndTime,
         busId,
-        driverId: driverId || bus?.driverId || '',
+        driverId,
         nannyId,
         studentIds,
         waypoints,
@@ -734,7 +833,7 @@ export function TripFormModal({
   return (
     <>
     <AnimatePresence>
-      {open && (
+      {open && !routeCreatorOpen && (
         <ModalPortal>
           <motion.div
             key="trip-form-backdrop"
@@ -809,9 +908,10 @@ export function TripFormModal({
                       6000,
                     );
                   }}
+                  onCreate={() => setRouteCreatorOpen(true)}
                 />
               ) : (
-              <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_280px] lg:gap-5">
+              <div className="lg:grid lg:grid-cols-[minmax(0,13fr)_minmax(0,7fr)] lg:gap-5">
                 {/* 左欄 */}
                 <div className="px-5 lg:px-5 py-5 space-y-5 min-w-0">
                 {/* 已選路線模板 (第 1 步的結果摘要, 可按「更換模板」回去重選) */}
@@ -939,9 +1039,7 @@ export function TripFormModal({
                               6000,
                             );
                           }}
-                          onAddNew={() => {
-                            toast.info('請到「校巴 › 路線」建立路線模板, 完成後回到這裡選擇');
-                          }}
+                          onAddNew={() => setRouteCreatorOpen(true)}
                           placeholder="— 請選擇路線模板 —"
                           emptyHint="尚未建立任何路線模板, 可到「校巴 › 路線」建立第一條"
                           renderLabel={(r) => `${r.code} · ${r.name} (${r.stops?.length ?? 0} 站)`}
@@ -986,16 +1084,16 @@ export function TripFormModal({
                       <EntitySelectWithCreate<Driver>
                         id="trip-form-driver"
                         label="指派司機"
-                        value={driverId || bus?.driverId || ''}
+                        value={driverId}
                         options={driverOptions}
                         onChange={(v) => setDriverId(v)}
                         onAddNew={() => setDriverMiniOpen(true)}
                         emptyHint="尚未建立任何司機, 從 dropdown 最底「＋ 在此新增…」建立第一位"
                         placeholder="— 請選擇司機 —"
-                        disabled={!!bus?.driverId}
                         renderLabel={(d) => `${d.name} · ${d.phone}`}
                       />
-                      {bus?.driverId && (
+                      <FieldError msg={errors.driverId} />
+                      {bus?.driverId && driverId === bus.driverId && (
                         <p className="mt-1 text-[10.5px] text-emerald-600 dark:text-emerald-300 inline-flex items-center gap-1">
                           <CheckCircle2 width={11} height={11} /> 已帶入綁定司機 {[...context.drivers, ...inlineDrivers].find((d) => d.id === bus.driverId)?.name ?? ''}
                         </p>
@@ -1013,12 +1111,7 @@ export function TripFormModal({
                         placeholder="— 請選擇保姆 —"
                         renderLabel={(n) => `${n.name} · ${n.phone}`}
                       />
-                      {/* 保姆來自路線模板時才顯示來源提示；綁定車自動帶入不另顯示綠字 */}
-                      {nannyId && nanny && routeId && !boundNannies.some((bn) => bn.id === nannyId) ? (
-                        <p className="mt-1 text-[10.5px] text-blue-600 dark:text-blue-300 inline-flex items-center gap-1">
-                          <RouteIcon width={11} height={11} /> 來自路線模板 {nanny.name}
-                        </p>
-                      ) : null}
+                      {/* 保姆綁定車自動帶入不另顯示來源字 */}
                       <FieldError msg={errors.nannyId} />
                     </div>
                   </div>
@@ -1030,7 +1123,7 @@ export function TripFormModal({
                 <Section icon={<Users width={14} height={14} />} title="乘客 (學生)" n="3">
                   {!busId ? (
                     <p className="text-[12px] text-slate-500">請先選擇校巴以載入學生</p>
-                  ) : (busStudents.length === 0 && routeOnlyStudents.length === 0) ? (
+                  ) : (displayStudents.length === 0) ? (
                     <p className="text-[12px] text-slate-500">此校巴目前沒有指派學生</p>
                   ) : (
                     <>
@@ -1065,6 +1158,12 @@ export function TripFormModal({
                         <p className="mt-1 text-[10.5px] text-blue-600 dark:text-blue-300 inline-flex items-center gap-1 flex-wrap">
                           <RouteIcon width={11} height={11} />
                           路線學生 (未綁此車): {routeOnlyStudents.map((s) => s.name).join('、')} — 一併隨行
+                        </p>
+                      )}
+                      {routeOnlyStudents.length === 0 && unboundSelectedStudents.length > 0 && (
+                        <p className="mt-1 text-[10.5px] text-amber-600 dark:text-amber-300 inline-flex items-center gap-1 flex-wrap">
+                          <AlertCircle width={11} height={11} />
+                          已選學生 (未綁此車): {unboundSelectedStudents.map((s) => s.name).join('、')} — 一併隨行
                         </p>
                       )}
                     </>
@@ -1154,28 +1253,6 @@ export function TripFormModal({
                 </Section>
                 )}
 
-                {/* ⚠️ 提示: 只喺使用者真係改動咗模板帶入嘅欄位時, 先喺最底顯示 */}
-                {routeId && routeDeviations.length > 0 && (
-                  <div
-                    role="alert"
-                    className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1.5 dark:border-amber-800/50 dark:bg-amber-950/30"
-                  >
-                    <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-200 inline-flex items-center gap-1">
-                      <AlertCircle width={12} height={12} />
-                      以下改動只適用於今次班次
-                    </p>
-                    <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
-                      你已改動：<strong className="font-semibold">{routeDeviations.join('、')}</strong>。
-                      這些改動<strong className="font-semibold">不會改動路線模板內的原有資料</strong>，
-                      儲存後只會寫入今次的班次紀錄；模板本身維持原狀，日後其他班次套用同一路線時唔會受影響。
-                    </p>
-                    <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
-                      如需把改動永久更新到路線模板，請到{' '}
-                      <span className="font-semibold">校巴 › 路線</span>{' '}
-                      頁面編輯該路線模板（改動該模板則會影響所有套用它的班次）。
-                    </p>
-                  </div>
-                )}
                 </div>
                 {/* /左欄 */}
 
@@ -1190,7 +1267,7 @@ export function TripFormModal({
                           type === 'morning' ? '早班' : type === 'afternoon' ? '午班' : (customTypeLabel.trim() || '自訂')
                         } />
                         <PreviewRow label="校巴" value={bus ? `${bus.plateNumber} · ${bus.capacity}座` : '—'} />
-                        <PreviewRow label="司機" value={driver?.name ?? (bus?.driverId ? '(沿用校巴司機)' : '未指派')} />
+                        <PreviewRow label="司機" value={driver?.name ?? '未指派'} />
                         <PreviewRow label="保姆" value={nanny?.name ?? '未指派'} />
                         <PreviewRow
                           label="學生"
@@ -1223,7 +1300,7 @@ export function TripFormModal({
                             {waypoints.length > 1 && ` → ${waypoints[waypoints.length - 1].location.name}`}
                           </p>
                         )}
-                        {errors.busId || errors.nannyId || errors.students || errors.waypoints || errors.capacity ? (
+                        {errors.busId || errors.driverId || errors.nannyId || errors.students || errors.waypoints || errors.capacity ? (
                           <p className="mt-2 inline-flex items-center gap-1 text-[10.5px] text-rose-600 dark:text-rose-300">
                             <AlertCircle width={11} height={11} /> 有欄位未通過驗證
                           </p>
@@ -1233,6 +1310,27 @@ export function TripFormModal({
                           </p>
                         )}
                       </div>
+                      {routeId && routeDeviations.length > 0 && (
+                        <div
+                          role="alert"
+                          className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1.5 dark:border-amber-800/50 dark:bg-amber-950/30"
+                        >
+                          <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-200 inline-flex items-center gap-1">
+                            <AlertCircle width={12} height={12} />
+                            以下改動只適用於今次班次
+                          </p>
+                          <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
+                            你已改動：<strong className="font-semibold">{routeDeviations.join('、')}</strong>。
+                            這些改動<strong className="font-semibold">不會改動路線模板內的原有資料</strong>，
+                            儲存後只會寫入今次的班次紀錄；模板本身維持原狀，日後其他班次套用同一路線時唔會受影響。
+                          </p>
+                          <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
+                            如需把改動永久更新到路線模板，請到{' '}
+                            <span className="font-semibold">校巴 › 路線</span>{' '}
+                            頁面編輯該路線模板（改動該模板則會影響所有套用它的班次）。
+                          </p>
+                        </div>
+                      )}
                     </Section>
                   </div>
                 </aside>
@@ -1250,7 +1348,7 @@ export function TripFormModal({
                       </p>
                       <p className="text-slate-700 dark:text-slate-200">
                         <span className="text-slate-500">校巴:</span> {bus?.plateNumber ?? '—'}{' '}
-                        <span className="text-slate-500">·</span> 司機 {driver?.name ?? (bus?.driverId ? '(沿用)' : '未指派')}
+                        <span className="text-slate-500">·</span> 司機 {driver?.name ?? '未指派'}
                         {' '}· 保姆 {nanny?.name ?? '未指派'}
                       </p>
                       <p className="text-slate-700 dark:text-slate-200">
@@ -1275,6 +1373,22 @@ export function TripFormModal({
                         </p>
                       )}
                     </div>
+                    {routeId && routeDeviations.length > 0 && (
+                      <div
+                        role="alert"
+                        className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 space-y-1.5 dark:border-amber-800/50 dark:bg-amber-950/30"
+                      >
+                        <p className="text-[12px] font-semibold text-amber-800 dark:text-amber-200 inline-flex items-center gap-1">
+                          <AlertCircle width={12} height={12} />
+                          以下改動只適用於今次班次
+                        </p>
+                        <p className="text-[11px] text-amber-700/90 dark:text-amber-300/90 leading-relaxed">
+                          你已改動：<strong className="font-semibold">{routeDeviations.join('、')}</strong>。
+                          這些改動<strong className="font-semibold">不會改動路線模板內的原有資料</strong>，
+                          儲存後只會寫入今次的班次紀錄；模板本身維持原狀，日後其他班次套用同一路線時唔會受影響。
+                        </p>
+                      </div>
+                    )}
                   </Section>
                 </div>
               </div>
@@ -1287,7 +1401,7 @@ export function TripFormModal({
                 <>
                   <span className="text-[10.5px] text-slate-500 truncate dark:text-slate-400 inline-flex items-center gap-1.5">
                     <Info width={12} height={12} />
-                    第 1 步 — 選擇路線模板後, 將自動帶入班次類型、時間、司機、保姆、學生與站點
+                    第 1 步 — 選擇路線模板後, 將自動帶入班次類型、時間、學生與站點; 校巴、司機、保姆請人手選擇
                   </span>
                   <div className="flex items-center gap-2 shrink-0">
                     <button
@@ -1404,6 +1518,23 @@ export function TripFormModal({
       }}
       onClose={() => setStudentsPopupOpen(false)}
     />
+
+    {/* 「在班次流程內直接新增路線模板」— 蓋在 TripFormModal 之上 (z 高一級), 存檔後即時套用並回到班次表單繼續 */}
+    <TripRouteFormModal
+      open={routeCreatorOpen}
+      mode="add"
+      context={{
+        routes,
+        buses: [...context.buses, ...inlineBuses, ...storageBuses],
+        drivers: [...context.drivers, ...inlineDrivers],
+        nannies: [...context.nannies, ...inlineNannies],
+        students: context.students,
+      }}
+      isSaving={routeCreatorSaving}
+      onSave={handleInlineRouteSave}
+      onClose={() => setRouteCreatorOpen(false)}
+      overlayZ="z-[90]"
+    />
     </>
   );
 }
@@ -1427,12 +1558,14 @@ function RouteTemplateStep({
   buses,
   students,
   onSelect,
+  onCreate,
 }: {
   routes: Route[];
   selectedId: string;
   buses: BusType[];
   students: Student[];
   onSelect: (routeId: string) => void;
+  onCreate: () => void;
 }) {
   if (routes.length === 0) {
     return (
@@ -1447,13 +1580,14 @@ function RouteTemplateStep({
           新增班次需要先選擇一條路線模板 — 模板會帶入班次類型、起訖時間、
           司機、保姆、隨車學生與上落車站點。
         </p>
-        <a
-          href="/cbl-admin-setting/bus/trips"
+        <button
+          type="button"
+          onClick={onCreate}
           className="mt-1 inline-flex items-center justify-center gap-1.5 h-8 px-3 rounded-md bg-blue-600 text-[12px] font-semibold text-white hover:bg-blue-700 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
         >
           <RouteIcon width={12} height={12} />
           前往建立路線模板
-        </a>
+        </button>
       </div>
     );
   }
@@ -1470,6 +1604,14 @@ function RouteTemplateStep({
         <span className="ml-auto text-[11px] text-slate-500 dark:text-slate-400 tabular-nums">
           {routes.length} 條路線
         </span>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="inline-flex items-center justify-center gap-1 h-7 px-2.5 rounded-md bg-blue-600 text-[11px] font-semibold text-white hover:bg-blue-700 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 shrink-0"
+        >
+          <Plus width={11} height={11} />
+          新增路線
+        </button>
       </div>
 
       <ul className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2.5">
@@ -1537,7 +1679,7 @@ function RouteTemplateStep({
 
       <p className="mt-4 text-[11px] text-slate-500 inline-flex items-center gap-1 dark:text-slate-400">
         <Info width={12} height={12} />
-        選擇模板後會自動帶入班次類型、時間、司機、保姆、學生與站點 — 隨後仍可逐項調整。
+        選擇模板後會自動帶入班次類型、時間、學生與站點 — 校巴、司機、保姆請人手選擇, 選車後自動帶入該車綁定。
       </p>
     </div>
   );

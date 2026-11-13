@@ -21,6 +21,14 @@
 import { STORAGE, mergeCloudRecords } from './storage';
 import { camelize } from './supabase-case';
 import { isSupabaseAvailable } from './supabase-data';
+import {
+  mergeRoutesWithTombstones,
+  retryRouteDeletes,
+} from './route-tombstones';
+import {
+  mergeTripsWithTombstones,
+  retryTripDeletes,
+} from './trip-tombstones';
 import type {
   Client,
   Company,
@@ -34,7 +42,9 @@ import type {
   Trip,
   Attendance,
   Announcement,
+  IncidentReport,
 } from './types';
+import type { AcademicYear } from './academic-year';
 
 /** 單次 refresh 的結果摘要 */
 export interface CloudRefreshResult {
@@ -64,6 +74,7 @@ const REFRESH_EVENTS = [
   'cbl-trips-refresh',
   'cbl-attendances-refresh',
   'cbl-announcements-refresh',
+  'cbl-incidents-refresh',
 ] as const;
 
 /**
@@ -178,10 +189,83 @@ export async function refreshCloud(options?: {
     // ---- 營運層 ----
     await pull<Driver>('drivers', 'cbl_drivers', () => STORAGE.drivers.getAll(), (r) => STORAGE.drivers.setAll(r));
     await pull<Bus>('buses', 'cbl_buses', () => STORAGE.buses.getAll(), (r) => STORAGE.buses.setAll(r));
-    await pull<Student>('students', 'cbl_students', () => STORAGE.students.getAll(), (r) => STORAGE.students.setAll(r));
+    // ⚠️ 學生的「就讀學校」三欄 (school_type / school_district / school_name)
+    //   來自 migration 0015。若該 migration 還沒套到 live DB,
+    //   雲端回傳的 row 不會有這三欄 (PostgREST 省略不存在於 schema 的欄位),
+    //   mergeCloudRecords 是「DB 為準」→ 會把本機已填好的學校資料洗成 null。
+    //   → 先檢查 DB row 有沒有 school_name 欄位; 沒有就保留本機這三欄。
+    await pull<Student>('students', 'cbl_students', () => STORAGE.students.getAll(), (r) => STORAGE.students.setAll(r), {
+      // 雲端 row 沒有 school_name 這個 key → 代表 DB 還沒套 0015 migration
+      //   → 保留本機的學校欄位 (不要用 null 蓋掉)
+      // ⚠️ 同理: 學年欄位 (academicYear / personKey) 來自 migration 0017,
+      //    DB 還沒套時 PostgREST 會省略這些 key → 也要保留本機的值,
+      //    否則「DB 為準」會把本機的學年洗成 undefined (資料看起來像不屬於任何學年)。
+      compare: (local, db) => {
+        const missingSchool =
+          !('schoolName' in db) &&
+          Boolean(local.schoolName || local.schoolDistrict || local.schoolType);
+        const missingYear =
+          !('academicYear' in db) &&
+          Boolean(local.academicYear || local.personKey);
+        return missingSchool || missingYear;
+      },
+    });
     await pull<Parent>('parents', 'cbl_parents', () => STORAGE.parents.getAll(), (r) => STORAGE.parents.setAll(r));
     await pull<Nanny>('nannies', 'cbl_nannies', () => STORAGE.nannies.getAll(), (r) => STORAGE.nannies.setAll(r));
-    await pull<Route>('routes', 'cbl_routes', () => STORAGE.routes.getAll(), (r) => STORAGE.routes.setAll(r));
+    // ⚠️ 學年登錄 (migration 0016) — 雲端為準 (isCurrent / status 決定寫入蓋章),
+    //    但本機可能還沒推上去的新學年要保留 → 用 academicYearStorage.mergeAll。
+    if (should('academicYears')) {
+      try {
+        const { data, error } = await supabase.from('cbl_academic_years').select('*');
+        if (error) {
+          result.errors.cbl_academic_years = error.message;
+          result.success = false;
+        } else {
+          const rows = (data || []).map(camelize) as AcademicYear[];
+          if (rows.length > 0) {
+            STORAGE.academicYears.mergeAll(rows);
+            result.tables.academicYears = { added: rows.length, updated: 0, removed: 0, keptLocal: 0 };
+            result.changed = true;
+          }
+        }
+      } catch (e) {
+        result.errors.cbl_academic_years = e instanceof Error ? e.message : String(e);
+        result.success = false;
+      }
+    }
+    // ⚠️ routes 不能用一般的 merge (會把「本機已刪、雲端還在」的路線拉回來)
+    //   → 用墓碑過濾: 帶墓碑 id 的路線一律剔除, 並重試雲端刪除。
+    if (should('routes')) {
+      try {
+        const { data, error } = await supabase.from('cbl_routes').select('*');
+        if (error) {
+          result.errors.cbl_routes = error.message;
+          result.success = false;
+        } else {
+          const rows = (data || []).map(camelize) as Route[];
+          const before = STORAGE.routes.getAll();
+          const { merged, staleInCloud } = mergeRoutesWithTombstones(before, rows);
+          const removed = before.length - merged.filter((r) => rows.some((d) => d.id === r.id)).length;
+          STORAGE.routes.setAll(merged);
+          result.tables.routes = {
+            added: merged.length - before.length,
+            updated: 0,
+            removed: Math.max(0, removed),
+            keptLocal: merged.length,
+          };
+          if (staleInCloud.length > 0) {
+            console.warn(
+              `[CloudRefresh] ${staleInCloud.length} 筆路線在雲端仍存在, 重試刪除: ${staleInCloud.join(', ')}`,
+            );
+            void retryRouteDeletes(staleInCloud);
+          }
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        result.errors.cbl_routes = msg;
+        result.success = false;
+      }
+    }
 
     // ---- 動態層 (有 updatedAt → 本機較新時保留本機) ----
     const byUpdatedAt = <T extends { id: string; updatedAt?: string | null }>(
@@ -192,14 +276,60 @@ export async function refreshCloud(options?: {
       return local.updatedAt > db.updatedAt;
     };
 
-    await pull<Trip>('trips', 'cbl_trips', () => STORAGE.trips.getAll(), (r) => STORAGE.trips.setAll(r), {
-      compare: byUpdatedAt,
-    });
+    // ⚠️ trips 不能用一般的 merge (會把「本機已刪、雲端還在」或
+    //   「別處已刪、本機還在」的班次拉回來 → 保姆端刪後仍顯示, 即本次 bug)
+    //   → 用墓碑過濾 + 已同步 id 比對: 帶墓碑 id 一律剔除;
+    //     曾推上雲端但雲端已無此 id → 在別處被刪, 跟著刪。
+    if (should('trips')) {
+      try {
+        const { data, error } = await supabase.from('cbl_trips').select('*');
+        if (error) {
+          result.errors.cbl_trips = error.message;
+          result.success = false;
+        } else {
+          const rows = (data || []).map(camelize) as Trip[];
+          if (rows.length > 0) {
+            const before = STORAGE.trips.getAll().length;
+            // mergeAll 內已含: 墓碑剔除 + 跨裝置刪除傳遞 + synced 記錄 + 雲端重試
+            STORAGE.trips.mergeAll(rows);
+            const after = STORAGE.trips.getAll().length;
+            result.tables.trips = {
+              added: Math.max(0, after - before),
+              updated: 0,
+              removed: Math.max(0, before - after),
+              keptLocal: after,
+            };
+            if (before !== after) result.changed = true;
+          } else {
+            // 雲端完全沒有班次 → 仍要套用墓碑 (避免已刪的復活)
+            const { merged } = mergeTripsWithTombstones(
+              STORAGE.trips.getAll(),
+              [],
+            );
+            STORAGE.trips.setAll(merged);
+            const pending: string[] = [];
+            try {
+              const { getPendingTripDeleteIds } = await import('./trip-tombstones');
+              pending.push(...getPendingTripDeleteIds());
+            } catch { /* ignore */ }
+            if (pending.length > 0) void retryTripDeletes(pending);
+          }
+        }
+      } catch (e) {
+        result.errors.cbl_trips = e instanceof Error ? e.message : String(e);
+        result.success = false;
+      }
+    }
     await pull<Attendance>('attendances', 'cbl_attendances', () => STORAGE.attendances.getAll(), (r) => STORAGE.attendances.setAll(r), {
       compare: byUpdatedAt,
       // 打卡記錄的 id 在本機與 DB 可能不同 (本機 upsert 會 genId),
       // 但業務鍵是 (tripId, studentId, waypointId) → 用它合併才不會重複計數
       keyOf: (a) => `${a.tripId}__${a.studentId}__${a.waypointId}`,
+    });
+
+    // 異常回報 — 表未建 (migration 0022 未跑) 時靜默跳過, 不阻斷
+    await pull<IncidentReport>('incidents', 'cbl_incident_reports', () => STORAGE.incidents.getAll(), (r) => STORAGE.incidents.setAll(r), {
+      compare: byUpdatedAt,
     });
 
     // 公告用專屬的 mergeAll (要保留「本機先寫、尚未推上雲端」的公告)

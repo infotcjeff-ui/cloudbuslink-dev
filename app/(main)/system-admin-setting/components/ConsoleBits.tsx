@@ -12,9 +12,10 @@
 
 import * as React from 'react';
 import {
-  Eye, EyeOff, Copy, CheckCircle2, Pencil, RotateCcw,
+  Eye, EyeOff, Pencil, RotateCcw,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { CopyIconButton } from '@/components/ui/copy-button';
 import type { ConfigSource } from '@/lib/types';
 
 /* ------------------------------------------------------------------ */
@@ -186,7 +187,6 @@ export function MaskedValue({
   className?: string;
 }) {
   const [show, setShow] = React.useState(false);
-  const [copied, setCopied] = React.useState(false);
 
   if (!value) {
     return (
@@ -223,20 +223,12 @@ export function MaskedValue({
         {show ? <EyeOff width={12} height={12} /> : <Eye width={12} height={12} />}
       </button>
       {show && (
-        <button
-          type="button"
-          onClick={() => {
-            navigator.clipboard?.writeText(value).catch(() => {});
-            setCopied(true);
-            setTimeout(() => setCopied(false), 1200);
-          }}
-          className="inline-flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-600 cursor-pointer dark:hover:bg-slate-800 dark:hover:text-slate-200"
-          aria-label="複製"
-        >
-          {copied
-            ? <CheckCircle2 width={12} height={12} className="text-emerald-600" />
-            : <Copy width={12} height={12} />}
-        </button>
+        <CopyIconButton
+          value={value}
+          title="複製"
+          label="設定值"
+          className="h-6 w-6"
+        />
       )}
       {source && <ConfigSourcePill source={source} />}
       {onEdit && (

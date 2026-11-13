@@ -39,7 +39,6 @@ import {
   CheckCircle2,
   PowerOff,
   Phone,
-  Copy,
   KeyRound,
   Calendar,
   FileSpreadsheet,
@@ -72,6 +71,7 @@ import {
   TAB_FADE_DURATION,
 } from './design-tokens';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import { useAuthClientId, alignClientIdForWrite } from '@/lib/use-client-id';
 import { markPendingPatch } from '@/lib/storage';
 import type { ParentTab } from './types';
@@ -1256,20 +1256,12 @@ function DataTable({
               {/* 電話 (登入帳號) (copyable chip + 登入狀態 icon) */}
               <td className="px-3 py-2.5">
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                        navigator.clipboard.writeText(p.phone).catch(() => {});
-                      }
-                    }}
+                  <CopyChip
+                    value={p.phone}
                     title="複製電話"
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                  >
-                    <Phone width={9} height={9} />
-                    {p.phone}
-                    <Copy width={9} height={9} />
-                  </button>
+                    label="電話"
+                    icon={<Phone width={9} height={9} />}
+                  />
                   {linkedUser ? (
                     <Pill tone="success" size="sm">
                       <KeyRound width={9} height={9} />

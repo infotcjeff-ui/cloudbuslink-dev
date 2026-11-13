@@ -64,6 +64,13 @@ import {
   busLabel,
 } from '../../components/EntitySelectWithCreate';
 import { InlineMiniFormModal } from '../../components/InlineMiniFormModal';
+import { SchoolSelect } from './SchoolSelect';
+import {
+  validateSchoolSelection,
+  collectCustomSchools,
+  type CustomSchoolRef,
+  type SchoolSelectionRefs,
+} from '@/lib/schools';
 import type { Student, Parent, Bus, Driver } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
@@ -693,6 +700,43 @@ export function StudentFormModal({
    *  避免右欄「已選校巴」在綁定了跨機構司機時誤判「尚未指派司機」。) */
   const [storageDrivers, setStorageDrivers] = React.useState<Driver[]>([]);
 
+  /**
+   * 「本次表單內」新增的自訂區域 / 學校。
+   *
+   * 為什麼需要自己記:
+   *   自訂值是使用者剛剛在 dropdown 裡打出來的, 還沒存進任何學生紀錄 →
+   *   collectCustomSchools() (從學生清單反推) 看不到它 →
+   *   validateSchoolSelection() 會判「該區找不到這間學校」→ 永遠存不了。
+   *   → 這裡把「本次新增」的值併進 refs, 讓驗證放行。
+   */
+  const [sessionCustom, setSessionCustom] = React.useState<{
+    districts: string[];
+    schools: CustomSchoolRef[];
+  }>({ districts: [], schools: [] });
+
+  /** 已存在的學生 (從 context 傳入) — 用來反推「歷史自訂值」 */
+  const existingStudents = context.students;
+
+  /** 合併「歷史自訂值 + 本次新增的自訂值」 */
+  const schoolRefs = React.useMemo<SchoolSelectionRefs>(() => {
+    const fromStudents = collectCustomSchools(existingStudents);
+    const districtSet = new Set([
+      ...fromStudents.districts,
+      ...sessionCustom.districts,
+    ]);
+    const schoolMap = new Map<string, CustomSchoolRef>();
+    for (const s of fromStudents.schools) {
+      schoolMap.set(`${s.type}|${s.district}|${s.name}`, s);
+    }
+    for (const s of sessionCustom.schools) {
+      schoolMap.set(`${s.type}|${s.district}|${s.name}`, s);
+    }
+    return {
+      customDistricts: [...districtSet],
+      customSchools: [...schoolMap.values()],
+    };
+  }, [existingStudents, sessionCustom]);
+
   React.useEffect(() => {
     setStorageBuses(STORAGE.buses.getAll());
     setStorageDrivers(STORAGE.drivers.getAll());
@@ -715,6 +759,7 @@ export function StudentFormModal({
       });
       setInlineParents([]); // 每次開啟重置
       setInlineBuses([]); // 每次開啟重置
+      setSessionCustom({ districts: [], schools: [] }); // 每次開啟重置
       // 緊急聯絡人: edit mode 有資料 → 自動展開; add mode → 收合
       setShowEmergency(!!initial.emergencyContactName?.trim());
     }
@@ -853,6 +898,12 @@ export function StudentFormModal({
       name: !form.name.trim() ? '請填寫「姓名」' : null,
       classNumber: !form.classNumber.trim() ? '請填寫「班別」' : null,
       dateOfBirth: !form.dateOfBirth ? '請填寫「出生日期」' : null,
+      school: validateSchoolSelection(
+        form.schoolType,
+        form.schoolDistrict,
+        form.schoolName,
+        schoolRefs,
+      ),
       parents:
         form.parentIds.length === 0 ? '請至少關聯一位家長' : null,
       emergencyContactPhone:
@@ -862,7 +913,17 @@ export function StudentFormModal({
           : null,
     };
     return errors;
-  }, [form.name, form.classNumber, form.dateOfBirth, form.parentIds.length, form.emergencyContactPhone]);
+  }, [
+    form.name,
+    form.classNumber,
+    form.dateOfBirth,
+    form.schoolType,
+    form.schoolDistrict,
+    form.schoolName,
+    schoolRefs,
+    form.parentIds.length,
+    form.emergencyContactPhone,
+  ]);
 
   const canSubmit = !isSaving && Object.values(fieldErrors).every((e) => e === null);
 
@@ -1072,7 +1133,49 @@ export function StudentFormModal({
                     />
                   </div>
 
-                  {/* Row 3: 綁定校巴 / 關聯家長 (並列) */}
+                  {/* Row 3: 就讀學校 (類型 → 區域 → 學校 三段聯動) */}
+                  <div className="rounded-lg border border-slate-200 bg-slate-50/50 p-3 dark:border-slate-700 dark:bg-slate-800/30">
+                    <SchoolSelect
+                      schoolType={form.schoolType}
+                      schoolDistrict={form.schoolDistrict}
+                      schoolName={form.schoolName}
+                      onChange={(next) => {
+                        setForm((p) => ({ ...p, ...next }));
+                        markTouched('school');
+                      }}
+                      refs={schoolRefs}
+                      onCreateCustom={(created) => {
+                        setSessionCustom((prev) => {
+                          const districts = new Set(prev.districts);
+                          const schools = new Map(
+                            prev.schools.map((s) => [
+                              `${s.type}|${s.district}|${s.name}`,
+                              s,
+                            ]),
+                          );
+                          if (created.district) {
+                            districts.add(created.district);
+                          }
+                          if (created.school) {
+                            const s = created.school;
+                            schools.set(
+                              `${s.type}|${s.district}|${s.name}`,
+                              s,
+                            );
+                          }
+                          return {
+                            districts: [...districts],
+                            schools: [...schools.values()],
+                          };
+                        });
+                      }}
+                      required
+                      error={fieldErrors.school}
+                      showError={touched.school}
+                    />
+                  </div>
+
+                  {/* Row 4: 綁定校巴 / 關聯家長 (並列) */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
                     <EntitySelectWithCreate<Bus>
                       id="student-form-bus"
@@ -1361,6 +1464,11 @@ export function StudentFormModal({
                     已綁定校巴
                   </Pill>
                 )}
+                {form.schoolName && (
+                  <Pill tone="violet" size="sm">
+                    {form.schoolDistrict} · {form.schoolName}
+                  </Pill>
+                )}
               </span>
               <div className="flex items-center gap-2 shrink-0">
                 <button
@@ -1379,6 +1487,7 @@ export function StudentFormModal({
                         name: '請填寫「姓名」',
                         classNumber: '請填寫「班別」',
                         dateOfBirth: '請填寫「出生日期」',
+                        school: fieldErrors.school || '請選擇就讀學校',
                         parents: '請至少關聯一位家長',
                         emergencyContactPhone: '緊急聯絡人電話需要 8 碼',
                       };

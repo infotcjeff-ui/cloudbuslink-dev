@@ -12,10 +12,22 @@ import {
 import { camelize, snakify } from './supabase-case';
 import { dispatchNannyRefresh } from './cbl-events';
 import { resolveSystemConfig } from './system-config';
+import {
+  mergeRoutesWithTombstones,
+  retryRouteDeletes,
+  getPendingRouteDeleteIds,
+} from './route-tombstones';
+import {
+  mergeTripsWithTombstones,
+  retryTripDeletes,
+  getPendingTripDeleteIds,
+} from './trip-tombstones';
 import type {
   User, Client, Company, Driver, Bus, Student, Parent, Nanny,
-  Trip, Attendance, Announcement, SiteSettings, Route
+  Trip, Attendance, Announcement, SiteSettings, Route, IncidentReport,
+  PaymentRecord
 } from './types';
+import type { AcademicYear } from './academic-year';
 
 const now = () => new Date().toISOString();
 
@@ -72,6 +84,9 @@ async function doSync(): Promise<boolean> {
       attendancesResult,
       announcementsResult,
       routesResult,
+      academicYearsResult,
+      incidentsResult,
+      paymentsResult,
     ] = await Promise.all([
       supabase.from('cbl_clients').select('*'),
       // 新公司表可能尚未執行 migration 0007 → 失敗不阻斷 (見下方 companiesResult 處理)
@@ -86,6 +101,12 @@ async function doSync(): Promise<boolean> {
       supabase.from('cbl_attendances').select('*'),
       supabase.from('cbl_announcements').select('*'),
       supabase.from('cbl_routes').select('*'),
+      // 學年登錄表可能尚未執行 migration 0016 → 失敗不阻斷 (見下方處理)
+      supabase.from('cbl_academic_years').select('*'),
+      // 異常回報表可能尚未執行 migration 0022 → 失敗不阻斷 (見下方處理)
+      supabase.from('cbl_incident_reports').select('*'),
+      // 付款記錄表可能尚未執行 migration 0024 → 失敗不阻斷 (見下方處理)
+      supabase.from('cbl_payment_records').select('*'),
     ]);
 
     // 檢查錯誤
@@ -121,6 +142,12 @@ async function doSync(): Promise<boolean> {
     const attendances = (attendancesResult.data || []).map(camelize);
     const announcements = (announcementsResult.data || []).map(camelize);
     const routes = (routesResult.data || []).map(camelize);
+    // 學年登錄 (migration 0016) — 表不存在時為空陣列, 不阻斷
+    const academicYears = (academicYearsResult.data || []).map(camelize);
+    // 異常回報 (migration 0022) — 表不存在時 data 為 null → 空陣列, 不阻斷
+    const incidents = (incidentsResult.data || []).map(camelize);
+    // 付款記錄 (migration 0024) — 表不存在時 data 為 null → 空陣列, 不阻斷
+    const payments = (paymentsResult.data || []).map(camelize);
 
     // 合併模式: 如果 Supabase 沒有資料但 LocalStorage 有, 不要覆蓋
     // - 目的: 避免 Supabase 為空時把現有 LocalStorage 資料清空
@@ -142,8 +169,21 @@ async function doSync(): Promise<boolean> {
       }
       STORAGE.users.setAll(merged);
     }
-    if (drivers.length > 0) STORAGE.drivers.setAll(drivers as Driver[]);
-    if (buses.length > 0) STORAGE.buses.setAll(buses as Bus[]);
+    if (drivers.length > 0) {
+      // ⚠️ 不能 setAll 整批覆蓋 — 測試種子 (seed-) 只存本機、從不推雲端,
+      //   用雲端快照覆蓋會把剛生成的測試校巴/司機洗掉 (校巴頁看不到)。
+      //   → 改用 mergeCloudRecords: 未推過雲端的本機資料會保留。
+      mergeCloudRecords('drivers',
+        STORAGE.drivers.getAll(),
+        drivers as Driver[],
+        (rows) => STORAGE.drivers.setAll(rows));
+    }
+    if (buses.length > 0) {
+      mergeCloudRecords('buses',
+        STORAGE.buses.getAll(),
+        buses as Bus[],
+        (rows) => STORAGE.buses.setAll(rows));
+    }
     // ⚠️ parents / students / nannies / routes 用「合併」而非 setAll ——
     //   這些實體是「本機先寫、雲端後推」的流程:
     //     管理員在後台新增家長 / 綁定子女時先寫 localStorage (讓 UI 即時反應),
@@ -185,7 +225,82 @@ async function doSync(): Promise<boolean> {
     // 公告用 merge 而不是 setAll — 支援「本機先寫、雲端後推」,
     // 用 setAll 覆蓋會讓尚未推上雲端的那則在第一次 sync 後消失。
     if (announcements.length > 0) STORAGE.announcements.mergeAll(announcements as Announcement[]);
-    if (routes.length > 0) STORAGE.routes.setAll(routes as Route[]);
+    // ⚠️ routes 不能用 setAll 整批覆蓋 ——
+    //   路線是「本機先寫、雲端後推」的流程, setAll 會用雲端舊快照蓋掉本機,
+    //   導致「刪除後幾秒又出現」(雲端那筆還沒刪掉 → 下次 sync 把它拉回來)。
+    //   → 改用 mergeRoutesWithTombstones: 帶墓碑 id 的路線一律剔除,
+    //     並回報「雲端還在但本機已刪」的 id 供重試刪除。
+    if (routes.length > 0) {
+      const { merged, staleInCloud } = mergeRoutesWithTombstones(
+        STORAGE.routes.getAll(),
+        routes as Route[],
+      );
+      STORAGE.routes.setAll(merged);
+
+      // 雲端刪除先前失敗 → 重試 (直到成功才清掉墓碑)
+      if (staleInCloud.length > 0) {
+        console.warn(
+          `[Supabase] ${staleInCloud.length} 筆路線在雲端仍存在, 重試刪除: ${staleInCloud.join(', ')}`,
+        );
+        void retryRouteDeletes(staleInCloud);
+      }
+    }
+    // 雲端完全沒有路線 → 本機的也要一併套用墓碑 (避免已刪的復活)
+    else {
+      const { merged } = mergeRoutesWithTombstones(
+        STORAGE.routes.getAll(),
+        [],
+      );
+      STORAGE.routes.setAll(merged);
+
+      // 安全網: 雲端已沒有這筆, 但墓碑還沒標記完成 → 補一次刪除確認,
+      // 讓墓碑狀態一致 (並確認雲端確實沒殘留)。
+      const pending = getPendingRouteDeleteIds();
+      if (pending.length > 0) {
+        void retryRouteDeletes(pending);
+      }
+    }
+
+    // 學年登錄 (migration 0016) — 雲端為準 (isCurrent / status 決定寫入蓋章,
+    // 不能本機說了算), 但本機可能還沒推上去的新學年要保留。
+    if (academicYears.length > 0) {
+      STORAGE.academicYears.mergeAll(academicYears as AcademicYear[]);
+      if (typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('cbl-academic-years-refresh')); } catch { /* ignore */ }
+      }
+    }
+
+    // 異常回報 (migration 0022) — 表未建時 incidents 為空陣列, 不覆蓋本機未推的紀錄
+    if (incidents.length > 0) {
+      mergeCloudRecords('incidents',
+        STORAGE.incidents.getAll(),
+        incidents as IncidentReport[],
+        (rows) => STORAGE.incidents.setAll(rows),
+        {
+          compare: (local, db) =>
+            !!local.updatedAt && !!db.updatedAt && local.updatedAt > db.updatedAt,
+        });
+      if (typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('cbl-incidents-refresh')); } catch { /* ignore */ }
+      }
+    }
+
+    // 付款記錄 (migration 0024) — 跟異常回報同樣處理:
+    //   表未建 → 空陣列, 不覆蓋本機未推的紀錄。
+    //   已推上雲端但本機已刪 → 跟著刪 (mergeCloudRecords 的職責)。
+    if (payments.length > 0) {
+      mergeCloudRecords('payments',
+        STORAGE.payments.getAll(),
+        payments as PaymentRecord[],
+        (rows) => STORAGE.payments.setAll(rows),
+        {
+          compare: (local, db) =>
+            !!local.updatedAt && !!db.updatedAt && local.updatedAt > db.updatedAt,
+        });
+      if (typeof window !== 'undefined') {
+        try { window.dispatchEvent(new CustomEvent('cbl-payments-refresh')); } catch { /* ignore */ }
+      }
+    }
 
     // 設定默認 settings (如果還沒有)
     if (clients.length > 0) {
@@ -213,6 +328,20 @@ async function doSync(): Promise<boolean> {
     markInitialized();
     console.log('[Supabase] Data sync completed successfully');
 
+    // ⚠️ 補推「待推送」的學生欄位。
+    //   若先前因 live DB schema 尚未更新 (例: migration 0015 還沒套) 而被
+    //   欄位降級機制丟掉, 那些值會留在 pending 裡 → 現在 schema 對了就補推。
+    //   (放在 sync 之後: 這時才知道雲端的 schema 狀態)
+    try {
+      const { repushPendingStudentPatches } = await import('./supabase-entities');
+      const repushed = await repushPendingStudentPatches();
+      if (repushed > 0) {
+        try { window.dispatchEvent(new CustomEvent('cbl-students-refresh')); } catch { /* ignore */ }
+      }
+    } catch (e) {
+      console.warn('[Supabase] 補推待推送欄位失敗:', e);
+    }
+
     // 同步完成後主動通知所有 open 的 page 重新從 STORAGE 讀取
     // 解決: 使用者在 sync 尚未完成時就 navigate 到 /bus/drivers,
     // 導致 page initial mount 讀到空 STORAGE, 必須手動按「重新整理」才能看到資料。
@@ -228,6 +357,8 @@ async function doSync(): Promise<boolean> {
         window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
         window.dispatchEvent(new CustomEvent('cbl-attendances-refresh'));
         window.dispatchEvent(new CustomEvent('cbl-announcements-refresh'));
+        window.dispatchEvent(new CustomEvent('cbl-incidents-refresh'));
+        window.dispatchEvent(new CustomEvent('cbl-payments-refresh'));
         window.dispatchEvent(new CustomEvent('cbl-clients-refresh'));
         window.dispatchEvent(new CustomEvent('cbl-users-refresh'));
       } catch (e) {

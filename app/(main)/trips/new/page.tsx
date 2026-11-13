@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { AriaSelectRoot, AriaSelectItem, SelectedCheck } from '@/components/ui/aria-select';
 import { useAuth } from '@/lib/hooks';
-import { STORAGE, resolveDataScope } from '@/lib/storage';
+import { STORAGE, resolveDataScope, resolveWriteAcademicYear } from '@/lib/storage';
 import { cn, today, cnWeekday, tripTypeLabel } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
 import type { Waypoint, TripType, Trip } from '@/lib/types';
@@ -232,6 +232,12 @@ export default function NewTripPage() {
         busId,
         nannyId,
         date,
+        // 學年蓋章: 班次屬於建立當下的現行學年
+        academicYear: resolveWriteAcademicYear(effectiveClientId),
+        // 司機/車牌快照 —— 建班當下寫死, 確保日後校巴改綁司機時,
+        // 歷史班次仍顯示當時的司機與車牌 (否則「查看舊資料」會失真)。
+        driverIdSnapshot: bus?.driverId ?? null,
+        busPlateNumberSnapshot: bus?.plateNumber ?? null,
         type,
         status: 'scheduled',
         plannedStartTime,

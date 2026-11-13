@@ -103,7 +103,7 @@ export const FEATURE_META: Record<FeatureKey, FeatureMeta> = {
   manage_drivers:     { label: '管理司機',     desc: '新增 / 編輯 / 刪除司機',         iconKey: 'driver' },
   manage_nannies:     { label: '管理保姆',     desc: '新增 / 編輯 / 刪除保姆',         iconKey: 'heart' },
   export_reports:     { label: '匯出報表',     desc: '可下載 Excel 出席統計',          iconKey: 'chart' },
-  post_announcements: { label: '發布公告',     desc: '可建立與編輯機構公告',           iconKey: 'megaphone' },
+  post_announcements: { label: '發布公告',     desc: '可建立與編輯系統 / 繳費公告',      iconKey: 'megaphone' },
   manage_users:       { label: '管理用戶權限', desc: '可調整其他用戶的功能開關',       iconKey: 'shield' },
 };
 
@@ -186,7 +186,7 @@ export function emptyFeatureForm(userId: string, role: UserRole): UserFeatureFor
  * 帳號表單的初始狀態。
  *
  * 對應 cbl_users 欄位:
- *   name / phone (登入帳號) / password / email / role / clientId / status
+ *   name / phone (登入帳號) / contact_phone (聯絡電話 WhatsApp) / password / email / role / clientId / status
  *
  * 密碼: 目前系統是明碼儲存 (見 supabase/migrations/0001_init.sql 的 ⚠️ 註記),
  * 這裡沿用現況; 上線前要改 hash。
@@ -195,6 +195,8 @@ export interface UserAccountFormState {
   name: string;
   /** 登入帳號 — super_admin 允許非數字 (例如 admin), 其他角色必須 8 位數字 */
   phone: string;
+  /** 聯絡電話 (WhatsApp) — 保姆異常回報時可直接致電 / WhatsApp 此號碼, 必填 */
+  contactPhone: string;
   password: string;
   email: string;
   role: UserRole;
@@ -209,6 +211,7 @@ export interface UserAccountFormState {
 export const EMPTY_ACCOUNT_FORM: UserAccountFormState = {
   name: '',
   phone: '',
+  contactPhone: '',
   password: '',
   email: '',
   role: 'client',

@@ -201,7 +201,7 @@ function BusToggleCards({
         <AlertTriangle width={11} height={11} className="text-amber-500" />
         尚未建立任何校巴資料。
         <a
-          href="/cbl-admin-setting/bus"
+          href="/cbl-admin-setting/schedule/bus"
           onClick={(e) => {
             e.preventDefault();
             onAddNewHint?.();

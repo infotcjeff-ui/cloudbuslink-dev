@@ -5,7 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Check, X, Clock, MapPin, ChevronLeft, ChevronRight,
-  Phone, Pencil, Undo2, Users, Flag, CircleDot, ClipboardCheck,
+  Phone, Pencil, Undo2, Users, CircleDot, ClipboardCheck,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -16,6 +16,7 @@ import { MotionList } from '@/components/trips/motion-list';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import { getResumeWaypointIndex } from '@/lib/nanny-trips';
+import { nannyHomePath } from '@/lib/nanny-path';
 import {
   cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel,
 } from '@/lib/utils';
@@ -36,12 +37,20 @@ export default function CheckinPage() {
   const [editDialogSid, setEditDialogSid] = useState<string | null>(null);
   const [finishConfirm, setFinishConfirm] = useState(false);
   const [markAllConfirm, setMarkAllConfirm] = useState(false);
+  const [unmarkAllConfirm, setUnmarkAllConfirm] = useState(false);
+  const [syncTick, setSyncTick] = useState(0);
+  void syncTick;
 
   useEffect(() => {
     if (!params.id) return;
-    const found = STORAGE.trips.getById(params.id as string);
-    if (found) {
-      // 自動開始班次 (如果未開始)
+    const tripId = params.id as string;
+    let cancelled = false;
+
+    const load = () => {
+      if (cancelled) return;
+      const found = STORAGE.trips.getById(tripId);
+      if (!found) return;
+      // 自動開始班次 (如果未開始) — 只做一次, 避免同步回來後重複覆寫
       if (found.status === 'scheduled') {
         STORAGE.trips.update(found.id, {
           status: 'in_progress',
@@ -54,11 +63,51 @@ export default function CheckinPage() {
       } else {
         setTrip(found);
         // 恢復步驟: 直接跳到第一個未完成的站點 (已完成上車 → 直接到下一站)
-        setCurrentWaypointIdx(getResumeWaypointIndex(found));
+        // 已在打卡中途切站時不強行跳轉 (避免同步回來把使用者踢回別站)
+        setCurrentWaypointIdx((prev) => {
+          // 初次載入 (prev=0 且該站已完成) 才跳; 否則保留使用者當前站
+          const resume = getResumeWaypointIndex(found);
+          return prev === 0 ? resume : prev;
+        });
       }
       // 載入現有打卡記錄
       setAttendances(STORAGE.attendances.getByTrip(found.id));
-    }
+      // 學生檔可能隨雲端同步稍後才到 → 觸發重繪讓名單出現
+      setSyncTick((t) => t + 1);
+    };
+
+    load();
+
+    // 主動從雲端拉一次 (核心修復):
+    // 班次有 studentIds 但學生檔還沒同步 → 名單空白但人數正確。
+    // 保姆手機 localStorage 可能是舊快照, 要 syncFromSupabase() 把學生拉回來。
+    const doSync = async () => {
+      try {
+        const { isSupabaseAvailable, syncFromSupabase } = await import('@/lib/supabase-data');
+        if (!isSupabaseAvailable()) return;
+        await syncFromSupabase();
+        load();
+      } catch (e) {
+        console.warn('[Checkin] cloud sync failed:', e);
+      }
+    };
+    void doSync();
+
+    // 雲端同步完成 / 後台改資料 → 重讀班次 + 學生 + 打卡
+    const onRefresh = () => load();
+    const events = [
+      'cbl-trips-refresh',
+      'cbl-students-refresh',
+      'cbl-parents-refresh',
+      'cbl-attendances-refresh',
+      'cbl-buses-refresh',
+      'cbl-routes-refresh',
+    ];
+    events.forEach((ev) => window.addEventListener(ev, onRefresh));
+    return () => {
+      cancelled = true;
+      events.forEach((ev) => window.removeEventListener(ev, onRefresh));
+    };
   }, [params.id]);
 
   const currentWaypoint = trip?.waypoints[currentWaypointIdx];
@@ -178,31 +227,77 @@ export default function CheckinPage() {
     refreshAttendances(trip.id);
   };
 
-  // 復原單一學生的本站結論 (誤觸時點一下復原)
+  // 復原單一學生的本站結論 (誤觸時點卡片取消)
+  const deleteAttendanceFromCloud = (studentId: string) => {
+    if (!trip || !currentWaypoint) return;
+    const tripId = trip.id;
+    const waypointId = currentWaypoint.id;
+    void (async () => {
+      try {
+        const { supabaseAttendances } = await import('@/lib/supabase-attendances');
+        const res = await supabaseAttendances.deleteByTripWaypointStudent(tripId, waypointId, studentId);
+        if (!res.success) console.warn('[Checkin] attendance delete failed:', res.error);
+      } catch (e) {
+        console.warn('[Checkin] attendance delete failed:', e);
+      }
+    })();
+  };
+
   const clearStudentStatus = (studentId: string) => {
     if (!trip || !currentWaypoint) return;
     const all = STORAGE.attendances.getAll().filter(
       a => !(a.tripId === trip.id && a.studentId === studentId && a.waypointId === currentWaypoint.id)
     );
     STORAGE.attendances.setAll(all);
+    deleteAttendanceFromCloud(studentId);
     refreshAttendances(trip.id);
   };
 
-  // 全部標記為上車 (快捷) — 先彈確認, 確定才執行
+  // 全部標記 (快捷) — 上車站標記已上車, 下車站標記已下車 — 先彈確認, 確定才執行
   const markAllBoarded = () => {
     if (!trip || !currentWaypoint) return;
     currentWaypoint.studentIds.forEach(sid => {
       const existing = attendances.find(
         a => a.tripId === trip.id && a.studentId === sid && a.waypointId === currentWaypoint.id
       );
-      // 已標記缺席的學生不要再被覆蓋成 on_time
-      const alreadyAbsent =
-        existing?.boardingStatus === 'no_show' || existing?.boardingStatus === 'absent';
-      if ((!existing || !existing.boardingTime) && !alreadyAbsent) {
-        setStudentStatus(sid, 'on_time');
+      if (mode === 'boarding') {
+        // 已標記缺席的學生不要再被覆蓋成 on_time
+        const alreadyAbsent =
+          existing?.boardingStatus === 'no_show' || existing?.boardingStatus === 'absent';
+        if ((!existing || !existing.boardingTime) && !alreadyAbsent) {
+          setStudentStatus(sid, 'on_time');
+        }
+      } else {
+        // 下車站: 已標記未下車的不覆蓋
+        const alreadyNoShow = existing?.dropoffStatus === 'no_show';
+        if ((!existing || !existing.dropoffTime) && !alreadyNoShow) {
+          setStudentStatus(sid, 'on_time');
+        }
       }
     });
     setMarkAllConfirm(false);
+  };
+
+  // 全部清除 (快捷) — 清除本站所有學生的點名結論, 回到未點名 — 先彈確認, 確定才執行
+  const unmarkAllBoarded = () => {
+    if (!trip || !currentWaypoint) return;
+    const all = STORAGE.attendances.getAll().filter(
+      a => !(a.tripId === trip.id && a.waypointId === currentWaypoint.id)
+    );
+    STORAGE.attendances.setAll(all);
+    const tripId = trip.id;
+    const waypointId = currentWaypoint.id;
+    void (async () => {
+      try {
+        const { supabaseAttendances } = await import('@/lib/supabase-attendances');
+        const res = await supabaseAttendances.deleteByTripWaypoint(tripId, waypointId);
+        if (!res.success) console.warn('[Checkin] attendance bulk delete failed:', res.error);
+      } catch (e) {
+        console.warn('[Checkin] attendance bulk delete failed:', e);
+      }
+    })();
+    refreshAttendances(trip.id);
+    setUnmarkAllConfirm(false);
   };
 
   // 完成當前站點 (非尾站直接完成並跳轉; 尾站先彈中置確認)
@@ -240,9 +335,9 @@ export default function CheckinPage() {
     });
     pushTripToCloud(trip.id);
     setFinishConfirm(false);
-    // 完成班次 → 保姆回到「我的班次」; 其他角色回到班次詳情
+    // 完成班次 → 保姆回到「我的班次」(個人化首頁, 如 /wendy/route); 其他角色回到班次詳情
     if (user?.role === 'nanny') {
-      router.push('/nanny');
+      router.push(nannyHomePath(user));
     } else {
       router.push(`/trips/${trip.id}`);
     }
@@ -383,8 +478,9 @@ export default function CheckinPage() {
           )}
         </div>
 
-        {/* 站點切換 — 與 DatePillRow 同一手感 */}
+        {/* 站點切換 — arrow 只有整班完成後查看時才出現, 進度條常顯 */}
         <div className="flex items-center gap-2 mt-3">
+          {tripDone && (
           <button
             type="button"
             onClick={goPrevWaypoint}
@@ -394,6 +490,7 @@ export default function CheckinPage() {
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
+          )}
           <div className="flex-1 flex gap-1">
             {trip.waypoints.map((wp, i) => {
               const reachable = tripDone || i <= currentWaypointIdx || (i === currentWaypointIdx + 1 && currentDone);
@@ -414,6 +511,7 @@ export default function CheckinPage() {
               );
             })}
           </div>
+          {tripDone && (
           <button
             type="button"
             onClick={goNextWaypoint}
@@ -423,18 +521,41 @@ export default function CheckinPage() {
           >
             <ChevronRight className="w-4 h-4" />
           </button>
+          )}
         </div>
       </motion.div>
 
-      {/* 快速操作 — 先彈確認, 確定才執行 */}
-      {mode === 'boarding' && stats.pending > 0 && (
-        <Button
-          onClick={() => setMarkAllConfirm(true)}
-          className="w-full mb-2 h-11 rounded-full text-sm font-medium bg-primary text-primary-foreground active:scale-[0.98]"
-        >
-          <Check className="w-4 h-4" />
-          全部標記為已上車 ({stats.pending} 位)
-        </Button>
+      {/* 快速操作 — 左右並排: 全部標記已上車/下車 + 全部標記未上車/下車 — 先彈確認, 確定才執行 */}
+      {!tripDone && (stats.pending > 0 || stats.boarded + stats.absent > 0) && (
+        <div className="flex gap-2 mb-2">
+          {stats.pending > 0 && (
+            <Button
+              onClick={() => setMarkAllConfirm(true)}
+              className="flex-1 h-11 rounded-full text-[13px] font-medium bg-primary text-primary-foreground active:scale-[0.98] px-2"
+            >
+              <Check className="w-4 h-4 flex-shrink-0" />
+              <span className="truncate">
+                {mode === 'boarding'
+                  ? `全部標記為已上車 (${stats.pending} 位)`
+                  : `全部標記為已下車 (${stats.pending} 位)`}
+              </span>
+            </Button>
+          )}
+          {(stats.boarded + stats.absent) > 0 && (
+            <Button
+              onClick={() => setUnmarkAllConfirm(true)}
+              variant="outline"
+              className="flex-1 h-11 rounded-full text-[13px] font-medium active:scale-[0.98] px-2"
+            >
+              <X className="w-4 h-4 flex-shrink-0" />
+              <span className="truncate">
+                {mode === 'boarding'
+                  ? `全部標記為未上車 (${stats.boarded + stats.absent} 位)`
+                  : `全部標記為未下車 (${stats.boarded + stats.absent} 位)`}
+              </span>
+            </Button>
+          )}
+        </div>
       )}
 
       {/* 點名學生 title */}
@@ -449,6 +570,41 @@ export default function CheckinPage() {
           </span>
         )}
       </div>
+
+      {/* 缺學生檔提示 — 班次有 studentIds 但本機學生表還沒同步到時顯示 */}
+      {(() => {
+        const missing = currentWaypoint.studentIds.filter(
+          (sid) => !STORAGE.students.getById(sid),
+        );
+        if (missing.length === 0) return null;
+        return (
+          <div className="mx-0 mb-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="flex-1">
+              {missing.length} 位學生資料同步中… (班次已綁定, 學生檔未到本機) 請稍候或點重試。
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                void (async () => {
+                  try {
+                    const { isSupabaseAvailable, syncFromSupabase } = await import('@/lib/supabase-data');
+                    if (!isSupabaseAvailable()) return;
+                    await syncFromSupabase();
+                    const found = STORAGE.trips.getById(trip.id);
+                    if (found) setTrip({ ...found });
+                    setAttendances(STORAGE.attendances.getByTrip(trip.id));
+                    setSyncTick((t) => t + 1);
+                  } catch { /* ignore */ }
+                })();
+              }}
+              className="shrink-0 px-2 py-1 rounded-full bg-amber-500 text-white text-[11px] font-semibold active:scale-95"
+            >
+              重試
+            </button>
+          </div>
+        );
+      })()}
 
       {/* 學生列表 — 純 fade, 無位移 / 無 layout, 狀態切換不變形 */}
       <MotionList
@@ -482,8 +638,10 @@ export default function CheckinPage() {
               status={status}
               time={time}
               mode={mode}
+              readOnly={tripDone}
               onEdit={() => setEditDialogSid(sid)}
               onUndo={() => clearStudentStatus(sid)}
+              onBoard={() => setStudentStatus(sid, 'on_time')}
             />
           );
         }}
@@ -541,6 +699,7 @@ export default function CheckinPage() {
       <div className="fixed bottom-3 left-0 right-0 z-40 safe-bottom pointer-events-none">
         <div className="mx-auto max-w-[85vw] liquid-glass rounded-2xl shadow-lg p-1.5 pointer-events-auto">
           <div className="flex items-center gap-1.5">
+            {tripDone && (
             <Button
               onClick={goPrevWaypoint}
               variant="ghost"
@@ -550,15 +709,18 @@ export default function CheckinPage() {
             >
               <ChevronLeft className="w-5 h-5" />
             </Button>
+            )}
             <Button
               onClick={completeWaypoint}
-              className="flex-1 h-12 rounded-xl bg-success text-success-foreground text-[15px] font-semibold active:scale-[0.98]"
+              disabled={tripDone || (stats.boarded + stats.absent) === 0}
+              title={(stats.boarded + stats.absent) === 0 ? '最少需要 1 位學生打卡後才可完成' : undefined}
+              className="flex-1 h-12 rounded-xl bg-success text-success-foreground text-[15px] font-semibold active:scale-[0.98] disabled:opacity-50"
             >
-              <Flag className="w-4 h-4" />
               {isLast
                 ? `完成班次 (${stats.boarded + stats.absent}/${stats.total})`
                 : `完成${waypointTypeLabel(currentWaypoint.type)} (${stats.boarded + stats.absent}/${stats.total})`}
             </Button>
+            {tripDone && (
             <Button
               onClick={goNextWaypoint}
               variant="ghost"
@@ -568,6 +730,7 @@ export default function CheckinPage() {
             >
               <ChevronRight className="w-5 h-5" />
             </Button>
+            )}
           </div>
         </div>
       </div>
@@ -576,10 +739,24 @@ export default function CheckinPage() {
       <ConfirmDialog
         open={markAllConfirm}
         onOpenChange={setMarkAllConfirm}
-        title="全部標記為已上車?"
-        description={`將本站尚餘 ${stats.pending} 位學生一次過標記為已上車 (已標記缺席的不受影響)。確定要繼續?`}
+        title={mode === 'boarding' ? '全部標記為已上車?' : '全部標記為已下車?'}
+        description={mode === 'boarding'
+          ? `將本站尚餘 ${stats.pending} 位學生一次過標記為已上車 (已標記缺席的不受影響)。確定要繼續?`
+          : `將本站尚餘 ${stats.pending} 位學生一次過標記為已下車 (已標記未下車的不受影響)。確定要繼續?`}
         confirmLabel={`確定 (${stats.pending} 位)`}
         onConfirm={markAllBoarded}
+      />
+
+      {/* 全部清除 — 中置確認, 確定才執行 */}
+      <ConfirmDialog
+        open={unmarkAllConfirm}
+        onOpenChange={setUnmarkAllConfirm}
+        title={mode === 'boarding' ? '全部標記為未上車?' : '全部標記為未下車?'}
+        description={mode === 'boarding'
+          ? `將本站已處理的 ${stats.boarded + stats.absent} 位學生一次過回到未點名。確定要繼續?`
+          : `將本站已處理的 ${stats.boarded + stats.absent} 位學生一次過回到未點名。確定要繼續?`}
+        confirmLabel={`確定 (${stats.boarded + stats.absent} 位)`}
+        onConfirm={unmarkAllBoarded}
       />
 
       {/* 尾站完成 — 中置確認 (取代原生 confirm) */}
@@ -599,8 +776,8 @@ export default function CheckinPage() {
 
 function StudentCheckinRow({
   studentName, classNumber, studentId, parentPhone,
-  done, handled, status, time, mode,
-  onEdit, onUndo,
+  done, handled, status, time, mode, readOnly,
+  onEdit, onUndo, onBoard,
 }: {
   studentName: string;
   classNumber: string;
@@ -611,8 +788,10 @@ function StudentCheckinRow({
   status: BoardingStatus | DropoffStatus | null | undefined;
   time: string | null | undefined;
   mode: CheckinMode;
+  readOnly?: boolean;
   onEdit: () => void;
   onUndo: () => void;
+  onBoard: () => void;
 }) {
   // statusLabel / 視覺樣式依結果分流:
   // - done=true  → 綠底綠勾 (準時/遲到的正常上落車)
@@ -622,13 +801,28 @@ function StudentCheckinRow({
     : status === 'absent' ? '缺席'
     : done ? (mode === 'boarding' ? '已上車' : '已下車')
     : null;
+  const boardLabel = mode === 'boarding' ? '已上車' : '已下車';
+  const clickable = !readOnly;
+  const handleCardClick = !clickable ? undefined : handled ? onUndo : onBoard;
+  const handleCardKeyDown = !clickable
+    ? undefined
+    : (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); (handled ? onUndo : onBoard)(); }
+      };
 
   return (
     <div
+      onClick={handleCardClick}
+      role={clickable ? 'button' : undefined}
+      tabIndex={clickable ? 0 : undefined}
+      onKeyDown={handleCardKeyDown}
+      title={handled ? statusLabel ?? undefined : `點一下標記為${boardLabel}`}
+      aria-label={handled ? `${studentName} ${statusLabel}` : `${studentName} 未點名 · 點一下標記為${boardLabel}`}
       className={cn(
         'w-full text-left rounded-2xl p-3 bg-card border border-border/50 shadow-sm transition-colors duration-200',
         done && 'border-success/40 bg-success/[0.04]',
         !done && handled && 'border-destructive/40 bg-destructive/[0.04]',
+        clickable && 'cursor-pointer active:scale-[0.99]',
       )}
     >
       <div className="flex items-center gap-3">
@@ -690,38 +884,31 @@ function StudentCheckinRow({
           </div>
           <p className="text-xs text-muted-foreground truncate">{classNumber} · {studentId}</p>
         </div>
-        <div className="flex items-center gap-1 flex-shrink-0">
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           {parentPhone && (
             <a
               href={`tel:${parentPhone}`}
               onClick={(e) => e.stopPropagation()}
-              aria-label={`致電家長 ${studentName}`}
-              className="p-2 rounded-full bg-success/10 text-success active:scale-95 transition-transform"
+              aria-label={`聯絡電話 · 致電家長 ${studentName}`}
+              title="聯絡電話"
+              className="flex flex-row items-center gap-1 px-2 py-1.5 rounded-full bg-success/10 text-success active:scale-95 transition-transform whitespace-nowrap"
             >
-              <Phone className="w-3.5 h-3.5" />
+              <Phone className="w-3.5 h-3.5 flex-shrink-0" />
+              <span className="text-[10px] leading-none font-medium">聯絡電話</span>
             </a>
           )}
           <button
             type="button"
-            onClick={onEdit}
-            aria-label={`編輯 ${studentName} 的點名狀態`}
-            className="p-2 rounded-full bg-muted text-muted-foreground active:scale-95 transition-transform"
+            onClick={(e) => { e.stopPropagation(); onEdit(); }}
+            aria-label={`更改狀態 · 編輯 ${studentName} 的點名狀態`}
+            title="更改狀態"
+            className="flex flex-row items-center gap-1 px-2 py-1.5 rounded-full bg-muted text-muted-foreground active:scale-95 transition-transform whitespace-nowrap"
           >
-            <Pencil className="w-3.5 h-3.5" />
+            <Pencil className="w-3.5 h-3.5 flex-shrink-0" />
+            <span className="text-[10px] leading-none font-medium">更改狀態</span>
           </button>
         </div>
       </div>
-
-      {handled && (
-        <button
-          type="button"
-          onClick={onUndo}
-          className="mt-2 w-full h-8 rounded-full bg-muted/60 text-xs text-muted-foreground flex items-center justify-center gap-1 active:scale-[0.98] transition-transform"
-        >
-          <Undo2 className="w-3 h-3" />
-          {statusLabel} · 點一下復原
-        </button>
-      )}
     </div>
   );
 }

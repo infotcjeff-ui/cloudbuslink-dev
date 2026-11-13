@@ -23,6 +23,14 @@ interface ConfirmDialogProps {
   tone?: 'primary' | 'success' | 'destructive';
   onConfirm: () => void;
   confirming?: boolean;
+  /**
+   * 額外的 className (主要用來覆寫寬度)。
+   *
+   * ⚠️ DialogContent 的預設寬度是 `w-[calc(100vw-2rem)] max-w-md` (最大 448px)。
+   *    需要更寬的彈窗時傳 `max-w-[550px]` 這類的值 —
+   *    cn() 走 twMerge, 會自動把預設的 max-w-md 換掉, 不會打架。
+   */
+  className?: string;
 }
 
 /**
@@ -40,10 +48,11 @@ export function ConfirmDialog({
   tone = 'primary',
   onConfirm,
   confirming = false,
+  className,
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[calc(100vw-3rem)] rounded-2xl p-5">
+      <DialogContent className={cn('max-w-[calc(100vw-3rem)] rounded-2xl p-5', className)}>
         <DialogHeader>
           <DialogTitle className="text-center text-base">{title}</DialogTitle>
           {description ? (

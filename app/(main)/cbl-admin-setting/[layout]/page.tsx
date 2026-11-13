@@ -9,40 +9,42 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'next/navigation';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { FileSpreadsheet, UserCog } from 'lucide-react';
 import { useAuth, useSettings } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
-import { useCblStats } from '../hooks/useCblStats';
 import { StudentsConsoleContent } from './students/StudentsConsoleContent';
 import { AnnouncementsConsoleContent } from './announcements/AnnouncementsConsoleContent';
 import { NannysConsoleContent } from './nannys/NannysConsoleContent';
 import { ParentsConsoleContent } from './parents/ParentsConsoleContent';
+import { ReportsConsoleContent } from './reports/ReportsConsoleContent';
 import { UsersConsoleContent } from './user/UsersConsoleContent';
-import { ClientsConsoleContent } from './clients/ClientsConsoleContent';
 import { CompaniesConsoleContent } from './companies/CompaniesConsoleContent';
-import type { Student, Parent, Bus as BusType, Announcement, User, Driver, Nanny, Client, Company } from '@/lib/types';
+import { IncidentsConsoleContent } from './incidents/IncidentsConsoleContent';
+import type { Student, Parent, Bus as BusType, Announcement, User, Driver, Nanny, Company, IncidentReport } from '@/lib/types';
 
 /**
  * Dynamic [layout] 對應以下路徑 (頂層):
  *   /cbl-admin-setting                  → 概覽
- *   /cbl-admin-setting/bus              → 校巴 (頂層 landing: 顯示子模組捷徑)
  *   /cbl-admin-setting/parents          → 家長 (頂層 landing: 顯示子模組捷徑)
  *   /cbl-admin-setting/students         → 學生
  *   /cbl-admin-setting/nannys           → 保姆
  *   /cbl-admin-setting/reports          → 報表
- *   /cbl-admin-setting/user             → 用戶
+ *   /cbl-admin-setting/user             → 用戶 (帳號管理 + 所屬機構)
  *   /cbl-admin-setting/announcements    → 公告
- *   /cbl-admin-setting/site-tool        → 網站設定
+ *   /cbl-admin-setting/site-tool        → 網站設定 (摘要)
+ *
+ * 班次群組 (2026-11 已搬到 schedule 底下, 由 schedule/page.tsx + schedule/[sub]/page.tsx 處理):
+ *   /cbl-admin-setting/schedule         → 班次
+ *   /cbl-admin-setting/schedule/bus     → 校巴
+ *   /cbl-admin-setting/schedule/routes  → 路線
+ *   /cbl-admin-setting/schedule/drivers → 司機
  *
  * 巢狀子頁 (由 [layout]/[sub]/page.tsx 處理):
- *   /cbl-admin-setting/bus/trips        → 校巴 / 路線
- *   /cbl-admin-setting/bus/drivers      → 校巴 / 司機
  *   /cbl-admin-setting/parents/childrens→ 家長 / 子女
  *   /cbl-admin-setting/parents/payment  → 家長 / 付款記錄
  *
  * 設計說明:
- * - 校巴 / 家長 是「頂層 landing」, 點 sidebar 進來時停在 /cbl-admin-setting/bus
- *   或 /cbl-admin-setting/parents, 看到 stat cards + 子模組捷徑, 不再自動跳子頁
+ * - 家長 是「頂層 landing」, 點 sidebar 進來時停在 /cbl-admin-setting/parents
+ *   看到 stat cards + 子模組捷徑, 不再自動跳子頁
  * - 之所以仍保留這個 dynamic page (而不是改成 named folders):
  *   - 全部子頁面共用同一個 layout.tsx (sidebar + header)
  *   - 內容集中方便維護
@@ -53,7 +55,6 @@ export default function CblAdminTabPage() {
   const router = useRouter();
   const { user } = useAuth();
   const { settings: siteSettings } = useSettings(user?.clientId);
-  const stats = useCblStats(user?.clientId);
 
   const layout = (params?.layout as string) ?? '';
 
@@ -69,22 +70,13 @@ export default function CblAdminTabPage() {
   const [nannies, setNannies] = useState<Nanny[]>([]);
   // 共用: nannys 頁需要全部 user (供檢視 popup 與「是否登入帳號」標記)
   const [users, setUsers] = useState<User[]>([]);
-  // 共用: user 頁新增帳號時需要學校列表 (「所屬學校」下拉)
-  const [clients, setClients] = useState<Client[]>([]);
   // 共用: user 頁新增帳號時需要機構/公司列表 (「所屬機構」下拉)
   const [companies, setCompanies] = useState<Company[]>([]);
 
-  // site-tool 頁的子頁切換: 'clients' = 機構管理 (學校, 預設), 'companies' = 所屬機構 (公司), 'overview' = 網站設定摘要
-  const [siteTab, setSiteTab] = useState<'clients' | 'companies' | 'overview'>('clients');
-
-  // 各機構底下的登入帳號數 — 給機構列表的「帳號」欄位
-  const userCountByClient = useMemo(() => {
-    const counts: Record<string, number> = {};
-    users.forEach((u) => {
-      if (u.clientId) counts[u.clientId] = (counts[u.clientId] ?? 0) + 1;
-    });
-    return counts;
-  }, [users]);
+  // user 頁的子頁切換: 'accounts' = 帳號管理 (用戶·功能權限), 'companies' = 所屬機構 (公司)
+  // ⚠️ 2026-11: 「所屬機構」tab 從 site-tool (網站設定) 搬到 user 底下 ——
+  //    網站設定只剩「網站設定摘要」, 機構統一在用戶頁管理。
+  const [userSubTab, setUserSubTab] = useState<'accounts' | 'companies'>('accounts');
 
   // 各公司底下的登入帳號數 — 給「所屬機構」列表的「帳號」欄位
   const userCountByCompany = useMemo(() => {
@@ -98,28 +90,16 @@ export default function CblAdminTabPage() {
   // ---- announcements data layer ----
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
 
+  // ---- incidents data layer ----
+  const [incidents, setIncidents] = useState<IncidentReport[]>([]);
+
   const clientId = user?.clientId || '';
 
   /**
    * 跨機構角色 (system_admin / super_admin) 沒有自己的 clientId。
-   * 公告是機構層級的資料, 但跨機構角色需要跨機構管理 → 看得到所有公告,
-   * 發佈時則必須指定「目標機構」(cbl_announcements.client_id 有 FK 約束)。
+   * 公告是機構層級的資料, 但跨機構角色需要跨機構管理 → 看得到所有公告。
    */
   const isSuperAdmin = user?.role === 'super_admin' || user?.role === 'system_admin';
-
-  /** 可發佈的機構清單 (給 super_admin 選目標機構) */
-  const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
-
-  useEffect(() => {
-    if (layout !== 'announcements') return;
-    const loadClients = () =>
-      setClientOptions(
-        STORAGE.clients.getAll().map((c) => ({ id: c.id, name: c.name })),
-      );
-    loadClients();
-    window.addEventListener('cbl-clients-refresh', loadClients);
-    return () => window.removeEventListener('cbl-clients-refresh', loadClients);
-  }, [layout]);
 
   useEffect(() => {
     if (layout !== 'students') return;
@@ -158,11 +138,23 @@ export default function CblAdminTabPage() {
       setAnnouncements(
         STORAGE.announcements.getVisible(clientId, isSuperAdmin),
       );
+      // 繳費公告的受眾選擇器需要家長清單
+      setParents(
+        isSuperAdmin
+          ? STORAGE.parents.getAll()
+          : clientId
+          ? STORAGE.parents.getByClient(clientId)
+          : [],
+      );
     };
     load();
     const handler = () => load();
     window.addEventListener('cbl-announcements-refresh', handler);
-    return () => window.removeEventListener('cbl-announcements-refresh', handler);
+    window.addEventListener('cbl-parents-refresh', handler);
+    return () => {
+      window.removeEventListener('cbl-announcements-refresh', handler);
+      window.removeEventListener('cbl-parents-refresh', handler);
+    };
   }, [layout, clientId, isSuperAdmin]);
 
   // 進「公告」頁時從 Supabase 拉一次最新公告 (localStorage 只是快取)。
@@ -185,6 +177,37 @@ export default function CblAdminTabPage() {
     pull();
     return () => { cancelled = true; };
   }, [layout]);
+
+  // incidents data layer — /cbl-admin-setting/incidents 保姆異常回報留底
+  // 超管 (super_admin / system_admin) 看全部, 其他角色只看自己 clientId
+  useEffect(() => {
+    if (layout !== 'incidents') return;
+    const load = () => {
+      setIncidents(STORAGE.incidents.getVisible(clientId, isSuperAdmin));
+    };
+    load();
+    const handler = () => load();
+    window.addEventListener('cbl-incidents-refresh', handler);
+    let cancelled = false;
+    const pull = async () => {
+      try {
+        const { supabaseIncidents } = await import('@/lib/supabase-incidents');
+        const res = await supabaseIncidents.syncToStorage();
+        if (!res.success && !cancelled) {
+          console.warn('[IncidentsConsole] sync failed:', res.error);
+        } else if (!cancelled) {
+          load();
+        }
+      } catch (e) {
+        console.warn('[IncidentsConsole] sync error:', e);
+      }
+    };
+    pull();
+    return () => {
+      cancelled = true;
+      window.removeEventListener('cbl-incidents-refresh', handler);
+    };
+  }, [layout, clientId, isSuperAdmin]);
 
   // nannys data layer — 同樣遵守 Rules of Hooks, 頂層呼叫 effect
   // 超管 (super_admin / system_admin) 沒有 clientId → 讀全部 (跨機構管理)
@@ -223,23 +246,22 @@ export default function CblAdminTabPage() {
     if (layout !== 'user') return;
     const load = () => {
       setUsers(STORAGE.users.getAll());
-      setClients(STORAGE.clients.getAll());
       setCompanies(STORAGE.companies.getAll());
     };
     load();
     const handler = () => load();
     window.addEventListener('cbl-users-refresh', handler);
-    window.addEventListener('cbl-clients-refresh', handler);
     window.addEventListener('cbl-companies-refresh', handler);
     return () => {
       window.removeEventListener('cbl-users-refresh', handler);
-      window.removeEventListener('cbl-clients-refresh', handler);
       window.removeEventListener('cbl-companies-refresh', handler);
     };
   }, [layout]);
 
   // 進「用戶」頁時從 Supabase 拉一次最新的帳號 (帳號 / 密碼 / 角色是安全相關資料,
   // 不能只靠 localStorage 的快取, 否則管理員改了密碼後這裡仍顯示舊資料)。
+  // 同時同步機構 (cbl_companies) —— 「所屬機構」tab 已從 site-tool 搬到 user 底下 (2026-11),
+  // 新增帳號的「所屬機構」下拉與機構列表都需要最新資料。
   useEffect(() => {
     if (layout !== 'user') return;
     let cancelled = false;
@@ -249,9 +271,23 @@ export default function CblAdminTabPage() {
         const res = await supabaseUsers.syncToStorage();
         if (!res.success && !cancelled) {
           console.warn('[UsersConsole] user sync failed:', res.error);
+        } else if (!cancelled) {
+          setUsers(STORAGE.users.getAll());
         }
       } catch (e) {
         console.warn('[UsersConsole] user sync error:', e);
+      }
+      // 同步拉取公司層 (cbl_companies)
+      try {
+        const { supabaseCompanies } = await import('@/lib/supabase-companies');
+        const res = await supabaseCompanies.syncToStorage();
+        if (!res.success && !cancelled) {
+          console.warn('[CompaniesConsole] company sync failed:', res.error);
+        } else if (!cancelled) {
+          setCompanies(STORAGE.companies.getAll());
+        }
+      } catch (e) {
+        console.warn('[CompaniesConsole] company sync error:', e);
       }
     };
     pull();
@@ -260,22 +296,12 @@ export default function CblAdminTabPage() {
     };
   }, [layout]);
 
-  // site-tool data layer — 「網站設定」頁需要機構列表 (租戶根) + 帳號數統計
+  // site-tool data layer — 「網站設定」頁只剩摘要 (Logo/主色/聯絡資訊, 由 useSettings 提供),
+  // 機構 (公司) 列表已搬到 user 底下 (2026-11), 這裡不再載入 companies/users。
+  // ⚠️ 雖然「所屬學校」tab 已移除, 這裡仍同步 cbl_clients —— 其他頁面
+  //    (學年管理 / 各資料頁) 都依賴 localStorage 的 cbl_clients。
   useEffect(() => {
     if (layout !== 'site-tool') return;
-    const load = () => {
-      setClients(STORAGE.clients.getAll());
-      setCompanies(STORAGE.companies.getAll());
-      setUsers(STORAGE.users.getAll());
-    };
-    load();
-    const handler = () => load();
-    window.addEventListener('cbl-clients-refresh', handler);
-    window.addEventListener('cbl-companies-refresh', handler);
-    window.addEventListener('cbl-users-refresh', handler);
-
-    // 進頁時從 Supabase 拉一次最新的機構 (localStorage 只是快取,
-    // 後台改過機構名稱/狀態後, 這裡仍顯示舊資料)
     let cancelled = false;
     const pull = async () => {
       try {
@@ -283,32 +309,15 @@ export default function CblAdminTabPage() {
         const res = await supabaseClients.syncToStorage();
         if (!res.success && !cancelled) {
           console.warn('[ClientsConsole] client sync failed:', res.error);
-        } else if (!cancelled) {
-          load();
         }
       } catch (e) {
         console.warn('[ClientsConsole] client sync error:', e);
-      }
-      // 同步拉取公司層 (cbl_companies) — 失敗不影響機構 (學校) 列表
-      try {
-        const { supabaseCompanies } = await import('@/lib/supabase-companies');
-        const res = await supabaseCompanies.syncToStorage();
-        if (!res.success && !cancelled) {
-          console.warn('[CompaniesConsole] company sync failed:', res.error);
-        } else if (!cancelled) {
-          load();
-        }
-      } catch (e) {
-        console.warn('[CompaniesConsole] company sync error:', e);
       }
     };
     pull();
 
     return () => {
       cancelled = true;
-      window.removeEventListener('cbl-clients-refresh', handler);
-      window.removeEventListener('cbl-companies-refresh', handler);
-      window.removeEventListener('cbl-users-refresh', handler);
     };
   }, [layout]);
 
@@ -367,84 +376,20 @@ export default function CblAdminTabPage() {
         />
       );
 
-    case 'bus': {
-      // /cbl-admin-setting/bus → 校巴群組的頂層 landing page
-      // 列出「路線」「司機」兩個子模組的捷徑 + 即時概況
-      return (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-xl font-bold text-slate-900 dark:text-white">校巴管理</h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
-                管理校巴路線、班次、司機值勤與校巴狀態。
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="p-4 bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm">
-              <p className="text-2xl font-bold text-slate-900 dark:text-white">{stats.buses}</p>
-              <p className="text-sm text-slate-500 dark:text-slate-400">校巴總數</p>
-            </div>
-            <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-xl border border-green-100 dark:border-green-900/40 shadow-sm">
-              <p className="text-2xl font-bold text-green-600">{stats.busesActive}</p>
-              <p className="text-sm text-green-600/70">運行中</p>
-            </div>
-            <div className="p-4 bg-amber-50 dark:bg-amber-900/20 rounded-xl border border-amber-100 dark:border-amber-900/40 shadow-sm">
-              <p className="text-2xl font-bold text-amber-600">{stats.busesMaintenance}</p>
-              <p className="text-sm text-amber-600/70">維護中</p>
-            </div>
-            <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-xl border border-indigo-100 dark:border-indigo-900/40 shadow-sm">
-              <p className="text-2xl font-bold text-indigo-600">{stats.totalTrips}</p>
-              <p className="text-sm text-indigo-600/70">總班次</p>
-            </div>
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-sm border border-slate-200 dark:border-slate-700">
-            <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300 mb-4">子模組捷徑</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <Link
-                href="/cbl-admin-setting/bus/trips"
-                className="group block p-4 rounded-lg bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-700 hover:border-amber-400 hover:bg-amber-50/50 dark:hover:bg-amber-900/20 transition-colors"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-amber-100 dark:bg-amber-900/30 flex items-center justify-center flex-shrink-0">
-                    <FileSpreadsheet className="w-5 h-5 text-amber-600 dark:text-amber-400" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-slate-900 dark:text-white">路線</p>
-                    <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">站點、班次、學生名單</p>
-                  </div>
-                </div>
-              </Link>
-              <Link
-                href="/cbl-admin-setting/bus/drivers"
-                className="group block p-4 rounded-lg bg-slate-50 dark:bg-slate-700/50 border border-slate-200 dark:border-slate-700 hover:border-purple-400 hover:bg-purple-50/50 dark:hover:bg-purple-900/20 transition-colors"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-purple-100 dark:bg-purple-900/30 flex items-center justify-center flex-shrink-0">
-                    <UserCog className="w-5 h-5 text-purple-600 dark:text-purple-400" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-semibold text-slate-900 dark:text-white">司機</p>
-                    <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">駕照、值勤、校巴指派</p>
-                  </div>
-                </div>
-              </Link>
-            </div>
-          </div>
-        </div>
-      );
-    }
+    case 'bus':
+      // 舊路徑 /cbl-admin-setting/bus → 校巴頁已搬到班次群組底下
+      // /cbl-admin-setting/schedule/bus (2026-11)
+      if (typeof window !== 'undefined') router.replace('/cbl-admin-setting/schedule/bus');
+      return null;
 
     case 'buses':
-      // 舊路徑 /cbl-admin-setting/buses → 改到 /cbl-admin-setting/bus/trips
-      if (typeof window !== 'undefined') router.replace('/cbl-admin-setting/bus/trips');
+      // 舊路徑 /cbl-admin-setting/buses → 改到 /cbl-admin-setting/schedule/routes
+      if (typeof window !== 'undefined') router.replace('/cbl-admin-setting/schedule/routes');
       return null;
 
     case 'drivers':
-      // 舊路徑 /cbl-admin-setting/drivers → 改到 /cbl-admin-setting/bus/drivers
-      if (typeof window !== 'undefined') router.replace('/cbl-admin-setting/bus/drivers');
+      // 舊路徑 /cbl-admin-setting/drivers → 改到 /cbl-admin-setting/schedule/drivers
+      if (typeof window !== 'undefined') router.replace('/cbl-admin-setting/schedule/drivers');
       return null;
 
     case 'nannies':
@@ -463,41 +408,12 @@ export default function CblAdminTabPage() {
       );
 
     case 'reports':
+      // /cbl-admin-setting/reports → OneFleet 報表主控台 (與 /students 同級)
       return (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white">行程報表</h2>
-            <Link
-              href="/settings/reports"
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
-            >
-              前往完整頁面 →
-            </Link>
-          </div>
-          <div className="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-sm border border-slate-200 dark:border-slate-700">
-            <p className="text-slate-600 dark:text-slate-300 mb-4">
-              匯出 Excel 格式的行程報表及學生出席統計。
-            </p>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                <p className="text-2xl font-bold text-slate-900 dark:text-white">{stats.totalTrips}</p>
-                <p className="text-sm text-slate-500 dark:text-slate-400">總班次</p>
-              </div>
-              <div className="p-4 bg-green-50 dark:bg-green-900/20 rounded-lg">
-                <p className="text-2xl font-bold text-green-600">{stats.attendanceRate}%</p>
-                <p className="text-sm text-green-600/70">出席率</p>
-              </div>
-              <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
-                <p className="text-2xl font-bold text-blue-600">{stats.totalAttendance}</p>
-                <p className="text-sm text-blue-600/70">總接送記錄</p>
-              </div>
-              <div className="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg">
-                <p className="text-2xl font-bold text-purple-600">{stats.activeTrips}</p>
-                <p className="text-sm text-purple-600/70">進行中</p>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ReportsConsoleContent
+          clientId={clientId}
+          isSuperAdmin={isSuperAdmin}
+        />
       );
 
     case 'announcements':
@@ -505,8 +421,7 @@ export default function CblAdminTabPage() {
         <AnnouncementsConsoleContent
           announcements={announcements}
           clientId={clientId}
-          isSuperAdmin={isSuperAdmin}
-          clients={clientOptions}
+          parents={parents}
         />
       );
 
@@ -516,36 +431,15 @@ export default function CblAdminTabPage() {
       return null;
 
     case 'site-tool':
-      // /cbl-admin-setting/site-tool → 網站設定
-      // 兩個子頁: 機構管理 (租戶根, 新增/編輯機構) + 網站設定摘要 (目前機構的 Logo/主色/聯絡資訊)
+      // /cbl-admin-setting/site-tool → 網站設定摘要 (目前機構的 Logo/主色/聯絡資訊)
+      // ⚠️ 「所屬機構 (公司)」tab 已搬到 /cbl-admin-setting/user 底下 (2026-11) ——
+      //    cbl_companies 改為由用戶頁統一管理; 「所屬學校 (機構)」tab 更早已移除,
+      //    cbl_clients 改為由資料頁自動沿用。
       return (
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-bold text-slate-900 dark:text-white">網站設定</h2>
-              <div className="inline-flex rounded-md border border-slate-200 bg-white p-0.5 dark:bg-slate-800 dark:border-slate-700">
-                {(
-                  [
-                    { value: 'clients', label: '所屬學校' },
-                    { value: 'companies', label: '所屬機構' },
-                    { value: 'overview', label: '網站設定' },
-                  ] as const
-                ).map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setSiteTab(opt.value)}
-                    aria-pressed={siteTab === opt.value}
-                    className={
-                      siteTab === opt.value
-                        ? 'px-2.5 h-7 text-[11px] font-medium rounded-[5px] bg-blue-600 text-white shadow-sm transition-colors cursor-pointer'
-                        : 'px-2.5 h-7 text-[11px] font-medium rounded-[5px] text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100 transition-colors cursor-pointer'
-                    }
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
             </div>
             <Link
               href="/settings/site"
@@ -555,57 +449,90 @@ export default function CblAdminTabPage() {
             </Link>
           </div>
 
-          {siteTab === 'clients' ? (
-            <ClientsConsoleContent
-              clients={clients}
-              userCountByClient={userCountByClient}
-            />
-          ) : siteTab === 'companies' ? (
+          <div className="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-sm border border-slate-200 dark:border-slate-700">
+            <p className="text-slate-600 dark:text-slate-300 mb-4">
+              設定公司資料、Logo、主題色及聯絡資訊。
+            </p>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">公司名稱</p>
+                <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.title || 'CloudBusLink'}</p>
+              </div>
+              <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">主題色</p>
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-full" style={{ backgroundColor: siteSettings?.primaryColor || '#3b82f6' }}></div>
+                  <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.primaryColor || '#3b82f6'}</p>
+                </div>
+              </div>
+              <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">聯絡電話</p>
+                <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.phone || '未設定'}</p>
+              </div>
+              <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
+                <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">Email</p>
+                <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.email || '未設定'}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+
+    case 'user':
+      // /cbl-admin-setting/user → 帳號管理 + 所屬機構 (公司)
+      // 透過 switch button 把某些功能的權限給予其他可登入 user (不是設定自己的權限);
+      // 「所屬機構」tab 於 2026-11 從 site-tool 搬到這裡, 與帳號的新增「所屬機構」下拉共用同一份 companies。
+      return (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2">
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white">用戶</h2>
+              <div className="inline-flex rounded-md border border-slate-200 bg-white p-0.5 dark:bg-slate-800 dark:border-slate-700">
+                {(
+                  [
+                    { value: 'accounts', label: '帳號管理' },
+                    { value: 'companies', label: '所屬機構' },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setUserSubTab(opt.value)}
+                    aria-pressed={userSubTab === opt.value}
+                    className={
+                      userSubTab === opt.value
+                        ? 'px-2.5 h-7 text-[11px] font-medium rounded-[5px] bg-blue-600 text-white shadow-sm transition-colors cursor-pointer'
+                        : 'px-2.5 h-7 text-[11px] font-medium rounded-[5px] text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100 transition-colors cursor-pointer'
+                    }
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {userSubTab === 'companies' ? (
             <CompaniesConsoleContent
               companies={companies}
               userCountByCompany={userCountByCompany}
             />
           ) : (
-            <div className="bg-white dark:bg-slate-800 rounded-xl p-6 shadow-sm border border-slate-200 dark:border-slate-700">
-              <p className="text-slate-600 dark:text-slate-300 mb-4">
-                設定公司資料、Logo、主題色及聯絡資訊。
-              </p>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">公司名稱</p>
-                  <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.title || 'CloudBusLink'}</p>
-                </div>
-                <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">主題色</p>
-                  <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 rounded-full" style={{ backgroundColor: siteSettings?.primaryColor || '#3b82f6' }}></div>
-                    <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.primaryColor || '#3b82f6'}</p>
-                  </div>
-                </div>
-                <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">聯絡電話</p>
-                  <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.phone || '未設定'}</p>
-                </div>
-                <div className="p-4 bg-slate-50 dark:bg-slate-700/50 rounded-lg">
-                  <p className="text-sm text-slate-500 dark:text-slate-400 mb-1">Email</p>
-                  <p className="text-base font-semibold text-slate-900 dark:text-white">{siteSettings?.email || '未設定'}</p>
-                </div>
-              </div>
-            </div>
+            <UsersConsoleContent
+              users={users}
+              companies={companies}
+              currentUserId={user?.id}
+              currentUserRole={user?.role}
+            />
           )}
         </div>
       );
 
-    case 'user':
-      // /cbl-admin-setting/user → 功能權限分配 + 帳號管理
-      // 透過 switch button 把某些功能的權限給予其他可登入 user (不是設定自己的權限)
+    case 'incidents':
+      // /cbl-admin-setting/incidents → 保姆異常回報留底 (保姆 popup 送出即寫一筆)
       return (
-        <UsersConsoleContent
-          users={users}
-          clients={clients}
-          companies={companies}
-          currentUserId={user?.id}
-          currentUserRole={user?.role}
+        <IncidentsConsoleContent
+          incidents={incidents}
         />
       );
 

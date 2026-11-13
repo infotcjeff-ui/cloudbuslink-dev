@@ -3,18 +3,41 @@
 import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { UserCheck, Settings, LogOut, ArrowLeft } from 'lucide-react';
-import { useAuth, useSettings } from '@/lib/hooks';
+import { UserCheck, Settings, ArrowLeft, Siren } from 'lucide-react';
+import { useAuth, useNannyTrips, useSettings } from '@/lib/hooks';
 import { cn } from '@/lib/utils';
 import { getParentPath } from '@/lib/navigation';
+import { today } from '@/lib/utils';
 import { NotificationDropdown } from '@/components/NotificationDropdown';
+import IncidentReportModal from './nanny/IncidentReportModal';
+import { nannyHomePath, nannyTripsPath, nannySettingsPath, getNannySlug } from '@/lib/nanny-path';
+import { ToastProvider } from '@/components/ui/toast';
+import RealtimeSync from '@/components/RealtimeSync';
 
 export default function NannyPortalLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { user, loading, logout } = useAuth();
+  const { user, loading } = useAuth();
   const { settings } = useSettings(user?.clientId);
   const [mounted, setMounted] = useState(false);
+  // 異常回報 popup — 放 header, 全 portal 通用
+  const [incidentOpen, setIncidentOpen] = useState(false);
+  const { trips: headerTrips, nanny: headerNanny } = useNannyTrips(today());
+
+  // 舊版 /nanny* 保留相容: 已登入保姆自動 redirect 去個人化路徑 (如 /wendy/route)
+  // 未登入則維持原流程 (去 /nannyloginportal)
+  useEffect(() => {
+    if (loading || !user || user.role !== 'nanny') return;
+    const slug = getNannySlug(user);
+    if (!slug) return;
+    if (pathname === '/nanny' || pathname === '/nanny/portal') {
+      router.replace(nannyHomePath(slug));
+    } else if (pathname === '/nanny/trips' || pathname.startsWith('/nanny/trips/')) {
+      router.replace(pathname.replace('/nanny/trips', nannyTripsPath(slug)) || nannyTripsPath(slug));
+    } else if (pathname === '/nanny/settings' || pathname.startsWith('/nanny/settings/')) {
+      router.replace(pathname.replace('/nanny/settings', nannySettingsPath(slug)) || nannySettingsPath(slug));
+    }
+  }, [user, loading, pathname, router]);
 
   // 頂層頁面 (我的班次 / 設定) 不顯示返回鍵; 子頁才顯示
   //
@@ -56,6 +79,8 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
   }
 
   return (
+    <ToastProvider>
+      <RealtimeSync />
     <div className="h-[100dvh] flex flex-col bg-background overflow-hidden">
       {/* Header */}
       <header className="flex-shrink-0 z-40 liquid-glass safe-top">
@@ -85,15 +110,14 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
 
           <div className="flex items-center gap-1">
             <NotificationDropdown />
+            {/* 異常回報 — 只留 title, 放 noti 右邊 */}
             <button
-              onClick={() => {
-                logout();
-                router.push('/nannyloginportal');
-              }}
-              className="w-9 h-9 rounded-full flex items-center justify-center active:bg-destructive/10 active:scale-95 transition-transform"
-              aria-label="登出"
+              type="button"
+              onClick={() => setIncidentOpen(true)}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-full bg-rose-500 text-white text-xs font-bold active:scale-95 transition-transform"
             >
-              <LogOut className="w-5 h-5 text-destructive" />
+              <Siren className="w-3.5 h-3.5" />
+              異常回報
             </button>
           </div>
         </div>
@@ -103,6 +127,19 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
       <main className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
         {children}
       </main>
+
+      {/* 異常回報置中 popup — header 掣用, 全 portal 通用 */}
+      {user && (
+        <IncidentReportModal
+          open={incidentOpen}
+          onClose={() => setIncidentOpen(false)}
+          reporterName={user.name}
+          reporterPhone={user.phone}
+          nannyId={headerNanny?.id ?? ''}
+          clientId={user.clientId ?? ''}
+          trips={headerTrips}
+        />
+      )}
 
       {/* Bottom Tab Bar — 只保留「我的班次」與「設定」 */}
       <nav className="fixed bottom-3 left-0 right-0 z-40 safe-bottom pointer-events-none">
@@ -136,5 +173,6 @@ export default function NannyPortalLayout({ children }: { children: React.ReactN
         </div>
       </nav>
     </div>
+    </ToastProvider>
   );
 }

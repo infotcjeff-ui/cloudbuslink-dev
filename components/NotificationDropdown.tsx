@@ -37,10 +37,12 @@
  */
 
 import * as React from 'react';
-import { Bell, Info, AlertTriangle, AlertCircle, Inbox } from 'lucide-react';
+import { Bell, Info, AlertTriangle, AlertCircle, Inbox, Siren } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/hooks';
 import { STORAGE } from '@/lib/storage';
-import type { Announcement } from '@/lib/types';
+import { getAnnouncementAudience } from '@/lib/announcement-audience';
+import type { Announcement, IncidentReport } from '@/lib/types';
 import { cn } from '@/lib/utils';
 
 interface NotificationDropdownProps {
@@ -80,6 +82,7 @@ function formatRelative(iso: string): string {
 
 export function NotificationDropdown({ className }: NotificationDropdownProps) {
   const { user } = useAuth();
+  const router = useRouter();
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
 
@@ -94,6 +97,9 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
   const [selectedIndex, setSelectedIndex] = React.useState<number | null>(null);
   // 已讀公告 ID 集合 (來自 localStorage)。只算這個跟 active 公告的差集就是紅點數。
   const [readIds, setReadIds] = React.useState<Set<string>>(new Set());
+  // 異常回報 (僅 system_admin / super_admin 可見) — 待處理廣播
+  const [incidentItems, setIncidentItems] = React.useState<IncidentReport[]>([]);
+  const [incidentReadIds, setIncidentReadIds] = React.useState<Set<string>>(new Set());
 
   // 自動關閉 timer (3 秒)
   const AUTO_CLOSE_MS = 3000;
@@ -124,17 +130,23 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
     if (!user) {
       setItems([]);
       setReadIds(new Set());
+      setIncidentItems([]);
+      setIncidentReadIds(new Set());
       return;
     }
     const clientId = user.clientId || '';
     // super_admin 沒有自己的 clientId, 但依需求要看得見所有機構的公告。
     const isSuperAdmin = user.role === 'super_admin';
+    // 異常回報廣播對象: system_admin + super_admin (兩者都看全部)
+    const isAdmin = user.role === 'super_admin' || user.role === 'system_admin';
+    // 受眾上下文 (系統公告 → 全部看得到; 繳費公告 → 只有被選家長看得到)
+    const audience = getAnnouncementAudience(user, isSuperAdmin);
     // 下拉列表用 getActive() (所有「生效中且在有效期內」的公告),
     // 不用 getEligible() — 因為 displayCount / maxViewsPerUser 是
     // 「自動彈窗」的顯示上限, 不是「公告是否存在」的限制。
     // 若用 getEligible, 公告被看過一次後就會整則從列表消失, 使用者永遠
     // 找不到看過的公告。
-    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin);
+    const active = STORAGE.announcements.getActive(clientId, isSuperAdmin, audience);
     // Newest first is more useful than createdAt order, but storage order is fine
     // for now — sort by startDate DESC so the most recent broadcasts are on top.
     const sorted = [...active].sort((a, b) =>
@@ -144,6 +156,19 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
 
     const read = STORAGE.announcementReads.getRead(user.id, clientId);
     setReadIds(read);
+
+    // 異常回報廣播: 僅 system_admin / super_admin 有鈴鐺 (待處理才算)
+    if (isAdmin) {
+      const pending = STORAGE.incidents.getPendingForAdmins(clientId, true);
+      const sortedInc = [...pending].sort((a, b) =>
+        (b.createdAt || '').localeCompare(a.createdAt || ''),
+      );
+      setIncidentItems(sortedInc);
+      setIncidentReadIds(STORAGE.incidentReads.getRead(user.id, clientId));
+    } else {
+      setIncidentItems([]);
+      setIncidentReadIds(new Set());
+    }
   }, [user]);
 
   React.useEffect(() => {
@@ -166,6 +191,10 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
       try {
         const { supabaseAnnouncements } = await import('@/lib/supabase-announcements');
         await supabaseAnnouncements.syncToStorage();
+        if ((user.role === 'super_admin' || user.role === 'system_admin')) {
+          const { supabaseIncidents } = await import('@/lib/supabase-incidents');
+          await supabaseIncidents.syncToStorage().catch(() => undefined);
+        }
         if (!cancelled) load();
       } catch (e) {
         console.warn('[NotificationDropdown] db sync failed:', e);
@@ -177,26 +206,33 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
   }, [user, load]);
 
   // 監聽公告資料更新事件 (來自 cbl-admin-setting/announcements 頁面)
+  // + 異常回報事件 (保姆送出即 dispatch, 兩 role 即時更新 counting)
   React.useEffect(() => {
     const onRefresh = () => {
       load();
     };
     window.addEventListener('cbl-announcements-refresh', onRefresh);
-    return () => window.removeEventListener('cbl-announcements-refresh', onRefresh);
+    window.addEventListener('cbl-incidents-refresh', onRefresh);
+    return () => {
+      window.removeEventListener('cbl-announcements-refresh', onRefresh);
+      window.removeEventListener('cbl-incidents-refresh', onRefresh);
+    };
   }, [load]);
 
-  // 未讀數 = active 公告數 − 已讀數
-  // (實務上 readIds 是 items 的子集, 所以兩者都在時直接用 items 過濾即可)
+  // 未讀數 = active 公告未讀 + 待處理異常未讀 (僅兩管理 role 有後者)
   const unreadCount = React.useMemo(() => {
     if (!user) return 0;
     let n = 0;
     for (const a of items) {
       if (!readIds.has(a.id)) n += 1;
     }
+    for (const r of incidentItems) {
+      if (!incidentReadIds.has(r.id)) n += 1;
+    }
     return n;
-  }, [items, readIds, user]);
+  }, [items, readIds, incidentItems, incidentReadIds, user]);
 
-  // 開啟下拉時把所有當前 active 公告標記為已讀。
+  // 開啟下拉時把所有當前 active 公告 + 待處理異常標記為已讀。
   // 設計: 「看過下拉列表」 = 「已查看」 — 不必真的打開每個 dialog。
   // 只在「正展開」時做一次 (closing 階段不再標記, 避免重複 set state)。
   const markedReadRef = React.useRef(false);
@@ -208,25 +244,36 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
     }
     if (markedReadRef.current) return;
     if (!user) return;
-    if (items.length === 0) return;
+    if (items.length === 0 && incidentItems.length === 0) return;
 
+    const clientId = user.clientId || '';
     // 計算這次新加入已讀的 ID (避免 set state 沒變化時白白 re-render)
     const fresh = items.filter(a => !readIds.has(a.id)).map(a => a.id);
-    if (fresh.length === 0) {
+    const freshInc = incidentItems.filter(r => !incidentReadIds.has(r.id)).map(r => r.id);
+    if (fresh.length === 0 && freshInc.length === 0) {
       // 全部都已是已讀, 旗標設好即可
       markedReadRef.current = true;
       return;
     }
-    const clientId = user.clientId || '';
-    STORAGE.announcementReads.markRead(user.id, clientId, fresh);
-    // 同步本地 state, 立刻讓徽章消失 (不等下次 load)
-    setReadIds(prev => {
-      const next = new Set(prev);
-      fresh.forEach(id => next.add(id));
-      return next;
-    });
+    if (fresh.length > 0) {
+      STORAGE.announcementReads.markRead(user.id, clientId, fresh);
+      // 同步本地 state, 立刻讓徽章消失 (不等下次 load)
+      setReadIds(prev => {
+        const next = new Set(prev);
+        fresh.forEach(id => next.add(id));
+        return next;
+      });
+    }
+    if (freshInc.length > 0) {
+      STORAGE.incidentReads.markRead(user.id, clientId, freshInc);
+      setIncidentReadIds(prev => {
+        const next = new Set(prev);
+        freshInc.forEach(id => next.add(id));
+        return next;
+      });
+    }
     markedReadRef.current = true;
-  }, [open, closing, items, readIds, user]);
+  }, [open, closing, items, readIds, incidentItems, incidentReadIds, user]);
 
   // Compute anchored position from the trigger's bounding rect.
   const measure = React.useCallback(() => {
@@ -306,9 +353,20 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
     }, 180);
   }, [items]);
 
-  // 下拉內要列出的「active 公告總數」(給 header 文字用, 例如 "3 則")
+  // 下拉內要列出的總數 = 公告 + 待處理異常 (給 header 文字用, 例如 "3 則")
   // 注意: 紅點用 `unreadCount` (扣除已讀); 這裡是下拉內共有幾則
-  const totalActive = items.length;
+  const totalActive = items.length + incidentItems.length;
+
+  const openIncident = React.useCallback(() => {
+    if (autoCloseTimerRef.current) {
+      clearTimeout(autoCloseTimerRef.current);
+      autoCloseTimerRef.current = null;
+    }
+    setClosing(true);
+    setTimeout(() => {
+      router.push('/cbl-admin-setting/incidents');
+    }, 180);
+  }, [router]);
 
   return (
     <>
@@ -401,11 +459,41 @@ export function NotificationDropdown({ className }: NotificationDropdownProps) {
                 </div>
                 <p className="text-sm font-medium">目前沒有通知</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  新公告發布時會顯示在這裡
+                  新公告 / 異常回報會顯示在這裡
                 </p>
               </div>
             ) : (
               <ul className="divide-y divide-border/40">
+                {incidentItems.map((r) => (
+                  <li key={`incident-${r.id}`}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={openIncident}
+                      className={cn(
+                        'w-full flex items-start gap-3 px-4 py-3 text-left',
+                        'active:bg-muted/70 transition-colors',
+                      )}
+                    >
+                      <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-destructive/10">
+                        <Siren className="w-4 h-4 text-destructive" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-sm font-semibold truncate">
+                            異常回報 · {r.kindLabel || r.kind}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground flex-shrink-0">
+                            {formatRelative(r.createdAt)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-foreground/70 line-clamp-2 mt-0.5">
+                          {r.reporterName}{r.tripLabel ? ` · ${r.tripLabel}` : ''}
+                        </p>
+                      </div>
+                    </button>
+                  </li>
+                ))}
                 {items.map((item, idx) => {
                   const Icon = getTypeIcon(item.type);
                   const color = getTypeColor(item.type);

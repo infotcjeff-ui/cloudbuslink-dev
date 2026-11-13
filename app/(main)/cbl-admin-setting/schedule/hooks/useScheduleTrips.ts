@@ -22,6 +22,8 @@ import {
   applyScheduleFilter,
   findConflicts,
 } from '../scheduleUtils';
+import { filterByAcademicYear } from '@/lib/academic-year';
+import { useAcademicYear } from '../../AcademicYearProvider';
 import type {
   ScheduleFilter,
   TripConflict,
@@ -62,6 +64,11 @@ export function useScheduleTrips(
   const [routes, setRoutes] = useState<Route[]>([]);
   const [attendances, setAttendances] = useState<Attendance[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // ⚠️ 學年範圍 — 班次是分學年的 entity。
+  //    這裡是「班次清單」的單一過濾點: 所有下游 (enriched / filtered / progress /
+  //    conflicts) 都從 filtered 的結果推導, 所以只要在這裡過濾一次就夠。
+  const { selectedYear } = useAcademicYear();
 
   /** 從 localStorage 重載 (供 storage 事件用) */
   const refresh = useCallback(() => {
@@ -203,19 +210,59 @@ export function useScheduleTrips(
   }, [clientId, refresh, isSuperAdmin]);
 
   // P0-3: 一次建好 Map 索引，enriched / progress 共用 — O(n×m) → O(n+m)
+  //
+  // ⚠️ 學生與路線是分學年的 entity → 也要依學年過濾。
+  //    否則會出現「班次是 26-27, 但它的乘客清單混進 27-28 的學生」。
+  const scopedStudents = useMemo(
+    () => filterByAcademicYear(students, selectedYear),
+    [students, selectedYear],
+  );
+  const scopedRoutes = useMemo(
+    () => filterByAcademicYear(routes, selectedYear),
+    [routes, selectedYear],
+  );
+
   const lookupMaps = useMemo(
-    () => buildLookupMaps(buses, drivers, nannies, students, routes, attendances, trips),
-    [buses, drivers, nannies, students, routes, attendances, trips],
+    () =>
+      buildLookupMaps(
+        buses,
+        drivers,
+        nannies,
+        scopedStudents,
+        scopedRoutes,
+        attendances,
+        trips,
+      ),
+    [
+      buses,
+      drivers,
+      nannies,
+      scopedStudents,
+      scopedRoutes,
+      attendances,
+      trips,
+    ],
   );
 
   const enriched: TripWithRelations[] = useMemo(
-    () => trips.map((t) => joinTripRelationsWithMaps(t, lookupMaps)),
-    [trips, lookupMaps],
+    () =>
+      trips
+        // ⚠️ 學年隔離: 只保留「目前檢視的學年」的班次。
+        //    舊資料 (沒有 academicYear) 會被保留 (見 filterByAcademicYear 說明)。
+        .filter((t) => {
+          if (!t.academicYear) return true;
+          return t.academicYear === selectedYear;
+        })
+        .map((t) => joinTripRelationsWithMaps(t, lookupMaps)),
+    [trips, lookupMaps, selectedYear],
   );
 
   const filtered: TripWithRelations[] = useMemo(
-    () => sortTripsByStart(applyScheduleFilter(enriched, filter, tab, students)),
-    [enriched, filter, tab, students],
+    () =>
+      sortTripsByStart(
+        applyScheduleFilter(enriched, filter, tab, scopedStudents),
+      ),
+    [enriched, filter, tab, scopedStudents],
   );
 
   // P0-1: progress 只算當前 filtered 範圍 (all 模式下不算歷史全量)
@@ -235,24 +282,27 @@ export function useScheduleTrips(
       findConflicts(
         filtered.map((r) => r.trip),
         buses,
-        students,
+        scopedStudents,
         drivers,
         nannies,
         null,
       ),
-    [filtered, buses, students, drivers, nannies],
+    [filtered, buses, scopedStudents, drivers, nannies],
   );
 
   return {
     trips: filtered,
-    totalCount: trips.length,
+    // ⚠️ totalCount 是「篩選前」的全部班次數 (P0-1: 標題顯示 today n / 全部 m)
+    //    這裡的「篩選前」指的是「日期/分頁篩選前」, 但仍應該已經過學年隔離 ——
+    //    否則會顯示「全部 500 班」而清單只有 20 班, 使用者會以為漏資料。
+    totalCount: enriched.length,
     loading,
     progress,
     conflicts,
     buses,
     drivers,
     nannies,
-    students,
-    routes,
+    students: scopedStudents,
+    routes: scopedRoutes,
   };
 }

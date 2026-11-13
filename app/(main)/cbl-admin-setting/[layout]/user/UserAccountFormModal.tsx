@@ -34,7 +34,6 @@ import {
   EyeOff,
   Building2,
   KeyRound,
-  Plus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
@@ -47,7 +46,7 @@ import {
   ROLE_DESCRIPTIONS,
   type UserAccountFormState,
 } from './types';
-import type { UserRole, Client, Company } from '@/lib/types';
+import type { UserRole, Company } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
 /*  LabeledInput — 表單欄位                                                     */
@@ -284,14 +283,8 @@ export interface UserAccountFormModalProps {
   initial: UserAccountFormState;
   /** 現有所有帳號 — 用來擋重複登入帳號 */
   existingPhones: string[];
-  /** 學校列表 (cbl_clients = 學校表) — 供選擇所屬學校 */
-  clients: Client[];
   /** 機構/公司列表 (cbl_companies) — 供選擇所屬機構 */
   companies?: Company[];
-  /** 「＋ 在此新增學校…」— 由父層開啟學校建立 modal (建立後自動選中新學校) */
-  onCreateClient?: () => void;
-  /** 外部指定的學校 — 用於「新增學校」完成後自動選中新學校 */
-  preselectClientId?: string | null;
   /** 目前登入者 (用來標示「不能改自己的角色」/ 防止自我停用) */
   currentUserId?: string;
   /** 目前登入者角色 — 只有 system_admin 能選 system_admin (防提權) */
@@ -306,10 +299,7 @@ export function UserAccountFormModal({
   mode,
   initial,
   existingPhones,
-  clients,
   companies = [],
-  onCreateClient,
-  preselectClientId,
   currentUserId,
   currentUserRole,
   isSaving,
@@ -328,17 +318,6 @@ export function UserAccountFormModal({
       setShowPwd(false);
     }
   }, [open, initial]);
-
-  /**
-   * 外部建立學校後回填「所屬學校」
-   *
-   * 使用者從「＋ 在此新增學校…」建立學校後, 新學校的 id 會傳進來,
-   * 這裡即時把 select 的值換成新學校 (不需要關掉 modal 重開)。
-   */
-  React.useEffect(() => {
-    if (!preselectClientId) return;
-    setForm((p) => (p.clientId === preselectClientId ? p : { ...p, clientId: preselectClientId }));
-  }, [preselectClientId]);
 
   const markTouched = (field: string) =>
     setTouched((p) => ({ ...p, [field]: true }));
@@ -361,6 +340,11 @@ export function UserAccountFormModal({
           ? '帳號需為 3-32 位英數字元'
           : '登入帳號需為 8 位數字'
         : null,
+      contactPhone: !form.contactPhone.trim()
+        ? '請填寫「聯絡電話」'
+        : !/^[0-9]{8}$/.test(form.contactPhone.trim())
+        ? '聯絡電話需為 8 位數字'
+        : null,
       password:
         // Edit mode 預填現有密碼（遮罩顯示），清空 = 保留原密碼不改；Add mode 密碼必填
         form.password.length === 0
@@ -376,12 +360,11 @@ export function UserAccountFormModal({
         form.email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())
           ? 'Email 格式不正確'
           : null,
-      // 所屬機構 / 所屬學校皆為選填 — 不做必填校驗
-      clientId: null,
+      // 所屬機構為選填 — 不做必填校驗
       companyId: null,
     };
     return errors;
-  }, [form.name, form.phone, form.password, form.email, form.role, mode]);
+  }, [form.name, form.phone, form.contactPhone, form.password, form.email, form.role, mode]);
 
   /** 登入帳號是否已被其他人使用 */
   const phoneTaken = React.useMemo(() => {
@@ -401,7 +384,7 @@ export function UserAccountFormModal({
     Object.values(fieldErrors).every((e) => e === null);
 
   const handleSaveClick = () => {
-    setTouched({ name: true, phone: true, password: true, email: true, clientId: true, companyId: true });
+    setTouched({ name: true, phone: true, contactPhone: true, password: true, email: true, companyId: true });
     if (phoneTaken) {
       toast.error(`登入帳號「${phoneTaken}」已被使用, 請換一個`);
       return;
@@ -419,6 +402,9 @@ export function UserAccountFormModal({
             ? '請填寫「密碼」'
             : '密碼至少 6 個字元',
         email: 'Email 格式不正確',
+        contactPhone: !form.contactPhone.trim()
+          ? '請填寫「聯絡電話」'
+          : '聯絡電話需為 8 位數字',
       };
       toast.error(messages[firstError] || '請檢查並修正表單欄位');
       return;
@@ -427,9 +413,12 @@ export function UserAccountFormModal({
       ...form,
       name: form.name.trim(),
       phone: form.phone.trim(),
+      contactPhone: form.contactPhone.trim(),
       email: form.email.trim(),
-      // 兩者皆為選填：空字串 → null
+      // 所屬學校 (clientId) 已於 2026-11 從 UI 移除 —— 這裡原樣帶回
+      // (編輯模式 = 維持原值; 新增模式 = 父層依登入者推導的預設值), 不讓使用者更動。
       clientId: form.clientId || null,
+      // 所屬機構為選填：空字串 → null
       companyId: form.companyId || null,
     });
   };
@@ -548,7 +537,7 @@ export function UserAccountFormModal({
                     </div>
                   </div>
 
-                  {/* Row 2: 密碼 / Email */}
+                  {/* Row 2: 密碼 / 聯絡電話 */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label
@@ -602,6 +591,33 @@ export function UserAccountFormModal({
                     </div>
                     <div>
                       <LabeledInput
+                        id="user-account-contact-phone"
+                        label="聯絡電話 (WhatsApp)"
+                        value={form.contactPhone}
+                        onChange={(v) =>
+                          setForm((p) => ({
+                            ...p,
+                            contactPhone: v.replace(/\D/g, '').slice(0, 8),
+                          }))
+                        }
+                        placeholder="91234567"
+                        required
+                        type="tel"
+                        inputMode="numeric"
+                        maxLength={8}
+                        icon={<Phone width={12} height={12} />}
+                        hint="保姆異常回報時可直接致電 / WhatsApp 此號碼"
+                      />
+                      <InlineFieldError
+                        message={touched.contactPhone ? fieldErrors.contactPhone : null}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Row 2b: Email (選填) — 獨立一行 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <LabeledInput
                         id="user-account-email"
                         label="Email (選填)"
                         value={form.email}
@@ -635,94 +651,50 @@ export function UserAccountFormModal({
                     />
                   </div>
 
-                  {/* Row 4: 所屬學校 + 所屬機構 (同一行，皆選填) */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div>
-                      <label
-                        htmlFor="user-account-client"
-                        className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
+                  {/* Row 4: 所屬機構 (選填) */}
+                  {/* ⚠️ 「所屬學校 (選填)」欄位已於 2026-11 移除 ——
+                      cbl_clients (學校) 不再由使用者手動指派, 改由登入者的既有
+                      client_id 自動沿用 (見 UsersConsoleContent.handleSaveAccount)。 */}
+                  <div>
+                    <label
+                      htmlFor="user-account-company"
+                      className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
+                    >
+                      所屬機構 (選填)
+                    </label>
+                    <div className="relative">
+                      <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+                        <Building2 width={12} height={12} />
+                      </span>
+                      <select
+                        id="user-account-company"
+                        value={form.companyId ?? ''}
+                        onChange={(e) =>
+                          setForm((p) => ({
+                            ...p,
+                            companyId: e.target.value || null,
+                          }))
+                        }
+                        className="w-full h-9 pl-8 pr-2.5 rounded-md border border-slate-200 bg-white text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors cursor-pointer dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
                       >
-                        所屬學校 (選填)
-                      </label>
-                      <div className="relative">
-                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-                          <Building2 width={12} height={12} />
-                        </span>
-                        <select
-                          id="user-account-client"
-                          value={form.clientId ?? ''}
-                          onChange={(e) =>
-                            setForm((p) => ({
-                              ...p,
-                              clientId: e.target.value || null,
-                            }))
-                          }
-                          className="w-full h-9 pl-8 pr-2.5 rounded-md border border-slate-200 bg-white text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors cursor-pointer dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                        >
-                          <option value="">— 未選擇 —</option>
-                          {clients.map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      {onCreateClient && (
-                        <button
-                          type="button"
-                          onClick={onCreateClient}
-                          className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 cursor-pointer transition-colors"
-                        >
-                          <Plus width={11} height={11} />
-                          在此新增學校…
-                        </button>
-                      )}
-                      <InlineFieldError
-                        message={touched.clientId ? fieldErrors.clientId : null}
-                      />
+                        <option value="">— 未選擇 —</option>
+                        {companies.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
                     </div>
-
-                    <div>
-                      <label
-                        htmlFor="user-account-company"
-                        className="text-[10.5px] uppercase tracking-[0.06em] font-semibold text-slate-500 block mb-1 dark:text-slate-400"
-                      >
-                        所屬機構 (選填)
-                      </label>
-                      <div className="relative">
-                        <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-                          <Building2 width={12} height={12} />
-                        </span>
-                        <select
-                          id="user-account-company"
-                          value={form.companyId ?? ''}
-                          onChange={(e) =>
-                            setForm((p) => ({
-                              ...p,
-                              companyId: e.target.value || null,
-                            }))
-                          }
-                          className="w-full h-9 pl-8 pr-2.5 rounded-md border border-slate-200 bg-white text-[13px] font-medium text-slate-700 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-400/40 transition-colors cursor-pointer dark:bg-slate-900 dark:border-slate-700 dark:text-slate-200"
-                        >
-                          <option value="">— 未選擇 —</option>
-                          {companies.map((c) => (
-                            <option key={c.id} value={c.id}>
-                              {c.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                      {companies.length === 0 ? (
-                        <p className="mt-1 text-[10px] text-slate-400 dark:text-slate-500">
-                          尚未建立任何機構，可先到「網站設定 → 所屬機構」新增
-                        </p>
-                      ) : (
-                        <div className="min-h-[14px] mt-1" />
-                      )}
-                      <InlineFieldError
-                        message={touched.companyId ? fieldErrors.companyId : null}
-                      />
-                    </div>
+                    {companies.length === 0 ? (
+                      <p className="mt-1 text-[10px] text-slate-400 dark:text-slate-500">
+                        尚未建立任何機構，可先到「用戶 → 所屬機構」新增
+                      </p>
+                    ) : (
+                      <div className="min-h-[14px] mt-1" />
+                    )}
+                    <InlineFieldError
+                      message={touched.companyId ? fieldErrors.companyId : null}
+                    />
                   </div>
                 </div>
 

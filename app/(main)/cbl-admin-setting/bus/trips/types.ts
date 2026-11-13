@@ -14,14 +14,11 @@ import type {
 
 export type RouteTab = 'all' | 'morning' | 'afternoon' | 'extracurricular';
 
-/** 第一部分 Master Info 表單狀態 */
+/** 第一部分 Master Info 表單狀態 (僅保留編號 / 名稱 / 時段) */
 export interface RouteMasterInfo {
-  code: string;                 // 路線編號 (e.g. A1-AM)
+  code: string;                 // 路線編號 (e.g. 2627-R001AM)
   name: string;                 // 路線名稱
   shiftType: RouteShiftType;    // 行車時段類型
-  busId: string;                // 指派車輛
-  driverId: string;             // 指派司機
-  nannyId: string;              // 跟車保姆
 }
 
 /** 站點時間軸的「可編輯」表單狀態 (不包含 id / seq — 這兩個由外層管理) */
@@ -49,9 +46,6 @@ export const EMPTY_ROUTE_MASTER: RouteMasterInfo = {
   code: '',
   name: '',
   shiftType: 'morning',
-  busId: '',
-  driverId: '',
-  nannyId: '',
 };
 
 /** 時段類型對照 (UI label + tone) */

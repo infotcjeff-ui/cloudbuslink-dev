@@ -29,7 +29,6 @@ import {
   PowerOff,
   Mail,
   Phone,
-  Copy,
   FileSpreadsheet,
   AlertTriangle,
   Users as UsersIcon,
@@ -37,6 +36,7 @@ import {
 import * as XLSX from 'xlsx';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/ui/toast';
+import { CopyChip } from '@/components/ui/copy-button';
 import { STORAGE } from '@/lib/storage';
 import { supabaseCompanies } from '@/lib/supabase-companies';
 import {
@@ -802,20 +802,12 @@ function DataTable({
                   </p>
                 ) : null}
                 {c.phone ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (typeof navigator !== 'undefined' && navigator.clipboard) {
-                        navigator.clipboard.writeText(c.phone).catch(() => {});
-                      }
-                    }}
+                  <CopyChip
+                    value={c.phone}
                     title="複製電話"
-                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-mono bg-slate-100 hover:bg-blue-50 hover:text-blue-700 text-slate-700 transition-colors cursor-pointer dark:bg-slate-800 dark:hover:bg-blue-950/40 dark:hover:text-blue-300 dark:text-slate-200"
-                  >
-                    <Phone width={9} height={9} />
-                    {c.phone}
-                    <Copy width={9} height={9} />
-                  </button>
+                    label="電話"
+                    icon={<Phone width={9} height={9} />}
+                  />
                 ) : null}
                 {!c.email && !c.phone && (
                   <span className="text-[11px] text-slate-400 dark:text-slate-500">

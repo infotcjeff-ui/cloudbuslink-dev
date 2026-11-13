@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X, CheckCircle2, AlertCircle, Info, XCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -102,6 +103,11 @@ function ToastItem({ toast, onDismiss }: ToastItemProps) {
 
 export function ToastProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = React.useState<Toast[]>([]);
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const dismiss = React.useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -129,18 +135,26 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      {/* Toast Container — Fixed top-right */}
-      <div
-        className="fixed top-4 right-4 z-[100] flex flex-col gap-2 pointer-events-none"
-        aria-live="polite"
-        aria-label="通知"
-      >
-        <AnimatePresence mode="popLayout">
-          {toasts.map((t) => (
-            <ToastItem key={t.id} toast={t} onDismiss={dismiss} />
-          ))}
-        </AnimatePresence>
-      </div>
+      {/* Toast Container — portal 到 body 並置於最頂 (z-[200]):
+          AdminShell 內容區有 motion.div (transform) + isolate, 會把 fixed 元素鎖在自己的
+          stacking context 內, 導致 toast (z-[100]) 被蓋在 ModalPortal (portaled 到 body
+          的 z-[60]~z-[90] 弹窗) 之下。portal 到 body 後不再受該 context 束縛, 任何弹窗之上都可見。 */}
+      {mounted
+        ? createPortal(
+            <div
+              className="fixed top-4 right-4 z-[200] flex flex-col gap-2 pointer-events-none"
+              aria-live="polite"
+              aria-label="通知"
+            >
+              <AnimatePresence mode="popLayout">
+                {toasts.map((t) => (
+                  <ToastItem key={t.id} toast={t} onDismiss={dismiss} />
+                ))}
+              </AnimatePresence>
+            </div>,
+            document.body,
+          )
+        : null}
     </ToastContext.Provider>
   );
 }

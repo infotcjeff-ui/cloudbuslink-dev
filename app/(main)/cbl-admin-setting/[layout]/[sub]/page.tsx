@@ -3,40 +3,40 @@
 // 同上: 跳過 static-paths-worker 的 vendor-chunks race condition
 export const dynamic = 'force-dynamic';
 
-import * as React from 'react';
-import { useEffect, useState } from 'react';
-import { useParams, useRouter } from 'next/navigation';
-import Link from 'next/link';
-import {
-  Baby, Receipt, FileSpreadsheet, UserCog, MapPin, Banknote,
-  Clock, Wrench, ShieldCheck, ArrowRight,
-} from 'lucide-react';
-import { useAuth, useSettings } from '@/lib/hooks';
-import { STORAGE } from '@/lib/storage';
-import { syncFromSupabase, isSupabaseAvailable } from '@/lib/supabase-data';
-import { useCblStats } from '../../hooks/useCblStats';
-import { StatCard } from '../../components/Cards';
-import { TripsConsoleContent } from '../../bus/trips/TripsConsoleContent';
-import { DriversConsoleContent } from '../../bus/drivers/DriversConsoleContent';
-import type { Route, Bus, Driver, Nanny, Student } from '@/lib/types';
-
 /**
  * 巢狀 sub-page: 處理 /cbl-admin-setting/{layout}/{sub} 路徑
  *
  * 目前 sub 路徑:
- *   - bus/trips          → 校巴 / 路線 (related to 校巴)
- *   - bus/drivers        → 校巴 / 司機 (related to 校巴)
  *   - parents/payment    → 家長 / 付款記錄 (應付未付, 應收未收, 完整 record, 即時 preview PDF)
  *
- * 注意: 「子女」子頁已移除 (子女資料統一在 /cbl-admin-setting/students 與
+ * 注意 (2026-11):
+ *   班次群組的子頁已搬到 /cbl-admin-setting/schedule/{sub} (由 schedule/[sub]/page.tsx 處理):
+ *     - 校巴 → /cbl-admin-setting/schedule/bus
+ *     - 路線 → /cbl-admin-setting/schedule/routes
+ *     - 司機 → /cbl-admin-setting/schedule/drivers
+ *   舊的 /cbl-admin-setting/bus/trips、/bus/drivers 會自動 redirect 去新路徑,
+ *   避免使用者收藏的連結直接 404。
+ *
+ * 「子女」子頁已移除 (子女資料統一在 /cbl-admin-setting/students 與
  * /cbl-admin-setting/parents 列表的「檢視」popup 內管理), 因此本檔不再處理
  * parents/childrens。
  *
  * 為什麼用 single dynamic [sub] 而不是 named folders:
  * - 全部子頁面共用同一個 layout.tsx (sidebar + header)
- * - 上層 [layout] 已 redirect group landing (例如 /bus → /bus/trips)
  * - 子頁面數量可能會增加, 集中在一個檔案方便維護
  */
+
+import * as React from 'react';
+import { useEffect } from 'react';
+import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
+import {
+  Baby, Receipt, FileSpreadsheet, Banknote,
+  Clock, ShieldCheck, ArrowRight,
+} from 'lucide-react';
+import { useAuth, useSettings } from '@/lib/hooks';
+import { useCblStats } from '../../hooks/useCblStats';
+import { StatCard } from '../../components/Cards';
 
 type SubPageMeta = {
   title: string;
@@ -44,48 +44,9 @@ type SubPageMeta = {
   features: { icon: any; label: string; desc: string }[];
   breadcrumb: { label: string; path?: string }[];
   comingSoon?: boolean;
-  /** 標記此 sub 有自己專屬的 console component (e.g. bus/trips); 為 true 時
-   *  render 時不走通用 meta 模板, 直接渲染對應 console。 */
-  customConsole?: boolean;
 };
 
 function getSubPageMeta(layout: string, sub: string): SubPageMeta | null {
-  if (layout === 'bus' && sub === 'trips') {
-    return {
-      title: '路線',
-      description: '管理校巴路線、班次時間表、上下車站點與自動派車。',
-      breadcrumb: [
-        { label: '校巴', path: '/cbl-admin-setting/bus' },
-        { label: '路線' },
-      ],
-      features: [
-        { icon: MapPin,         label: '站點管理',     desc: '新增、編輯每條路線的上下車站點' },
-        { icon: Clock,          label: '班次時間',     desc: '早上 / 下午 / 課後班次的發車時刻' },
-        { icon: FileSpreadsheet,label: '路線清單',     desc: '檢視所有路線、校巴分配與學生名單' },
-      ],
-      // 有自刻的 TripsConsoleContent, render 時不走通用模板
-      customConsole: true,
-    };
-  }
-
-  if (layout === 'bus' && sub === 'drivers') {
-    return {
-      title: '司機',
-      description: '管理司機資料、駕照有效期、排班, 以及校巴指派。',
-      breadcrumb: [
-        { label: '校巴', path: '/cbl-admin-setting/bus' },
-        { label: '司機' },
-      ],
-      features: [
-        { icon: UserCog, label: '司機檔案', desc: '聯絡資料、駕照類型、有效期提醒' },
-        { icon: MapPin,  label: '排班',     desc: '綁定校巴 / 路線, 查看當週值勤表' },
-        { icon: Wrench,  label: '狀態監控', desc: '可派 / 行駛中 / 休假 即時狀態' },
-      ],
-      // 有自刻的 DriversConsoleContent, render 時不走通用模板
-      customConsole: true,
-    };
-  }
-
   if (layout === 'parents' && sub === 'childrens') {
     // 「子女」子頁已於 2026-10 移除 (子女資料統一在 /students 與 /parents 列表的
     // 「檢視」popup 內管理)。此處保留一個 redirect 兼容舊連結 (避免使用者收藏的 URL
@@ -132,200 +93,37 @@ export default function CblAdminSubPage() {
   const { settings: siteSettings } = useSettings(user?.clientId);
   const stats = useCblStats(user?.clientId);
 
-  // ---- bus/trips 頁面專用資料 (rule of hooks: 跟其他 hook 一起放在頂層) ----
-  // 同步初始化: client side 立即從 LocalStorage 讀取, 避免首次 mount 空閃
-  // 超管 (super_admin / system_admin) 沒有 clientId → 讀全部 (跨機構管理)
-  const resolveVisibleInit = <T,>(getAll: () => T[], getByClient: (cid: string) => T[]): T[] => {
-    try {
-      const raw = localStorage.getItem('cbl_auth');
-      const u = raw ? JSON.parse(raw) : null;
-      const superMode = u?.role === 'super_admin' || u?.role === 'system_admin';
-      if (superMode) return getAll();
-      const cid = u?.clientId || STORAGE.clients.getAll()[0]?.id || '';
-      return cid ? getByClient(cid) : [];
-    } catch { return []; }
-  };
-  const [routes, setRoutes] = useState<Route[]>(() => {
-    if (typeof window === 'undefined') return [];
-    return resolveVisibleInit<Route>(() => STORAGE.routes.getAll(), (cid) => STORAGE.routes.getByClient(cid));
-  });
-  const [buses, setBuses] = useState<Bus[]>(() => {
-    if (typeof window === 'undefined') return [];
-    return resolveVisibleInit<Bus>(() => STORAGE.buses.getAll(), (cid) => STORAGE.buses.getByClient(cid));
-  });
-  const [drivers, setDrivers] = useState<Driver[]>(() => {
-    if (typeof window === 'undefined') return [];
-    return resolveVisibleInit<Driver>(() => STORAGE.drivers.getAll(), (cid) => STORAGE.drivers.getByClient(cid));
-  });
-  const [nannies, setNannies] = useState<Nanny[]>(() => {
-    if (typeof window === 'undefined') return [];
-    return resolveVisibleInit<Nanny>(() => STORAGE.nannies.getAll(), (cid) => STORAGE.nannies.getByClient(cid));
-  });
-  const [students, setStudents] = useState<Student[]>(() => {
-    if (typeof window === 'undefined') return [];
-    return resolveVisibleInit<Student>(() => STORAGE.students.getAll(), (cid) => STORAGE.students.getByClient(cid));
-  });
-
-  // clientId 解析: 超管沒有 clientId → 用 '' + superMode 旗標 (看全部);
-  // 一般角色: 優先 user.clientId, fallback 到第一個 client
-  const isSuperAdminSub = user?.role === 'super_admin' || user?.role === 'system_admin';
-  const clientId = isSuperAdminSub ? '' : (user?.clientId || STORAGE.clients.getAll()[0]?.id || '');
-
-  /**
-   * 進場時從 Supabase 拉一次資料。
-   *
-   * 為什麼需要 (這是「編輯路線 → 跟車保姆顯示 undefined」的根因之一):
-   *   這頁 (bus/trips、bus/drivers、parents/payment) 原本「只讀 localStorage」,
-   *   從不向 Supabase 拉資料。相較之下 /cbl-admin-setting/bus 有自己呼叫
-   *   syncFromSupabase()。
-   *
-   *   結果: 使用者若直接從登入後進到「路線」頁 (或 localStorage 還沒被
-   *   登入頁的 initWithSupabase 填滿), cbl_nannies 是空的 →
-   *   路線的 nannyId 找不到對應實體 → dropdown 只能顯示 id 殼 → "undefined · undefined"。
-   *
-   * 補充: syncFromSupabase() 完成後會 dispatch cbl-*-refresh 事件,
-   *       下面的 reloadAll 會自動重讀, 所以這個 effect 只需負責「觸發同步」。
-   */
-  useEffect(() => {
-    if (!isSupabaseAvailable()) return;
-    let cancelled = false;
-    const sync = async () => {
-      try {
-        await syncFromSupabase();
-        if (cancelled) return;
-        // sync 內部會 dispatch refresh 事件 → reloadAll 自動觸發。
-        // 這裡再保險 dispatch 一次, 處理「sync 早於監聽器掛上」的情況。
-        window.dispatchEvent(new CustomEvent('cbl-routes-refresh'));
-        window.dispatchEvent(new CustomEvent('cbl-nannies-refresh'));
-        window.dispatchEvent(new CustomEvent('cbl-nannys-refresh'));
-      } catch (e) {
-        console.warn('[CblAdminSubPage] Supabase sync failed:', e);
-      }
-    };
-    sync();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    const layout = (params?.layout as string) ?? '';
-    const sub = (params?.sub as string) ?? '';
-
-    // 通用資料載入 helper: 從 STORAGE 重新讀取所有相關資料
-    // 超管讀全部 (getAll), 一般角色讀自己學校 (getByClient)
-    // 注意: 用淺比較守衛 — 資料沒變就不 setState, 避免無謂重 render
-    // (之前每次 event / 輪詢都直接 set 新 array, 表格會跟著閃一次)。
-    const shallowSame = (a: { id: string }[], b: { id: string }[]) =>
-      a.length === b.length && a.every((x, i) => x === b[i]);
-    // 超管看全部 → clientId 為 '' 但 isSuperAdminSub 為 true 也要跑
-    const visibleBuses = () =>
-      isSuperAdminSub ? STORAGE.buses.getAll() : (clientId ? STORAGE.buses.getByClient(clientId) : []);
-    const visibleDrivers = () =>
-      isSuperAdminSub ? STORAGE.drivers.getAll() : (clientId ? STORAGE.drivers.getByClient(clientId) : []);
-    const visibleNannies = () =>
-      isSuperAdminSub ? STORAGE.nannies.getAll() : (clientId ? STORAGE.nannies.getByClient(clientId) : []);
-    const visibleStudents = () =>
-      isSuperAdminSub ? STORAGE.students.getAll() : (clientId ? STORAGE.students.getByClient(clientId) : []);
-    const visibleRoutes = () =>
-      isSuperAdminSub ? STORAGE.routes.getAll() : (clientId ? STORAGE.routes.getByClient(clientId) : []);
-    const reloadAll = () => {
-      if (!clientId && !isSuperAdminSub) return;
-      setBuses((prev) => {
-        const next = visibleBuses();
-        return shallowSame(prev, next) ? prev : next;
-      });
-      setDrivers((prev) => {
-        const next = visibleDrivers();
-        return shallowSame(prev, next) ? prev : next;
-      });
-      setNannies((prev) => {
-        const next = visibleNannies();
-        return shallowSame(prev, next) ? prev : next;
-      });
-      setStudents((prev) => {
-        const next = visibleStudents();
-        return shallowSame(prev, next) ? prev : next;
-      });
-      if (layout === 'bus' && sub === 'trips') {
-        setRoutes((prev) => {
-          const next = visibleRoutes();
-          return shallowSame(prev, next) ? prev : next;
-        });
-      }
-    };
-
-    // 首次載入
-    reloadAll();
-
-    // 監聽所有 cbl-*-refresh 事件, 任何資料同步完成都重新讀取
-    // 解決: 使用者進入頁面時 Supabase 同步可能尚未完成, STORAGE 為空,
-    // 等同步完成後 (syncFromSupabase dispatch events) 自動重新讀取,
-    // 不必手動按「重新整理」按鈕。
-    //
-    // 注意: 輪詢 fallback 已移除 — 之前每 150ms reloadAll 一次、
-    // 最多 5 秒, 每次都 set 新 array reference 觸發重 render,
-    // 這正是切頁時多閃 1~2 次的主因。STORAGE.isInitialized() 完成時
-    // 會 dispatch cbl-*-refresh, 只靠 event 就夠了。
-    const events = [
-      'cbl-drivers-refresh',
-      'cbl-buses-refresh',
-      'cbl-students-refresh',
-      'cbl-parents-refresh',
-      // 保姆事件有兩種拼法並存 → 兩種都要監聽, 否則收到一半的更新
-      'cbl-nannies-refresh',
-      'cbl-nannys-refresh',
-      'cbl-trips-refresh',
-      'cbl-routes-refresh',
-      'cbl-attendances-refresh',
-      'cbl-announcements-refresh',
-      'cbl-clients-refresh',
-      'cbl-users-refresh',
-    ];
-    events.forEach((ev) => window.addEventListener(ev, reloadAll));
-
-    return () => {
-      events.forEach((ev) => window.removeEventListener(ev, reloadAll));
-    };
-  }, [params?.layout, params?.sub, clientId, isSuperAdminSub]);
-
   const layout = (params?.layout as string) ?? '';
   const sub = (params?.sub as string) ?? '';
   const meta = getSubPageMeta(layout, sub);
 
+  /**
+   * 舊路徑相容 (2026-11): 班次群組的子頁搬到 /cbl-admin-setting/schedule/* 之後,
+   * 舊的 /cbl-admin-setting/bus/trips、/bus/drivers 統一導去新路徑,
+   * 避免使用者收藏的連結直接 404。
+   */
+  const legacyRedirect =
+    layout === 'bus' && sub === 'trips' ? '/cbl-admin-setting/schedule/routes'
+    : layout === 'bus' && sub === 'drivers' ? '/cbl-admin-setting/schedule/drivers'
+    : null;
+
+  useEffect(() => {
+    if (!legacyRedirect) return;
+    router.replace(legacyRedirect);
+  }, [legacyRedirect, router]);
+
   if (!user) return null;
+
+  if (legacyRedirect) return null;
 
   // 未匹配的 sub, 導回對應 group landing (或 overview)
   if (!meta) {
     const fallback =
-      layout === 'bus' ? '/cbl-admin-setting/bus/trips' :
+      layout === 'bus' ? '/cbl-admin-setting/schedule/routes' :
       layout === 'parents' ? '/cbl-admin-setting/parents' :
       '/cbl-admin-setting';
     if (typeof window !== 'undefined') router.replace(fallback);
     return null;
-  }
-
-  // ---- bus/trips: 自刻 console (OneFleet-style) ----
-  if (meta.customConsole && layout === 'bus' && sub === 'trips') {
-    return (
-      <TripsConsoleContent
-        routes={routes}
-        buses={buses}
-        drivers={drivers}
-        nannies={nannies}
-        students={students}
-      />
-    );
-  }
-
-  // ---- bus/drivers: 自刻 console (OneFleet-style) ----
-  if (meta.customConsole && layout === 'bus' && sub === 'drivers') {
-    return (
-      <DriversConsoleContent
-        drivers={drivers}
-        buses={buses}
-      />
-    );
   }
 
   return (
@@ -406,7 +204,10 @@ export default function CblAdminSubPage() {
         </div>
       </div>
 
-      {/* Coming-soon banner */}
+      {/* Coming-soon banner
+          ⚠️ 2026-11: 付款記錄頁的coming-soon 狀態同時是「繳費公告」的依賴 ——
+             繳費公告的內容 / 類型 / 有效期 / 提醒次數都要由這頁的付款資料帶出。
+             所以這裡寫清楚「開發中」而不是「即將推出」。 */}
       {meta.comingSoon && (
         <div className="rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 p-5">
           <div className="flex items-start gap-3">
@@ -414,10 +215,21 @@ export default function CblAdminSubPage() {
               <Clock className="w-5 h-5 text-amber-600" />
             </div>
             <div className="flex-1">
-              <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-200">即將推出</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold text-amber-800 dark:text-amber-200">開發中</h3>
+                <span className="inline-flex items-center gap-1 rounded-md bg-amber-200/70 dark:bg-amber-900/60 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wide text-amber-900 dark:text-amber-200">
+                  <Clock className="w-2.5 h-2.5" />
+                  Coming Soon
+                </span>
+              </div>
               <p className="text-xs text-amber-700/80 dark:text-amber-300/80 mt-1">
                 這個頁面的完整 CRUD 介面、資料表格、批次操作以及匯出功能會在後續版本上線。
                 目前先保留路由與 menu 結構以便日後無縫補上實作。
+              </p>
+              <p className="text-xs text-amber-700/80 dark:text-amber-300/80 mt-1.5">
+                <span className="font-semibold">繳費公告</span>
+                的內容、類型、有效期與提醒次數會自動由這個頁面的付款資料帶出 ——
+                在此功能完成前, 繳費公告只顯示「標題 + 指定家長」。
               </p>
               <div className="mt-3 flex items-center gap-2">
                 <Link

@@ -104,10 +104,25 @@ export function useAuth() {
     }
     STORAGE.auth.set(found);
     setUser(found);
+    try {
+      import('./admin-audit').then(({ startSession, logAction }) => {
+        startSession(found.id, found.name, found.role);
+        logAction('login', `${found.name} 登入 (${found.role})`);
+      }).catch(() => {});
+    } catch { /* ignore */ }
     return { ok: true, user: found };
   }, []);
 
   const logout = useCallback(() => {
+    try {
+      const cur = STORAGE.auth.get();
+      if (cur) {
+        import('./admin-audit').then(({ endSession, logAction }) => {
+          endSession(cur.id);
+          logAction('logout', `${cur.name} 登出`);
+        }).catch(() => {});
+      }
+    } catch { /* ignore */ }
     STORAGE.auth.clear();
     setUser(null);
     // 清除後立即跳轉到登入頁，避免等待 useEffect 觸發

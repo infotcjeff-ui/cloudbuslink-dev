@@ -17,6 +17,14 @@ import { SegmentedControl } from '@/components/trips/segmented-control';
 import { TripCard } from '@/components/trips/trip-card';
 import { TripFab } from '@/components/trips/trip-fab';
 import { MotionList } from '@/components/trips/motion-list';
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from '@/components/ui/empty';
 import { DUR, EASE_OUT_QUART } from '@/lib/motion';
 
 export default function TripsPage() {
@@ -261,32 +269,36 @@ function TripsPageInner() {
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: DUR.slow, ease: EASE_OUT_QUART }}
-          className="flex flex-col items-center justify-center py-16 text-center"
         >
-          <div className="relative w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mb-3">
-            <CalendarDays className="w-6 h-6 text-primary" />
-            <motion.span
-              aria-hidden
-              className="absolute inset-0 rounded-full bg-primary/20"
-              animate={{ scale: [1, 1.3, 1], opacity: [0.4, 0, 0.4] }}
-              transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
-            />
-          </div>
-          <p className="text-sm font-medium">當日沒有班次</p>
-          <p className="text-xs text-muted-foreground mt-1">
-            {tab === 'all' ? '試試切換日期或新增一個班次' : '此類型當日尚無資料'}
-          </p>
-          {canCreate && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="mt-4 h-9"
-              onClick={() => router.push('/trips/new')}
-            >
-              <Plus className="w-4 h-4" />
-              新增班次
-            </Button>
-          )}
+          <Empty className="border-0 bg-transparent py-10">
+            <EmptyHeader>
+              <EmptyMedia variant="icon" className="relative">
+                <CalendarDays className="w-6 h-6" />
+                <motion.span
+                  aria-hidden
+                  className="absolute inset-0 rounded-full bg-primary/20"
+                  animate={{ scale: [1, 1.3, 1], opacity: [0.4, 0, 0.4] }}
+                  transition={{ duration: 2.4, repeat: Infinity, ease: 'easeInOut' }}
+                />
+              </EmptyMedia>
+              <EmptyTitle>當日沒有班次</EmptyTitle>
+              <EmptyDescription>
+                {tab === 'all' ? '試試切換日期或新增一個班次' : '此類型當日尚無資料'}
+              </EmptyDescription>
+            </EmptyHeader>
+            {canCreate && (
+              <EmptyContent>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => router.push('/trips/new')}
+                >
+                  <Plus className="w-4 h-4" />
+                  新增班次
+                </Button>
+              </EmptyContent>
+            )}
+          </Empty>
         </motion.div>
       ) : (
         <MotionList
