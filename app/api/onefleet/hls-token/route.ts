@@ -45,8 +45,8 @@ export async function POST(req: NextRequest) {
       devId?: string;
     };
     const { endpoint, plate, devId } = body;
-    const { getServerSecrets } = await import('@/lib/server-secrets');
-    const srv = getServerSecrets();
+    const { getServerSecretsAsync } = await import('@/lib/server-secrets');
+    const srv = await getServerSecretsAsync();
     const account = srv.gpsAccount.trim();
     const password = srv.gpsPassword || '';
     if (!account || !password) {

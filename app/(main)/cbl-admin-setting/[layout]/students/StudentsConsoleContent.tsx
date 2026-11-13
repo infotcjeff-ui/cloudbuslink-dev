@@ -403,6 +403,7 @@ export function StudentsConsoleContent({
       mode: 'edit',
       initial: {
         name: s.name,
+        nameEn: s.nameEn ?? '',
         classNumber: s.classNumber,
         phone: s.phone ?? '',
         gender: s.gender ?? 'male',
@@ -448,6 +449,7 @@ export function StudentsConsoleContent({
             // 跨學年識別碼 — 下一學年複製這筆學生時會沿用同一值
             personKey: generatePersonKey(authClientId),
             name: state.name.trim(),
+            nameEn: state.nameEn.trim() || null,
             classNumber: state.classNumber.trim(),
             phone: state.phone.trim() || null,
             photo: null,
@@ -482,6 +484,7 @@ export function StudentsConsoleContent({
           const { STORAGE } = await import('@/lib/storage');
           const updates = {
             name: state.name.trim(),
+            nameEn: state.nameEn.trim() || null,
             classNumber: state.classNumber.trim(),
             phone: state.phone.trim() || null,
             gender: state.gender,

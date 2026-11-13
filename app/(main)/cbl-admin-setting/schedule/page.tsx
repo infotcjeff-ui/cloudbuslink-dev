@@ -138,8 +138,14 @@ export default function CblAdminSchedulePage() {
         'cbl-trips-refresh', 'cbl-buses-refresh', 'cbl-drivers-refresh',
         'cbl-nannies-refresh', 'cbl-nannys-refresh', 'cbl-students-refresh',
         'cbl-routes-refresh', 'cbl-attendance-refresh',
+        'cbl-users-refresh',
       ].forEach((e) => window.dispatchEvent(new CustomEvent(e)));
-      toast('success', `已生成測試資料：${res.trips} 班 / 校巴 ${res.buses} / 學生 ${res.students} / 打卡 ${res.attendances}（只存本機）`);
+      // 把登入帳號直接回報給測試者 — 免得還要去 localStorage 翻
+      const acc = res.accounts[0];
+      const accLine = acc
+        ? `　登入：/nannyloginportal 帳號 ${acc.accountName}（密碼 = 電話 ${acc.phone}）`
+        : '';
+      toast('success', `已生成測試資料：${res.trips} 班 / 校巴 ${res.buses} / 學生 ${res.students} / 打卡 ${res.attendances}（只存本機）${accLine}`);
     } catch (err) {
       console.error('[Schedule] seed test data error:', err);
       toast('error', `生成失敗：${err instanceof Error ? err.message : String(err)}`);
@@ -160,6 +166,7 @@ export default function CblAdminSchedulePage() {
         'cbl-trips-refresh', 'cbl-buses-refresh', 'cbl-drivers-refresh',
         'cbl-nannies-refresh', 'cbl-nannys-refresh', 'cbl-students-refresh',
         'cbl-routes-refresh', 'cbl-attendance-refresh',
+        'cbl-users-refresh',
       ].forEach((e) => window.dispatchEvent(new CustomEvent(e)));
       toast(removed > 0 ? 'success' : 'info', removed > 0 ? `已移除測試資料：${trips} 班，共 ${removed} 筆` : '目前沒有測試資料可移除');
     } catch (err) {

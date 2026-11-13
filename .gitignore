@@ -35,6 +35,9 @@ cdp-screenshot.png
 # local env files
 .env*.local
 
+# server-only 密鑰 (本機兜底; Vercel ephemeral, 正式持久化在 Supabase cbl_server_secrets)
+/data/
+
 # vercel
 .vercel
 

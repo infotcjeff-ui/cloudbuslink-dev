@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSecretsStatus, setServerSecrets } from '@/lib/server-secrets';
+import { getSecretsStatusAsync, setServerSecretsAsync, getServerSecretsAsync } from '@/lib/server-secrets';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
   if (denied) return denied;
   try {
     return NextResponse.json(
-      { ok: true, ...getSecretsStatus() },
+      { ok: true, ...(await getSecretsStatusAsync()) },
       { headers: { 'Cache-Control': 'no-store' } },
     );
   } catch (e) {
@@ -50,8 +50,7 @@ export async function POST(req: NextRequest) {
     };
     // 按需解密查看: 只回請求的那一個欄位明文, 並寫 server log 備查
     if (body.reveal) {
-      const { getServerSecrets: getSecrets } = await import('@/lib/server-secrets');
-      const s = getSecrets();
+      const s = await getServerSecretsAsync();
       const value =
         body.reveal === 'password' ? s.gpsPassword
         : body.reveal === 'apiKey' ? s.gpsApiKey
@@ -92,10 +91,9 @@ export async function POST(req: NextRequest) {
     if (typeof body.endpoint === 'string' && body.endpoint.trim()) {
       patch.gpsEndpoint = body.endpoint.trim();
     }
-    setServerSecrets(patch);
+    await setServerSecretsAsync(patch);
     // 回傳狀態 (遮罩), 不回明文
-    const { getSecretsStatus: status } = await import('@/lib/server-secrets');
-    return NextResponse.json({ ok: true, ...status() });
+    return NextResponse.json({ ok: true, ...(await getSecretsStatusAsync()) });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },

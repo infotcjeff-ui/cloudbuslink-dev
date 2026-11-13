@@ -22,6 +22,7 @@
 
 import { STORAGE } from './storage';
 import { addDaysIso, todayIso } from '@/app/(main)/cbl-admin-setting/schedule/scheduleUtils';
+import { SEED_PREFIX, isSeedId } from './seed-ids';
 import type {
   Bus,
   Driver,
@@ -34,9 +35,10 @@ import type {
   TripType,
   Attendance,
   Waypoint,
+  User,
 } from './types';
 
-const PREFIX = 'seed-';
+const PREFIX = SEED_PREFIX;
 const LEGACY_PREFIX = 'test-';
 const BATCH_KEY = 'cbl_seed_schedule_batch_no';
 
@@ -151,6 +153,8 @@ export interface SeedResult {
   parents: number;
   routes: number;
   attendances: number;
+  /** 測試登入帳號 (只存在本機) — 供 toast 直接顯示帳號/密碼給測試者 */
+  accounts: { accountName: string; phone: string; password: string; name: string }[];
 }
 
 /**
@@ -193,14 +197,18 @@ export function seedScheduleTestData(clientId: string, academicYear: string): Se
     model: `${pick(BUS_BRANDS)} (測${batch})`,
     capacity: randInt(5, 8), driverId: driverB.id, gpsDeviceId: null, status: 'active', createdAt: now,
   };
+  // 測試保姆的登入帳戶名稱 (URL-safe, 在同一 tenant 內唯一)
+  // → 讓測試者可以用「帳戶名稱」或「電話」兩種方式登入保姆入口
+  const nannyAccountA = `seed-nanny-a-${tag.toLowerCase()}`;
+  const nannyAccountB = `seed-nanny-b-${tag.toLowerCase()}`;
   const nannyA: Nanny = {
     id: `${PREFIX}nny-a-${tag}`, clientId, name: uniqueName(usedNames), phone: uniquePhone(takenPhones),
-    employeeId: `SEED-EMP-A${tag}`, photo: null, assignedBusIds: [busA.id],
+    employeeId: `SEED-EMP-A${tag}`, accountName: nannyAccountA, photo: null, assignedBusIds: [busA.id],
     status: 'active', createdAt: now,
   };
   const nannyB: Nanny = {
     id: `${PREFIX}nny-b-${tag}`, clientId, name: uniqueName(usedNames), phone: uniquePhone(takenPhones),
-    employeeId: `SEED-EMP-B${tag}`, photo: null, assignedBusIds: [busB.id],
+    employeeId: `SEED-EMP-B${tag}`, accountName: nannyAccountB, photo: null, assignedBusIds: [busB.id],
     status: 'active', createdAt: now,
   };
   STORAGE.drivers.add(driverA);
@@ -209,6 +217,35 @@ export function seedScheduleTestData(clientId: string, academicYear: string): Se
   STORAGE.buses.add(busB);
   STORAGE.nannies.add(nannyA);
   STORAGE.nannies.add(nannyB);
+
+  /* ---------- 登入帳號 (只寫 localStorage, 永不推雲端) ----------
+   *
+   * 為什麼需要這一段:
+   *   測試者要用「測試帳戶」登入保姆入口 → 必須在 cbl_users 有對應帳號。
+   *   但正常新增保姆的流程會把帳號 push 到 Supabase (cbl_users) →
+   *   測試帳號會污染後台、也會被雲端同步洗掉。
+   *   → 這裡只寫 localStorage, 且 id 用 seed- 前綴 → 移除時一併刪掉。
+   *
+   * 密碼: 與「新增保姆」預設一致 (電話號碼), 見 lib/auth-lookup.ts 的
+   *        rebuildUserFromNanny (自癒層也用電話當預設密碼)。
+   */
+  const seedUsers: User[] = [
+    {
+      id: `${PREFIX}usr-a-${tag}`, phone: nannyA.phone, accountName: nannyAccountA,
+      password: nannyA.phone, role: 'nanny', name: nannyA.name,
+      clientId, status: 'active', createdAt: now,
+    },
+    {
+      id: `${PREFIX}usr-b-${tag}`, phone: nannyB.phone, accountName: nannyAccountB,
+      password: nannyB.phone, role: 'nanny', name: nannyB.name,
+      clientId, status: 'active', createdAt: now,
+    },
+  ];
+  seedUsers.forEach((u) => {
+    // 電話已被真實帳號佔用 → 不覆蓋 (避免把真實帳號的密碼改掉)
+    if (STORAGE.users.findByPhone(u.phone)) return;
+    STORAGE.users.add(u);
+  });
 
   /* ---------- 學生 + 家長 (1 對 1, 人名/電話/站點全部隨機) ---------- */
   const school = pick(SCHOOL_NAMES);
@@ -387,10 +424,14 @@ export function seedScheduleTestData(clientId: string, academicYear: string): Se
   return {
     trips: specs.length, buses: 2, drivers: 2, nannies: 2,
     students: students.length, parents: 12, routes: 1, attendances: attendanceCount,
+    accounts: [
+      { accountName: nannyAccountA, phone: nannyA.phone, password: nannyA.phone, name: nannyA.name },
+      { accountName: nannyAccountB, phone: nannyB.phone, password: nannyB.phone, name: nannyB.name },
+    ],
   };
 }
 
-const startsSeed = (id: string) => id.startsWith(PREFIX) || id.startsWith(LEGACY_PREFIX);
+const startsSeed = (id: string) => isSeedId(id);
 
 /** 一鍵移除測試資料 — 只刪種子前綴 (含舊 test-), 回傳實際刪除筆數 */
 export function removeScheduleTestData(): { removed: number; trips: number } {
@@ -429,6 +470,21 @@ export function removeScheduleTestData(): { removed: number; trips: number } {
     STORAGE.nannies.getAll().filter((n) => startsTest(n.id)).forEach((n) => {
       try { STORAGE.nannies.remove(n.id); removed++; } catch { /* ignore */ }
     });
+    // 測試登入帳號 (seed- 前綴) — 不刪的話帳號會留在本機, 登入後看到空班次
+    STORAGE.users.getAll().filter((u) => startsTest(u.id)).forEach((u) => {
+      try {
+        STORAGE.users.remove(u.id);
+        STORAGE.userFeaturePermissions.remove(u.id);
+        removed++;
+      } catch { /* ignore */ }
+    });
+    // 若目前登入的就是測試帳號 → 清掉 session, 避免殘留登入狀態
+    try {
+      const auth = STORAGE.auth.get();
+      if (auth && startsTest(auth.id)) {
+        STORAGE.auth.clear();
+      }
+    } catch { /* ignore */ }
     // 真實保姆若綁了測試校巴 → 解綁 (避免殘留壞引用)
     if (testBusIds.size > 0) {
       STORAGE.nannies.getAll().forEach((n) => {

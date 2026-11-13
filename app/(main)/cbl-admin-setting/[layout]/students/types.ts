@@ -8,6 +8,8 @@ export type StudentTab = 'active' | 'unassigned' | 'graduated';
 
 export interface StudentFormState {
   name: string;
+  /** 英文姓名 — 學生摘要 Student Summary 報表用; '' 表示未填 */
+  nameEn: string;
   classNumber: string;
   phone: string;
   gender: StudentGender;
@@ -30,6 +32,7 @@ export interface StudentFormState {
 
 export const EMPTY_STUDENT_FORM: StudentFormState = {
   name: '',
+  nameEn: '',
   classNumber: '',
   phone: '',
   gender: 'male',

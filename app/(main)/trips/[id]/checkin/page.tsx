@@ -16,6 +16,7 @@ import { MotionList } from '@/components/trips/motion-list';
 import { STORAGE } from '@/lib/storage';
 import { useAuth } from '@/lib/hooks';
 import { getResumeWaypointIndex } from '@/lib/nanny-trips';
+import { isSeedId } from '@/lib/seed-ids';
 import { nannyHomePath } from '@/lib/nanny-path';
 import {
   cn, currentTimeStamp, fmtTime, isLate, waypointTypeLabel,
@@ -119,7 +120,13 @@ export default function CheckinPage() {
   };
 
   // 打卡寫入雲端 (背景, 不阻擋 UI — bug 3: 只寫 localStorage 會被下次 sync 蓋掉)
+  //
+  // ⚠️ 測試種子班次 (seed- 前綴) 只存在於 localStorage, 絕不能推上雲端:
+  //    - cbl_trips.update 會回「雲端找不到這筆資料」(這筆從未 insert)
+  //    - cbl_attendances.upsert 會撞 FK (trip_id / student_id 不存在於雲端)
+  //    - 若哪天補推上去, 後台就會出現一整批假班次 + 假打卡
   const pushAttendanceToCloud = (attendance: Attendance) => {
+    if (isSeedId(attendance.tripId)) return;
     void (async () => {
       try {
         const { supabaseAttendances } = await import('@/lib/supabase-attendances');
@@ -133,6 +140,7 @@ export default function CheckinPage() {
 
   // 站點完成 / 班次完成也要推雲端 (否則 waypoint status 只存本機, listing 進度永遠 0)
   const pushTripToCloud = (tripId: string) => {
+    if (isSeedId(tripId)) return;
     void (async () => {
       try {
         const updated = STORAGE.trips.getById(tripId);
@@ -232,6 +240,8 @@ export default function CheckinPage() {
     if (!trip || !currentWaypoint) return;
     const tripId = trip.id;
     const waypointId = currentWaypoint.id;
+    // 測試種子班次從未推上雲端 → 不需要 (也不能) 刪雲端資料
+    if (isSeedId(tripId)) return;
     void (async () => {
       try {
         const { supabaseAttendances } = await import('@/lib/supabase-attendances');
@@ -287,6 +297,12 @@ export default function CheckinPage() {
     STORAGE.attendances.setAll(all);
     const tripId = trip.id;
     const waypointId = currentWaypoint.id;
+    // 測試種子班次從未推上雲端 → 不需要 (也不能) 刪雲端資料
+    if (isSeedId(tripId)) {
+      refreshAttendances(trip.id);
+      setUnmarkAllConfirm(false);
+      return;
+    }
     void (async () => {
       try {
         const { supabaseAttendances } = await import('@/lib/supabase-attendances');

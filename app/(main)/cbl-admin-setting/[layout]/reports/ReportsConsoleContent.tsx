@@ -28,13 +28,34 @@ import {
   Inbox,
   Calendar,
   Bus as BusIcon,
+  Eye,
+  Trash2,
+  FileDown,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { filterByAcademicYear } from '@/lib/academic-year';
 import { useAcademicYear } from '../../AcademicYearProvider';
 import { useToast } from '@/components/ui/toast';
 import { STORAGE } from '@/lib/storage';
-import { fmtDate, boardingStatusLabel, dropoffStatusLabel, today } from '@/lib/utils';
+import { useAuth } from '@/lib/hooks';
+import { fmtDate, today } from '@/lib/utils';
+import {
+  buildSummaryRows,
+  rowToCells,
+  summaryFileName,
+  SUMMARY_HEADERS,
+  SUMMARY_COL_WIDTHS,
+  type StudentSummaryRow,
+} from '@/lib/student-summary';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   DataTable,
   createSelectColumn,
@@ -69,7 +90,6 @@ import type {
   Bus,
   PaymentRecord,
   PaymentStatus,
-  Parent,
 } from '@/lib/types';
 
 /* -------------------------------------------------------------------------- */
@@ -217,6 +237,20 @@ export function ReportsConsoleContent({
   const [payments, setPayments] = React.useState<PaymentRecord[]>([]);
   const [buses, setBuses] = React.useState<Bus[]>([]);
 
+  /* -------- 查看 popup (班次學生摘要) -------- */
+  const [viewTrip, setViewTrip] = React.useState<Trip | null>(null);
+  const [viewRows, setViewRows] = React.useState<StudentSummaryRow[]>([]);
+  const [viewPdfLoading, setViewPdfLoading] = React.useState(false);
+
+  /* -------- 刪除班次 -------- */
+  const [deleteTarget, setDeleteTarget] = React.useState<Trip | null>(null);
+  const [deleting, setDeleting] = React.useState(false);
+
+  /* -------- 權限: 只有系統開發者 / 系統管理員可刪除 -------- */
+  const { user } = useAuth();
+  const canDeleteTrip =
+    user?.role === 'system_admin' || user?.role === 'super_admin';
+
   // DataTable 多選 ids
   const [selectedTripIds, setSelectedTripIds] = React.useState<string[]>([]);
   const [selectedPaymentIds, setSelectedPaymentIds] = React.useState<string[]>([]);
@@ -333,6 +367,49 @@ export function ReportsConsoleContent({
   const accent = TAB_ACCENT[tab];
   const hasPaymentSelection = selectedPaymentIds.length > 0;
 
+  /* ---------------------------------------------------------------------- */
+  /*  查看 popup — 該班次的學生摘要 (可下載 PDF)                               */
+  /* ---------------------------------------------------------------------- */
+  /* 註: 必須宣告喺 tripColumns 之前 — tripColumns 的 useMemo 依賴 openViewTrip,
+      若喺後面先宣告會觸發 TDZ (Block-scoped variable used before its declaration)。 */
+
+  const collectSummarySource = React.useCallback(
+    (targetTrips: Trip[]) => {
+      const allStudents = isSuperAdmin
+        ? STORAGE.students.getAll()
+        : STORAGE.students.getByClient(clientId);
+      const allParents = isSuperAdmin
+        ? STORAGE.parents.getAll()
+        : STORAGE.parents.getByClient(clientId);
+
+      const attendancesByTrip = new Map<
+        string,
+        ReturnType<typeof STORAGE.attendances.getByTrip>
+      >();
+      targetTrips.forEach((t) => {
+        attendancesByTrip.set(t.id, STORAGE.attendances.getByTrip(t.id));
+      });
+
+      return { students: allStudents, parents: allParents, attendancesByTrip };
+    },
+    [clientId, isSuperAdmin],
+  );
+
+  const buildRowsForTrips = React.useCallback(
+    (targetTrips: Trip[]): StudentSummaryRow[] =>
+      buildSummaryRows(targetTrips, collectSummarySource(targetTrips)),
+    [collectSummarySource],
+  );
+
+  const openViewTrip = React.useCallback(
+    (trip: Trip) => {
+      const rows = buildRowsForTrips([trip]);
+      setViewRows(rows);
+      setViewTrip(trip);
+    },
+    [buildRowsForTrips],
+  );
+
   /* -------- DataTable columns -------- */
   const tripColumns = React.useMemo<ColumnDef<DataTableFeatures, Trip>[]>(
     () => [
@@ -386,8 +463,43 @@ export function ReportsConsoleContent({
         accessorFn: (row) => row.status,
         cell: ({ row }) => tripStatusPill(row.original.status),
       },
+      {
+        id: 'actions',
+        header: '操作',
+        accessorFn: () => null,
+        cell: ({ row }) => (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="ghost"
+              size="sm"
+              startIcon={<Eye width={12} height={12} />}
+              onClick={() => openViewTrip(row.original)}
+              title="查看該班次的學生摘要"
+            >
+              查看
+            </Button>
+            {canDeleteTrip && (
+              <Button
+                variant="ghost"
+                size="sm"
+                startIcon={<Trash2 width={12} height={12} />}
+                onClick={() => setDeleteTarget(row.original)}
+                disabled={yearReadOnly}
+                title={
+                  yearReadOnly
+                    ? '封存學年為唯讀, 不能刪除'
+                    : '刪除該班次'
+                }
+                className="text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-950/40"
+              >
+                刪除
+              </Button>
+            )}
+          </div>
+        ),
+      },
     ],
-    [buses],
+    [buses, openViewTrip, canDeleteTrip, yearReadOnly],
   );
 
   const paymentColumns = React.useMemo<ColumnDef<DataTableFeatures, PaymentRecord>[]>(
@@ -556,7 +668,7 @@ export function ReportsConsoleContent({
     toast.success(`已向 ${ids.length} 位家長發送繳費通知`);
   }, [selectedPaymentIds, guardReadOnly, reloadPayments, toast]);
 
-  /* -------- 匯出 Excel -------- */
+  /* -------- 匯出 Excel (單日所有班次整合成一份 Student Summary) -------- */
   const handleExportExcel = React.useCallback(() => {
     if (filteredTrips.length === 0 && filteredPayments.length === 0) return;
     setExporting(true);
@@ -564,57 +676,23 @@ export function ReportsConsoleContent({
       const settings = clientId
         ? STORAGE.settings.getByClient(clientId)
         : STORAGE.settings.default('');
-      const rows: Record<string, string>[] = [];
-      filteredTrips.forEach((trip) => {
-        const bus = STORAGE.buses.getById(trip.busId);
-        const driver = bus?.driverId ? STORAGE.drivers.getById(bus.driverId) : null;
-        const nanny = STORAGE.nannies.getById(trip.nannyId);
-        const attendances = STORAGE.attendances.getByTrip(trip.id);
-        trip.waypoints.forEach((wp, wpIdx) => {
-          wp.studentIds.forEach((sid) => {
-            const student = STORAGE.students.getById(sid);
-            if (!student) return;
-            const att = attendances.find(
-              (a) => a.studentId === sid && a.waypointId === wp.id,
-            );
-            const parent: Parent | undefined = student.parentIds[0]
-              ? STORAGE.parents.getById(student.parentIds[0])
-              : undefined;
-            rows.push({
-              '日期': trip.date,
-              '學年': settings.academicYear,
-              '班次類型': trip.type === 'morning' ? '上午班' : trip.type === 'afternoon' ? '下午班' : '自訂',
-              '校巴車牌': bus?.plateNumber || '',
-              '司機': driver?.name || '',
-              '保姆': nanny?.name || '',
-              '站點順序': String(wpIdx + 1),
-              '站點名稱': wp.location.name,
-              '站點類型': wp.type === 'pickup' ? '上車' : '下車',
-              '計劃時間': wp.scheduledTime,
-              '實際時間': wp.actualTime || '',
-              '學生編號': student.studentId,
-              '學生姓名': student.name,
-              '班別': student.classNumber,
-              '上車時間': att?.boardingTime || '',
-              '上車狀態': att?.boardingStatus ? boardingStatusLabel(att.boardingStatus) : '',
-              '上車備註': att?.notes || '',
-              '下車時間': att?.dropoffTime || '',
-              '下車狀態': att?.dropoffStatus ? dropoffStatusLabel(att.dropoffStatus) : '',
-              '家長姓名': parent?.name || '',
-              '家長電話': parent?.phone || '',
-            });
-          });
-        });
-      });
 
       const wb = XLSX.utils.book_new();
-      if (rows.length > 0) {
-        const ws = XLSX.utils.json_to_sheet(rows);
-        ws['!cols'] = [{ wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 12 }];
-        XLSX.utils.book_append_sheet(wb, ws, '行程報表');
+
+      /* --- Sheet 1: 學生摘要 (依 Student Summary.xlsx 欄位格式) --- */
+      const summaryRows = buildRowsForTrips(filteredTrips);
+      if (summaryRows.length > 0) {
+        // 第一列 = 模板表頭 (A–S), 內容列 = 學生摘要
+        const aoa: (string | number)[][] = [
+          Array.from(SUMMARY_HEADERS),
+          ...summaryRows.map((r) => rowToCells(r)),
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        ws['!cols'] = SUMMARY_COL_WIDTHS.map((wch) => ({ wch }));
+        XLSX.utils.book_append_sheet(wb, ws, '學生摘要');
       }
 
-      // 學生出席統計
+      /* --- Sheet 2: 學生出席統計 --- */
       const studentStats = new Map<string, Record<string, string | number>>();
       filteredTrips.forEach((trip) => {
         const attendances = STORAGE.attendances.getByTrip(trip.id);
@@ -659,6 +737,7 @@ export function ReportsConsoleContent({
         XLSX.utils.book_append_sheet(wb, ws2, '學生出席統計');
       }
 
+      /* --- Sheet 3: 付款記錄 --- */
       if (filteredPayments.length > 0) {
         const paymentRows = filteredPayments.map((p) => ({
           '期數': p.period,
@@ -676,12 +755,122 @@ export function ReportsConsoleContent({
         XLSX.utils.book_append_sheet(wb, ws3, '付款記錄');
       }
 
-      XLSX.writeFile(wb, `CloudBusLink_行程報表_${dateFrom}_${dateTo}.xlsx`);
-      toast.success('Excel 報表已匯出');
+      // 檔名: 單日 + 學年 (一天所有班次整合成一份)
+      XLSX.writeFile(
+        wb,
+        summaryFileName(dateFrom, settings.academicYear || selectedYear),
+      );
+      toast.success(`Excel 報表已匯出（${filteredTrips.length} 班次整合）`);
     } finally {
       setExporting(false);
     }
-  }, [filteredTrips, filteredPayments, dateFrom, dateTo, clientId, toast]);
+  }, [
+    filteredTrips,
+    filteredPayments,
+    dateFrom,
+    clientId,
+    selectedYear,
+    buildRowsForTrips,
+    toast,
+  ]);
+
+  /* ---------------------------------------------------------------------- */
+  /*  查看 popup — 該班次的學生摘要 (可下載 PDF)                               */
+  /*  (openViewTrip 已宣告喺上方 tripColumns 之前, 避免 TDZ)                  */
+  /* ---------------------------------------------------------------------- */
+
+  const closeViewTrip = React.useCallback(() => {
+    setViewTrip(null);
+    setViewRows([]);
+  }, []);
+
+  const handleDownloadPdf = React.useCallback(async () => {
+    if (!viewTrip) return;
+    setViewPdfLoading(true);
+    try {
+      const { downloadSummaryPdf } = await import('@/lib/student-summary-pdf');
+      const settings = clientId
+        ? STORAGE.settings.getByClient(clientId)
+        : STORAGE.settings.default('');
+      const bus = STORAGE.buses.getById(viewTrip.busId);
+      const typeLabel =
+        viewTrip.type === 'morning'
+          ? '上午班'
+          : viewTrip.type === 'afternoon'
+            ? '下午班'
+            : viewTrip.customTypeLabel || '自訂';
+
+      await downloadSummaryPdf(viewRows, {
+        fileName: `StudentSummary_${viewTrip.date}_${viewTrip.plannedStartTime.replace(':', '')}`,
+        subtitle: [
+          `日期 ${viewTrip.date}`,
+          `班次 ${typeLabel}`,
+          `車牌 ${bus?.plateNumber || '—'}`,
+          `學年 ${settings.academicYear || selectedYear || '—'}`,
+          `學生 ${viewRows.length} 人`,
+        ].join('  |  '),
+      });
+      toast.success('PDF 已下載');
+    } catch (e) {
+      console.warn('[Reports] PDF export failed:', e);
+      toast.error('PDF 下載失敗，請稍後再試');
+    } finally {
+      setViewPdfLoading(false);
+    }
+  }, [viewTrip, viewRows, clientId, selectedYear, toast]);
+
+  /* ---------------------------------------------------------------------- */
+  /*  刪除班次 (僅系統開發者 / 系統管理員)                                    */
+  /* ---------------------------------------------------------------------- */
+
+  const handleDeleteTrip = React.useCallback(async () => {
+    if (!deleteTarget) return;
+    if (!canDeleteTrip) {
+      toast.error('只有系統開發者或系統管理員可以刪除班次');
+      return;
+    }
+    if (guardReadOnly()) return;
+
+    setDeleting(true);
+    const tripId = deleteTarget.id;
+    try {
+      // 本機: 刪除班次 + 該班次的出席記錄
+      STORAGE.trips.remove(tripId);
+      const remaining = STORAGE.attendances
+        .getAll()
+        .filter((a) => a.tripId !== tripId);
+      STORAGE.attendances.setAll(remaining);
+
+      // 雲端: 級聯刪除 attendances → trips
+      try {
+        const { supabaseAttendances } = await import('@/lib/supabase-attendances');
+        const { supabaseTrips } = await import('@/lib/supabase-trips');
+        const attRes = await supabaseAttendances.deleteByTrip(tripId);
+        if (!attRes.success) {
+          console.warn('[Reports] delete attendances failed:', attRes.error);
+        }
+        const tripRes = await supabaseTrips.delete(tripId);
+        if (!tripRes.success) {
+          console.warn('[Reports] delete trip failed:', tripRes.error);
+          toast.warning('班次已在本機刪除，但雲端同步失敗');
+        }
+      } catch (e) {
+        console.warn('[Reports] delete cloud sync error:', e);
+        toast.warning('班次已在本機刪除，但雲端同步失敗');
+      }
+
+      // 從列表移除並關閉確認框
+      setTrips((prev) => prev.filter((t) => t.id !== tripId));
+      setSelectedTripIds((prev) => prev.filter((id) => id !== tripId));
+      setDeleteTarget(null);
+      toast.success('班次已刪除');
+    } catch (e) {
+      console.warn('[Reports] delete trip error:', e);
+      toast.error('刪除班次失敗，請稍後再試');
+    } finally {
+      setDeleting(false);
+    }
+  }, [deleteTarget, canDeleteTrip, guardReadOnly, toast]);
 
   /* -------- Render -------- */
   const listCount = tab === 'trips' ? filteredTrips.length : filteredPayments.length;
@@ -790,7 +979,7 @@ export function ReportsConsoleContent({
           onClick={handleExportExcel}
           isLoading={exporting}
           disabled={filteredTrips.length === 0 && filteredPayments.length === 0}
-          title="匯出為 Excel（含行程 + 出席 + 付款三個 sheet）"
+          title="匯出為 Excel（學生摘要 + 學生出席統計 + 付款記錄三個 sheet；學生摘要為所選日期內所有班次整合）"
         >
           匯出 Excel ({filteredTrips.length + filteredPayments.length})
         </Button>
@@ -1024,11 +1213,131 @@ export function ReportsConsoleContent({
                 : `${paymentStats.paid} 已付 · 待繳 $${paymentStats.pendingAmount.toLocaleString('zh-HK')}`}
             </span>
             <span className="text-[10px] text-slate-400">
-              報表包含：行程詳細記錄 + 學生出席統計 + 付款記錄
+              報表包含：學生摘要 + 學生出席統計 + 付款記錄
             </span>
           </div>
         )}
       </Card>
+
+      {/* ---------------------------------------------------------------- */}
+      {/*  查看 popup — 該班次的學生摘要 (表格 + 下載 PDF)                   */}
+      {/* ---------------------------------------------------------------- */}
+      <Dialog
+        open={!!viewTrip}
+        onOpenChange={(open) => {
+          if (!open) closeViewTrip();
+        }}
+      >
+        <DialogContent className="max-w-[calc(100vw-2rem)] !grid !grid-rows-[auto_minmax(0,1fr)_auto] rounded-2xl p-0 max-h-[88vh] overflow-hidden">
+          <DialogHeader className="px-6 pt-5 pb-3">
+            <DialogTitle className="text-base">學生摘要</DialogTitle>
+            <DialogDescription className="text-xs">
+              {viewTrip
+                ? [
+                    `日期 ${viewTrip.date}`,
+                    `班次 ${
+                      viewTrip.type === 'morning'
+                        ? '上午班'
+                        : viewTrip.type === 'afternoon'
+                          ? '下午班'
+                          : viewTrip.customTypeLabel || '自訂'
+                    }`,
+                    `車牌 ${
+                      STORAGE.buses.getById(viewTrip.busId)?.plateNumber || '—'
+                    }`,
+                    `${viewRows.length} 位學生`,
+                  ].join(' · ')
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 min-h-0 overflow-auto px-6 pb-2">
+            {viewRows.length > 0 ? (
+              <table className="w-full text-[11px] border-collapse">
+                <thead className="sticky top-0 bg-white dark:bg-slate-900 z-10">
+                  <tr className="border-b border-slate-200 dark:border-slate-700">
+                    {SUMMARY_HEADERS.map((h, i) => (
+                      <th
+                        key={`${h}-${i}`}
+                        className="px-2 py-2 text-left font-semibold text-slate-600 whitespace-nowrap dark:text-slate-300"
+                      >
+                        {h || '—'}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {viewRows.map((r, idx) => (
+                    <tr
+                      key={`${r.id}-${idx}`}
+                      className="border-b border-slate-100 dark:border-slate-800/60 hover:bg-slate-50 dark:hover:bg-slate-800/40"
+                    >
+                      {rowToCells(r).map((cell, ci) => (
+                        <td
+                          key={ci}
+                          className="px-2 py-1.5 text-slate-700 whitespace-nowrap dark:text-slate-200"
+                        >
+                          {cell === '' ? '—' : cell}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="py-8 text-center text-[12px] text-slate-400">
+                此班次沒有學生摘要資料
+              </p>
+            )}
+          </div>
+
+          <DialogFooter className="flex-row gap-2 px-6 py-4 border-t border-slate-100 dark:border-slate-700">
+            <Button
+              variant="secondary"
+              onClick={closeViewTrip}
+              className="flex-1"
+            >
+              關閉
+            </Button>
+            <Button
+              variant="primary"
+              onClick={handleDownloadPdf}
+              isLoading={viewPdfLoading}
+              disabled={viewRows.length === 0}
+              startIcon={<FileDown width={12} height={12} />}
+              className="flex-1"
+            >
+              下載 PDF
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* ---------------------------------------------------------------- */}
+      {/*  刪除班次 — 二次確認                                            */}
+      {/* ---------------------------------------------------------------- */}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title="刪除此班次？"
+        description={
+          deleteTarget
+            ? `將永久刪除 ${deleteTarget.date} 的班次（${
+                deleteTarget.type === 'morning'
+                  ? '上午班'
+                  : deleteTarget.type === 'afternoon'
+                    ? '下午班'
+                    : deleteTarget.customTypeLabel || '自訂'
+              }），以及該班次的全部出席記錄。此操作無法復原。`
+            : ''
+        }
+        confirmLabel="確認刪除"
+        tone="destructive"
+        onConfirm={handleDeleteTrip}
+        confirming={deleting}
+      />
     </div>
   );
 }

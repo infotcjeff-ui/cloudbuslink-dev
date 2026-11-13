@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { getServerSecrets } from '@/lib/server-secrets';
+import { getServerSecretsAsync } from '@/lib/server-secrets';
 
 /**
  * POST /api/onefleet — 808 GPS (OneFleet) server-side proxy
@@ -77,7 +77,7 @@ export async function POST(req: NextRequest) {
     }
     // 帳密一律用 server-only 密鑰 (經 /api/system-admin/secrets 寫入);
     // 前端 body / header 不再接受帳密, F12 看不到明文。
-    const srv = getServerSecrets();
+    const srv = await getServerSecretsAsync();
     const effAccount = srv.gpsAccount.trim();
     const effPassword = srv.gpsPassword || '';
     const effEndpoint = (endpoint || srv.gpsEndpoint || DEFAULT_ENDPOINT).replace(/\/+$/, '');

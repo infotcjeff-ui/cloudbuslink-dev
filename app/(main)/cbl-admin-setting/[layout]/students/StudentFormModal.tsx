@@ -1084,6 +1084,23 @@ export function StudentFormModal({
                     </NativeSelect>
                   </div>
 
+                  {/* Row 1b: 英文姓名 (選填) — 學生摘要 Student Summary 報表用 */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <LabeledInput
+                        id="student-form-name-en"
+                        label="英文姓名"
+                        value={form.nameEn}
+                        onChange={(v) => setForm((p) => ({ ...p, nameEn: v }))}
+                        placeholder="Chan Tai Man"
+                        icon={<IdCard width={12} height={12} />}
+                      />
+                      <p className="mt-1 text-[10px] text-slate-400">
+                        學生摘要報表的「Student Name」欄; 未填則匯出時顯示中文姓名。
+                      </p>
+                    </div>
+                  </div>
+
                   {/* Row 2: 出生日期 / 電話 (選填) */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
                     <div>

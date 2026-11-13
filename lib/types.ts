@@ -101,6 +101,8 @@ export interface Bus {
 
 export interface Location {
   name: string;
+  /** 英文名稱 (例: 'MTR Lei Tung Station Exit A2') — 學生摘要報表用 */
+  nameEn?: string | null;
   address: string;
   latitude: number;
   longitude: number;
@@ -130,6 +132,8 @@ export interface Student {
    */
   personKey?: string | null;
   name: string;
+  /** 英文姓名 (例: 'Chan Tai Man') — 學生摘要報表用 */
+  nameEn?: string | null;
   classNumber: string;
   phone: string | null;
   photo: string | null;
